@@ -26,6 +26,7 @@ export interface GenerateVideoRequest {
   duration: Duration;
   files: File[];
   sessionId?: string;
+  autoGenImage?: boolean;
 }
 
 export interface VideoGenerationResponse {
@@ -76,4 +77,24 @@ export const MODEL_OPTIONS: ModelOption[] = [
     label: 'Seedance 2.0 Fast',
     description: '精简时长，音视频图均可参考(暂不支持真人入镜)',
   },
+];
+
+// 预设模板
+export interface PresetTemplate {
+  id: string;
+  name: string;
+  nameEn: string;
+  model: ModelId;
+  ratio: AspectRatio;
+  duration: Duration;
+  promptPrefix?: string;
+}
+
+export const DEFAULT_PRESETS: PresetTemplate[] = [
+  { id: 'cinematic-landscape', name: '电影风景', nameEn: 'Cinematic Landscape', model: 'seedance-2.0', ratio: '21:9', duration: 10 },
+  { id: 'social-vertical', name: '社交竖屏', nameEn: 'Social Vertical', model: 'seedance-2.0-fast', ratio: '9:16', duration: 5 },
+  { id: 'product-showcase', name: '产品展示', nameEn: 'Product Showcase', model: 'seedance-2.0', ratio: '16:9', duration: 8 },
+  { id: 'quick-preview', name: '快速预览', nameEn: 'Quick Preview', model: 'seedance-2.0-fast', ratio: '4:3', duration: 4 },
+  { id: 'story-episode', name: '短剧分集', nameEn: 'Story Episode', model: 'seedance-2.0', ratio: '16:9', duration: 15, promptPrefix: '水墨武侠风格，' },
+  { id: 'square-ad', name: '方形广告', nameEn: 'Square Ad', model: 'seedance-2.0-fast', ratio: '1:1', duration: 6 },
 ];
