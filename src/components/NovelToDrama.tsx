@@ -1,9 +1,22 @@
-// 小说转短剧 - 多步骤向导组件（LLM 自动调用版 + 批量视频生成）
+// 小说转短剧 - 多步骤向导组件（LLM 自动调用版 + 批量视频生成 + 草稿箱恢复）
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeftIcon, ArrowRightIcon, BookIcon, CloseIcon, CheckIcon, UserIcon, SparkleIcon } from './Icons';
 
-type Step = 'setup' | 'novel' | 'analyzing' | 'review' | 'copyright' | 'characters' | 'scripting' | 'ready';
+type Step = 'drafts' | 'setup' | 'novel' | 'analyzing' | 'review' | 'copyright' | 'characters' | 'scripting' | 'ready';
+
+// 后端 status → 前端 Step 映射
+const STATUS_TO_STEP: Record<string, Step> = {
+  analyzing: 'novel',        // 分析中/待分析 → 回到输入小说步骤
+  copyright_check: 'review', // 分析完成待确认 → 确认分析
+  copyright: 'review',       // 版权改造中 → 确认分析
+  character_confirm: 'characters', // 角色确认
+  scripting: 'characters',   // 脚本生成中 → 角色确认
+  ready: 'ready',            // 准备就绪
+  batch_generating: 'ready', // 批量生成中
+  batch_done: 'ready',       // 批量完成
+  batch_partial: 'ready',    // 部分完成
+};
 
 interface DramaProject {
   id: string;
@@ -19,6 +32,8 @@ interface DramaProject {
   targetEpisodes: number;
   style: string;
   episodes: EpisodeScript[];
+  createdAt: number;
+  updatedAt?: number;
 }
 
 interface CharacterInfo {
@@ -53,15 +68,27 @@ interface NovelToDramaProps {
   sessionId: string;
 }
 
-const STEPS: Step[] = ['setup', 'novel', 'analyzing', 'review', 'copyright', 'characters', 'scripting', 'ready'];
+const STEPS: Step[] = ['drafts', 'setup', 'novel', 'analyzing', 'review', 'copyright', 'characters', 'scripting', 'ready'];
+
+// 草稿列表项类型
+interface DraftItem {
+  id: string;
+  title: string;
+  status: string;
+  style: string;
+  targetEpisodes: number;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) {
   const { t } = useTranslation();
-  const [step, setStep] = useState<Step>('setup');
+  const [step, setStep] = useState<Step>('drafts');
   const [project, setProject] = useState<DramaProject | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [progressMsg, setProgressMsg] = useState('');
+  const [drafts, setDrafts] = useState<DraftItem[]>([]);
 
   // setup 参数
   const [targetEpisodes, setTargetEpisodes] = useState(20);
@@ -79,6 +106,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
   const stepIndex = STEPS.indexOf(step);
   const stepLabels: Record<Step, string> = {
+    drafts: t('drama.steps.drafts'),
     setup: t('drama.steps.setup'),
     novel: t('drama.steps.novel'),
     analyzing: t('drama.steps.analysis'),
@@ -87,6 +115,83 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
     characters: t('drama.steps.characters'),
     scripting: t('drama.steps.script'),
     ready: t('drama.steps.ready'),
+  };
+
+  // 加载草稿列表
+  const loadDrafts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/drama/list');
+      const data = await res.json();
+      if (data?.projects) {
+        setDrafts(data.projects.map((p: DramaProject) => ({
+          id: p.id,
+          title: p.novel?.title || t('drama.untitledProject'),
+          status: p.status,
+          style: p.style,
+          targetEpisodes: p.targetEpisodes,
+          createdAt: p.createdAt,
+          updatedAt: (p as unknown as Record<string, number>).updatedAt || p.createdAt,
+        })));
+      }
+    } catch { /* ignore */ }
+  }, [t]);
+
+  // 组件挂载时加载草稿
+  useEffect(() => {
+    loadDrafts();
+  }, [loadDrafts]);
+
+  // 恢复草稿项目
+  const handleResumeDraft = async (draftId: string) => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/drama/${draftId}`);
+      const data = await res.json();
+      if (data?.project) {
+        setProject(data.project);
+        // 根据后端 status 映射到前端步骤
+        const targetStep = STATUS_TO_STEP[data.project.status] || 'novel';
+        setStep(targetStep);
+      } else {
+        setError(t('drama.draftLoadFailed'));
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 删除草稿
+  const handleDeleteDraft = async (draftId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await fetch(`/api/drama/${draftId}`, { method: 'DELETE' });
+      setDrafts(prev => prev.filter(d => d.id !== draftId));
+    } catch { /* ignore */ }
+  };
+
+  // 格式化时间
+  const formatTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  };
+
+  // status 中文标签
+  const statusLabel = (status: string): string => {
+    const map: Record<string, string> = {
+      analyzing: t('drama.statusLabels.analyzing'),
+      copyright_check: t('drama.statusLabels.copyrightCheck'),
+      copyright: t('drama.statusLabels.copyright'),
+      character_confirm: t('drama.statusLabels.characterConfirm'),
+      scripting: t('drama.statusLabels.scripting'),
+      ready: t('drama.statusLabels.ready'),
+      batch_generating: t('drama.statusLabels.batchGenerating'),
+      batch_done: t('drama.statusLabels.batchDone'),
+      batch_partial: t('drama.statusLabels.batchPartial'),
+    };
+    return map[status] || status;
   };
 
   // 通用 API 调用
@@ -369,22 +474,27 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
     };
   }, []);
 
-  // 渲染步骤指示器
-  const renderStepIndicator = () => (
-    <div className="flex items-center gap-1 mb-4 overflow-x-auto pb-2">
-      {STEPS.map((s, i) => (
-        <div key={s} className="flex items-center">
-          <div className={`px-2 py-1 rounded-lg text-xs whitespace-nowrap ${
-            i === stepIndex ? 'bg-purple-600 text-white' :
-            i < stepIndex ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-500'
-          }`}>
-            {i + 1}. {stepLabels[s]}
+  // 渲染步骤指示器（drafts 步骤不显示）
+  const renderStepIndicator = () => {
+    if (step === 'drafts') return null;
+    const displaySteps = STEPS.filter(s => s !== 'drafts');
+    const displayIndex = displaySteps.indexOf(step);
+    return (
+      <div className="flex items-center gap-1 mb-4 overflow-x-auto pb-2">
+        {displaySteps.map((s, i) => (
+          <div key={s} className="flex items-center">
+            <div className={`px-2 py-1 rounded-lg text-xs whitespace-nowrap ${
+              i === displayIndex ? 'bg-purple-600 text-white' :
+              i < displayIndex ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-500'
+            }`}>
+              {i + 1}. {stepLabels[s]}
+            </div>
+            {i < displaySteps.length - 1 && <ArrowRightIcon className="w-3 h-3 text-gray-600 mx-0.5 flex-shrink-0" />}
           </div>
-          {i < STEPS.length - 1 && <ArrowRightIcon className="w-3 h-3 text-gray-600 mx-0.5 flex-shrink-0" />}
-        </div>
-      ))}
-    </div>
-  );
+        ))}
+      </div>
+    );
+  };
 
   // 加载中状态
   const renderLoading = (msg: string) => (
@@ -420,6 +530,65 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
         )}
 
         <div className="flex-1 overflow-y-auto custom-scrollbar">
+          {/* Step: drafts - 草稿箱 */}
+          {step === 'drafts' && (
+            <div className="space-y-4">
+              {drafts.length > 0 && (
+                <>
+                  <p className="text-sm text-gray-400">{t('drama.draftsHint')}</p>
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
+                    {drafts.map(draft => (
+                      <div key={draft.id} onClick={() => handleResumeDraft(draft.id)}
+                        className="bg-[#161824] rounded-xl p-3 border border-gray-800 hover:border-purple-500/50 cursor-pointer transition-all group">
+                        <div className="flex items-center justify-between">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm text-gray-200 truncate">{draft.title}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-600/30 text-purple-300 flex-shrink-0">
+                                {statusLabel(draft.status)}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-3 mt-1 text-xs text-gray-500">
+                              <span>{draft.style}</span>
+                              <span>{draft.targetEpisodes} {t('drama.episodeUnit')}</span>
+                              <span>{formatTime(draft.updatedAt || draft.createdAt)}</span>
+                            </div>
+                          </div>
+                          <button onClick={(e) => handleDeleteDraft(draft.id, e)}
+                            className="p-1 rounded hover:bg-red-600/20 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                            title={t('common.delete')}>
+                            <CloseIcon className="w-3.5 h-3.5 text-gray-500 hover:text-red-400" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="border-t border-gray-800 pt-3">
+                    <button onClick={() => setStep('setup')}
+                      className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                      <SparkleIcon className="w-4 h-4" />{t('drama.createNew')}
+                    </button>
+                  </div>
+                </>
+              )}
+              {drafts.length === 0 && !loading && (
+                <div className="text-center py-8">
+                  <BookIcon className="w-10 h-10 text-gray-700 mx-auto mb-3" />
+                  <p className="text-sm text-gray-500 mb-4">{t('drama.noDrafts')}</p>
+                  <button onClick={() => setStep('setup')}
+                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all inline-flex items-center gap-2">
+                    <SparkleIcon className="w-4 h-4" />{t('drama.createProject')}
+                  </button>
+                </div>
+              )}
+              {loading && (
+                <div className="flex items-center justify-center py-8">
+                  <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Step: setup */}
           {step === 'setup' && (
             <div className="space-y-4">
@@ -531,10 +700,11 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
           {/* Step: copyright (LLM 自动处理中) */}
           {step === 'copyright' && loading && renderLoading(progressMsg || t('drama.copyrightProcessing'))}
 
-          {/* Step: characters */}
+          {/* Step: characters - 显示所有角色，按主次分组 */}
           {step === 'characters' && project && (
             <div className="space-y-3">
               <p className="text-sm text-gray-400">{t('drama.confirmCharHint')}</p>
+              {/* 主角和配角 - 需要生成角色图并确认 */}
               {project.novel.characters.filter(c => c.role !== 'minor').map((char) => (
                 <div key={char.id} className="bg-[#161824] rounded-xl p-3 border border-gray-800">
                   <div className="flex items-center justify-between mb-2">
@@ -576,6 +746,26 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                   )}
                 </div>
               ))}
+              {/* 龙套角色 - 折叠显示，无需生成图片 */}
+              {project.novel.characters.filter(c => c.role === 'minor').length > 0 && (
+                <details className="bg-[#161824] rounded-xl border border-gray-800">
+                  <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300 transition-colors">
+                    {t('drama.minorChars', { count: project.novel.characters.filter(c => c.role === 'minor').length })}
+                  </summary>
+                  <div className="px-3 pb-2 space-y-1.5">
+                    {project.novel.characters.filter(c => c.role === 'minor').map(char => (
+                      <div key={char.id} className="flex items-center gap-2 text-xs py-1">
+                        <UserIcon className="w-3 h-3 text-gray-600 flex-shrink-0" />
+                        <span className="text-gray-400">{char.newName}</span>
+                        {char.originalName !== char.newName && (
+                          <span className="text-gray-700">← {char.originalName}</span>
+                        )}
+                        <span className="text-gray-600 truncate flex-1">{char.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {project.novel.characters.filter(c => c.role !== 'minor').every(c => c.confirmed) && (
                 <button onClick={handleGenerateScript} disabled={loading}
                   className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold transition-all flex items-center justify-center gap-2">
@@ -673,11 +863,11 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
         </div>
 
         {/* 底部导航 */}
-        {stepIndex > 0 && step !== 'ready' && !loading && (
+        {stepIndex > 0 && step !== 'drafts' && step !== 'ready' && !loading && (
           <div className="mt-4 pt-3 border-t border-gray-800">
             <button onClick={() => {
               const prevSteps: Record<Step, Step> = {
-                setup: 'setup', novel: 'setup', analyzing: 'novel', review: 'novel',
+                drafts: 'drafts', setup: 'drafts', novel: 'setup', analyzing: 'novel', review: 'novel',
                 copyright: 'review', characters: 'review', scripting: 'characters', ready: 'ready',
               };
               setStep(prevSteps[step]);

@@ -384,13 +384,14 @@ app.post('/api/drama/:id/analyze', novelUpload.single('novel'), async (req, res)
   }
   if (!novelText) return res.status(400).json({ error: '请提供小说文本或上传 .txt 文件' });
 
-  const project = getProject(req.params.id);
+  const projectId = req.params.id as string;
+  const project = getProject(projectId);
   if (!project) return res.status(404).json({ error: '项目不存在' });
 
-  const progressTaskId = `analyze_${req.params.id}`;
+  const progressTaskId = `analyze_${projectId}`;
   // 短文本（< 5万字）同步处理，长文本异步处理
   if (novelText.length < 50000) {
-    const result = await analyzeNovel(req.params.id, novelText);
+    const result = await analyzeNovel(projectId, novelText);
     if (!result.success) return res.status(500).json({ error: result.error });
     res.json({ project: result.project });
   } else {
@@ -398,7 +399,7 @@ app.post('/api/drama/:id/analyze', novelUpload.single('novel'), async (req, res)
     res.json({ async: true, progressTaskId, message: `小说 ${(novelText.length / 10000).toFixed(1)} 万字，正在后台分析...` });
 
     // 后台执行（novelText 传入后由 analyzeNovel 内部处理，不再长期持有引用）
-    analyzeNovel(req.params.id, novelText, (step, detail) => {
+    analyzeNovel(projectId, novelText, (step, detail) => {
       const task: TaskInfo = {
         id: progressTaskId, status: 'processing', progress: `[${step}] ${detail}`,
         startTime: Date.now(), result: null, error: null,
@@ -436,7 +437,7 @@ app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   if (!character) return res.status(404).json({ error: '角色不存在' });
 
   try {
-    const images = await generateCharacterImages(character.newName, character.description, project.style, authToken);
+    const images = await generateCharacterImages(character.newName, character.description, project.style, authToken, character.visualPrompt);
     updateCharacterImages(req.params.id, characterId, images.map(img => img.imageUrl));
     res.json({ characterId, images, imageUrls: images.map(img => img.imageUrl) });
   } catch (err) {

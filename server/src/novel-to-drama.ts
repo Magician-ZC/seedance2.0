@@ -74,6 +74,7 @@ export interface DramaProject {
   status: string;
   episodes: EpisodeScript[];
   createdAt: number;
+  updatedAt?: number;
 }
 
 // ============================================================
@@ -91,6 +92,7 @@ function rowToProject(row: DramaProjectRow): DramaProject {
     status: row.status,
     episodes: JSON.parse(row.episodes_data || '[]'),
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -578,12 +580,14 @@ async function analyzeByChapters(
   const refinePrompt = `你是一位专业编剧。以下是对一部长篇小说逐章分析后的合并结果。
 请精炼和整合这些信息：
 1. 写一个完整的 300 字以内故事梗概（不是片段拼接）
-2. 确认每个角色的主次关系（protagonist/supporting/minor），去除重复角色
-3. 合并重复的场景
+2. 确认每个角色的主次关系（protagonist/supporting/minor），合并明显重复的角色（同一人的不同称呼），但不要删除有独立剧情作用的角色
+3. 合并明显重复的场景（同一地点的不同描述），保留所有有独立功能的场景
 4. 按时间线重新排列情节点
 5. 提炼核心主题
-6. 为每个角色和场景补充英文 visualPrompt（如果缺失）
+6. 为每个角色和场景补充英文 visualPrompt（如果缺失），visualPrompt 必须是纯英文
 7. 给出一个合适的故事标题
+
+重要：保留所有有名字的角色，即使只出现过一两次。只合并同一个人的不同称呼/别名，不要因为角色不重要就删除。
 
 返回 JSON：
 {
