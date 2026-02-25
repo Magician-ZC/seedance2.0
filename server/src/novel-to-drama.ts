@@ -538,9 +538,19 @@ async function analyzeByChapters(
     const batchText = batch.map(ch => `=== ${ch.title} ===\n${ch.content}`).join('\n\n');
     const userPrompt = `以下是小说的 ${chapterRange}（共 ${chapters.length} 章中的第 ${bi + 1} 批）。请提取所有实体信息。\n\n${batchText}`;
 
-    const startTime = Date.now();
-    const result = await chatCompletionJSON<Record<string, unknown>>(CHAPTER_EXTRACT_PROMPT, userPrompt);
-    logLLMCall({ projectId, step: `chapter_extract_${bi + 1}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+    // 带重试的 LLM 调用（最多重试 2 次）
+    let result: { success: boolean; data?: Record<string, unknown>; error?: string } = { success: false };
+    for (let retry = 0; retry < 3; retry++) {
+      if (retry > 0) {
+        console.log(`[drama] 批次 ${bi + 1}/${batches.length} 第 ${retry + 1} 次重试...`);
+        progress('章节分析', `批次 ${bi + 1}/${batches.length} 重试中 (${retry + 1}/3)...`);
+        await new Promise(r => setTimeout(r, 3000 * retry)); // 递增等待
+      }
+      const startTime = Date.now();
+      result = await chatCompletionJSON<Record<string, unknown>>(CHAPTER_EXTRACT_PROMPT, userPrompt);
+      logLLMCall({ projectId, step: `chapter_extract_${bi + 1}${retry > 0 ? `_retry${retry}` : ''}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+      if (result.success) break;
+    }
 
     if (result.success && result.data) {
       // 增量合并每章的实体

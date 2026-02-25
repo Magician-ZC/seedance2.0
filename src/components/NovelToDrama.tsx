@@ -195,16 +195,28 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
     }
   };
 
-  // 文件上传处理（支持 .txt 文件）
+  // 文件上传处理（支持 .txt 文件，自动检测编码）
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      if (text) setNovelText(text);
+      const buffer = ev.target?.result as ArrayBuffer;
+      if (!buffer) return;
+      // 先尝试 UTF-8，如果出现替换字符则回退到 GBK
+      const utf8Text = new TextDecoder('utf-8').decode(buffer);
+      if (utf8Text.includes('\uFFFD')) {
+        try {
+          const gbkText = new TextDecoder('gbk').decode(buffer);
+          setNovelText(gbkText);
+        } catch {
+          setNovelText(utf8Text); // GBK 解码失败则仍用 UTF-8
+        }
+      } else {
+        setNovelText(utf8Text);
+      }
     };
-    reader.readAsText(file, 'utf-8');
+    reader.readAsArrayBuffer(file);
     e.target.value = ''; // 允许重复选择同一文件
   };
 

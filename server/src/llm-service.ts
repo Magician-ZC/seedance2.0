@@ -211,7 +211,7 @@ export async function chatCompletion(
     const response = await undiciFetch(endpoint, {
       method: 'POST', headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300000), // 5 分钟超时
+      signal: AbortSignal.timeout(600000), // 10 分钟超时（长文本分析可能耗时较长）
       dispatcher: getDispatcher(),
     });
 
