@@ -2,6 +2,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeftIcon, ArrowRightIcon, BookIcon, CloseIcon, CheckIcon, UserIcon, SparkleIcon } from './Icons';
+import { loadSettings } from './SettingsModal';
 
 type Step = 'drafts' | 'setup' | 'novel' | 'analyzing' | 'review' | 'copyright' | 'characters' | 'scripting' | 'ready';
 
@@ -44,6 +45,7 @@ interface CharacterInfo {
   description: string;
   imageUrls: string[];
   confirmed: boolean;
+  refImageUrl?: string; // 用户上传的参考图
 }
 
 interface LocationInfo {
@@ -51,6 +53,21 @@ interface LocationInfo {
   originalName: string;
   newName: string;
   description: string;
+  imageUrl?: string;
+}
+
+interface Shot {
+  index: number;
+  startTime: number;
+  endTime: number;
+  prompt: string;
+  characterRefs: string[];
+  locationRefs: string[];
+  transition?: string;
+  refImageUrls?: string[];
+  videoUrl?: string;
+  videoStatus?: 'pending' | 'generating' | 'done' | 'error';
+  videoError?: string;
 }
 
 interface EpisodeScript {
@@ -58,9 +75,12 @@ interface EpisodeScript {
   title: string;
   act: string;
   prompt: string;
+  shots: Shot[];
+  refImageUrls?: string[];
   videoUrl?: string;
   videoStatus?: 'pending' | 'generating' | 'done' | 'error';
   videoError?: string;
+  score?: number;
 }
 
 interface NovelToDramaProps {
@@ -103,6 +123,40 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   const [batchGenerating, setBatchGenerating] = useState(false);
   const [batchProgress, setBatchProgress] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
+
+  // 角色图生成进度: { [characterId]: { done, total, generating } }
+  const [charImageProgress, setCharImageProgress] = useState<Record<string, { done: number; total: number; generating: boolean }>>({});
+  const charImageProgressRef = useRef(charImageProgress);
+  // 同步 ref
+  useEffect(() => { charImageProgressRef.current = charImageProgress; }, [charImageProgress]);
+  // 角色图勾选状态: { [characterId]: Set<imageUrl> }
+  const [selectedImages, setSelectedImages] = useState<Record<string, Set<string>>>({});
+  // 图片预览弹窗
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  // WebSocket 连接池（角色图进度）
+  const charWsRefs = useRef<Map<string, WebSocket>>(new Map());
+  // 场景图生成状态: { [locationId]: generating }
+  const [locImageGenerating, setLocImageGenerating] = useState<Record<string, boolean>>({});
+  const locImageGeneratingRef = useRef(locImageGenerating);
+  useEffect(() => { locImageGeneratingRef.current = locImageGenerating; }, [locImageGenerating]);
+  // 脚本编辑状态: { [episodeNumber]: editedPrompt }
+  const [editingEpisodes, setEditingEpisodes] = useState<Record<number, string>>({});
+  // 创意优化状态
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizeProgress, setOptimizeProgress] = useState('');
+  // 单集优化中: { [episodeNumber]: true }
+  const [optimizingEp, setOptimizingEp] = useState<Record<number, boolean>>({});
+  // 参考图生成状态
+  const [generatingRefImages, setGeneratingRefImages] = useState(false);
+  const [refImageProgress, setRefImageProgress] = useState('');
+  // 批量角色图生成队列状态
+  const [batchCharImageRunning, setBatchCharImageRunning] = useState(false);
+  const batchCharImageAbort = useRef(false);
+  // 角色参考图上传状态: { [characterId]: uploading }
+  const [charRefUploading, setCharRefUploading] = useState<Record<string, boolean>>({});
+  // 批量场景图生成队列状态
+  const [batchLocImageRunning, setBatchLocImageRunning] = useState(false);
+  const batchLocImageAbort = useRef(false);
 
   const stepIndex = STEPS.indexOf(step);
   const stepLabels: Record<Step, string> = {
@@ -339,52 +393,503 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
     }
   };
 
-  // Step 4: 生成角色图
+  // Step 4: 生成角色图（异步+WebSocket进度）
   const handleGenerateCharImage = async (characterId: string) => {
     if (!project) return;
-    setLoading(true);
-    setError('');
+
+    // 检查并发限制
+    const { maxConcurrentChars } = loadSettings();
+    const currentGenerating = Object.values(charImageProgress).filter(p => p.generating).length;
+    if (currentGenerating >= maxConcurrentChars) {
+      setError(t('drama.maxConcurrentCharsHint') + ` (${maxConcurrentChars})`);
+      return;
+    }
+
+    const taskId = `charimg_${project.id}_${characterId}`;
+
+    // 标记为生成中
+    setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 0, total: 3, generating: true } }));
+
+    // 连接 WebSocket 订阅进度
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+    charWsRefs.current.set(characterId, ws);
+
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId }));
+    ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.taskId !== taskId) return;
+        const progressData = msg.data?.progress ? JSON.parse(msg.data.progress) : {};
+
+        if (msg.type === 'task_progress') {
+          setCharImageProgress(prev => ({
+            ...prev, [characterId]: { done: progressData.done || 0, total: progressData.total || 3, generating: true },
+          }));
+        } else if (msg.type === 'task_done') {
+          setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 3, total: 3, generating: false } }));
+          ws.close();
+          charWsRefs.current.delete(characterId);
+          // 刷新项目获取最新图片
+          const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
+          if (projData?.project) setProject(projData.project);
+        } else if (msg.type === 'task_error') {
+          setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 0, total: 3, generating: false } }));
+          setError(msg.data?.error || t('drama.genImageFailed'));
+          ws.close();
+          charWsRefs.current.delete(characterId);
+        }
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => {
+      // WebSocket 失败时降级为轮询
+      setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 0, total: 3, generating: true } }));
+      const poll = setInterval(async () => {
+        const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json()).catch(() => null);
+        if (projData?.project) {
+          const char = projData.project.novel.characters.find((c: CharacterInfo) => c.id === characterId);
+          if (char && char.imageUrls.length > 0) {
+            clearInterval(poll);
+            setProject(projData.project);
+            setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 3, total: 3, generating: false } }));
+          }
+        }
+      }, 5000);
+    };
+
+    // 发起生图请求
     try {
-      const res = await fetch(`/api/drama/${project.id}/generate-character-images`, {
+      await fetch(`/api/drama/${project.id}/generate-character-images`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId, characterId }),
       });
+    } catch (err) {
+      setError((err as Error).message);
+      setCharImageProgress(prev => ({ ...prev, [characterId]: { done: 0, total: 3, generating: false } }));
+    }
+  };
+
+  // 一键批量生成所有未确认角色图（队列处理，并发数=maxConcurrentChars）
+  const handleBatchCharImages = async () => {
+    if (!project || batchCharImageRunning) return;
+    batchCharImageAbort.current = false;
+    setBatchCharImageRunning(true);
+
+    const { maxConcurrentChars } = loadSettings();
+    // 收集所有需要生图的角色（未确认且非龙套）
+    const pendingChars = project.novel.characters.filter(c => c.role !== 'minor' && !c.confirmed);
+    if (pendingChars.length === 0) { setBatchCharImageRunning(false); return; }
+
+    const queue = [...pendingChars.map(c => c.id)];
+    const active = new Set<string>();
+
+    const startOne = (charId: string) => {
+      active.add(charId);
+      handleGenerateCharImage(charId);
+    };
+
+    // 启动初始批次
+    const initialBatch = queue.splice(0, maxConcurrentChars);
+    for (const charId of initialBatch) startOne(charId);
+
+    // 监听进度变化，完成一个补一个
+    const checkInterval = setInterval(() => {
+      if (batchCharImageAbort.current) {
+        clearInterval(checkInterval);
+        setBatchCharImageRunning(false);
+        return;
+      }
+      // 检查哪些已完成（不再 generating）
+      const currentProgress = charImageProgressRef.current;
+      for (const charId of active) {
+        const p = currentProgress[charId];
+        if (p && !p.generating) {
+          active.delete(charId);
+          // 补充下一个
+          if (queue.length > 0) {
+            const next = queue.shift()!;
+            startOne(next);
+          }
+        }
+      }
+      // 全部完成
+      if (active.size === 0 && queue.length === 0) {
+        clearInterval(checkInterval);
+        setBatchCharImageRunning(false);
+      }
+    }, 1000);
+  };
+
+  // 上传角色参考图
+  const handleUploadCharRefImage = async (characterId: string, file: File) => {
+    if (!project) return;
+    setCharRefUploading(prev => ({ ...prev, [characterId]: true }));
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('characterId', characterId);
+      const res = await fetch(`/api/drama/${project.id}/upload-char-ref-image`, {
+        method: 'POST', body: formData,
+      });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      // 刷新项目
-      const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
+      if (!res.ok) throw new Error(data.error || '上传失败');
+      // 刷新项目数据
+      const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
       if (projData?.project) setProject(projData.project);
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setLoading(false);
+      setCharRefUploading(prev => ({ ...prev, [characterId]: false }));
     }
+  };
+
+  // 删除角色参考图
+  const handleRemoveCharRefImage = async (characterId: string) => {
+    if (!project) return;
+    try {
+      await fetch(`/api/drama/${project.id}/remove-char-ref-image`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ characterId }),
+      });
+      const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
+      if (projData?.project) setProject(projData.project);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  // 生成场景图
+  const handleGenerateLocImage = async (locationId: string) => {
+    if (!project) return;
+    setLocImageGenerating(prev => ({ ...prev, [locationId]: true }));
+
+    const taskId = `locimg_${project.id}_${locationId}`;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+    charWsRefs.current.set(`loc_${locationId}`, ws);
+
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId }));
+    ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.taskId !== taskId) return;
+        if (msg.type === 'task_done') {
+          ws.close();
+          charWsRefs.current.delete(`loc_${locationId}`);
+          setLocImageGenerating(prev => ({ ...prev, [locationId]: false }));
+          const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
+          if (projData?.project) setProject(projData.project);
+        } else if (msg.type === 'task_error') {
+          ws.close();
+          charWsRefs.current.delete(`loc_${locationId}`);
+          setLocImageGenerating(prev => ({ ...prev, [locationId]: false }));
+          setError(msg.data?.error || t('drama.genImageFailed'));
+        }
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => {
+      setLocImageGenerating(prev => ({ ...prev, [locationId]: false }));
+    };
+
+    try {
+      await fetch(`/api/drama/${project.id}/generate-location-image`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, locationId }),
+      });
+    } catch (err) {
+      setError((err as Error).message);
+      setLocImageGenerating(prev => ({ ...prev, [locationId]: false }));
+    }
+  };
+
+  // 一键批量生成所有场景图（队列处理，并发数=maxConcurrentChars）
+  const handleBatchLocImages = async () => {
+    if (!project || batchLocImageRunning) return;
+    batchLocImageAbort.current = false;
+    setBatchLocImageRunning(true);
+
+    const { maxConcurrentChars } = loadSettings();
+    // 收集所有没有图片的场景
+    const pendingLocs = project.novel.locations.filter(l => !l.imageUrl);
+    if (pendingLocs.length === 0) { setBatchLocImageRunning(false); return; }
+
+    const queue = [...pendingLocs.map(l => l.id)];
+    const active = new Set<string>();
+
+    const startOne = (locId: string) => {
+      active.add(locId);
+      handleGenerateLocImage(locId);
+    };
+
+    const initialBatch = queue.splice(0, maxConcurrentChars);
+    for (const locId of initialBatch) startOne(locId);
+
+    const checkInterval = setInterval(() => {
+      if (batchLocImageAbort.current) {
+        clearInterval(checkInterval);
+        setBatchLocImageRunning(false);
+        return;
+      }
+      const current = locImageGeneratingRef.current;
+      for (const locId of active) {
+        if (!current[locId]) {
+          active.delete(locId);
+          if (queue.length > 0) startOne(queue.shift()!);
+        }
+      }
+      if (active.size === 0 && queue.length === 0) {
+        clearInterval(checkInterval);
+        setBatchLocImageRunning(false);
+      }
+    }, 1000);
+  };
+
+  // 切换图片勾选
+  const toggleImageSelection = (characterId: string, imageUrl: string) => {
+    setSelectedImages(prev => {
+      const current = new Set(prev[characterId] || []);
+      if (current.has(imageUrl)) current.delete(imageUrl);
+      else current.add(imageUrl);
+      return { ...prev, [characterId]: current };
+    });
   };
 
   const handleConfirmCharacter = async (characterId: string) => {
     if (!project) return;
+    const selected = selectedImages[characterId];
     const char = project.novel.characters.find(c => c.id === characterId);
+    // 如果有勾选则用勾选的，否则用全部
+    const urls = selected && selected.size > 0 ? Array.from(selected) : char?.imageUrls || [];
     const data = await apiCall(`/api/drama/${project.id}/confirm-character`, 'POST', {
-      characterId, selectedImageUrls: char?.imageUrls,
+      characterId, selectedImageUrls: urls,
     });
     if (data) {
       const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
       if (projData?.project) {
         setProject(projData.project);
-        if (data.allConfirmed) setStep('scripting');
+        // 不自动跳步骤，让用户在 characters 步骤手动点击"生成脚本"
       }
     }
   };
 
-  // Step 5: 生成分镜脚本 → 后端自动调用 LLM
+  // Step 5: 生成分镜脚本 → 异步+WebSocket进度
   const handleGenerateScript = async () => {
     if (!project) return;
+    setStep('scripting');
+    setLoading(true);
     setProgressMsg(t('drama.scriptGenerating'));
-    const data = await apiCall(`/api/drama/${project.id}/generate-script`, 'POST', {});
-    if (data?.project) {
-      setProject(data.project);
-      setStep('ready');
+    setError('');
+
+    try {
+      const res = await fetch(`/api/drama/${project.id}/generate-script`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error); setStep('characters'); setLoading(false); return; }
+
+      if (data.async && data.taskId) {
+        // 订阅 WebSocket 进度
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+        wsRef.current = ws;
+        ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId: data.taskId }));
+        ws.onmessage = async (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.taskId !== data.taskId) return;
+            if (msg.type === 'task_progress') {
+              setProgressMsg(msg.data?.progress || t('drama.scriptGenerating'));
+            } else if (msg.type === 'task_done') {
+              ws.close();
+              const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
+              if (projData?.project) { setProject(projData.project); setStep('ready'); }
+              setLoading(false);
+            } else if (msg.type === 'task_error') {
+              ws.close();
+              setError(msg.data?.error || t('drama.scriptFailed'));
+              setStep('characters');
+              setLoading(false);
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onerror = () => {
+          // 降级轮询
+          const poll = setInterval(async () => {
+            const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json()).catch(() => null);
+            if (projData?.project?.status === 'ready') {
+              clearInterval(poll);
+              setProject(projData.project);
+              setStep('ready');
+              setLoading(false);
+            }
+          }, 5000);
+        };
+      } else if (data.project) {
+        setProject(data.project);
+        setStep('ready');
+        setLoading(false);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      setStep('characters');
+      setLoading(false);
+    }
+  };
+
+  // Step 5.5: 创意优化脚本（异步+WebSocket进度）
+  const handleOptimizeScripts = async () => {
+    if (!project) return;
+    setOptimizing(true);
+    setOptimizeProgress(t('drama.optimizeStarting'));
+    setError('');
+
+    try {
+      const res = await fetch(`/api/drama/${project.id}/optimize-scripts`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error); setOptimizing(false); return; }
+
+      if (data.async && data.taskId) {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+        wsRef.current = ws;
+        ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId: data.taskId }));
+        ws.onmessage = async (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.taskId !== data.taskId) return;
+            if (msg.type === 'task_progress') {
+              setOptimizeProgress(msg.data?.progress || '');
+            } else if (msg.type === 'task_done') {
+              ws.close();
+              const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
+              if (projData?.project) setProject(projData.project);
+              setOptimizing(false);
+              setOptimizeProgress('');
+            } else if (msg.type === 'task_error') {
+              ws.close();
+              setError(msg.data?.error || t('drama.optimizeFailed'));
+              setOptimizing(false);
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onerror = () => {
+          setOptimizing(false);
+          setError(t('drama.optimizeFailed'));
+        };
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      setOptimizing(false);
+    }
+  };
+
+  // 单集创意优化
+  const handleOptimizeSingle = async (episodeNumber: number) => {
+    if (!project) return;
+    setOptimizingEp(prev => ({ ...prev, [episodeNumber]: true }));
+    setError('');
+    try {
+      const res = await fetch(`/api/drama/${project.id}/optimize-single`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ episodeNumber }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '优化失败');
+      if (data.project) setProject(data.project);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setOptimizingEp(prev => ({ ...prev, [episodeNumber]: false }));
+    }
+  };
+
+  // 单集参考图重新生成
+  const [regenRefEp, setRegenRefEp] = useState<Record<number, boolean>>({});
+
+  // 单集分镜重新生成
+  const [regenShotsEp, setRegenShotsEp] = useState<Record<number, boolean>>({});
+  const handleRegenShots = async (episodeNumber: number) => {
+    if (!project) return;
+    setRegenShotsEp(prev => ({ ...prev, [episodeNumber]: true }));
+    setError('');
+    try {
+      const data = await apiCall(`/api/drama/${project.id}/regenerate-shots`, 'POST', { episodeNumber });
+      if (data?.project) setProject(data.project);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRegenShotsEp(prev => ({ ...prev, [episodeNumber]: false }));
+    }
+  };
+  const handleRegenEpRefImages = async (episodeNumber: number) => {
+    if (!project) return;
+    setRegenRefEp(prev => ({ ...prev, [episodeNumber]: true }));
+    setError('');
+    try {
+      const res = await fetch(`/api/drama/${project.id}/regenerate-ep-ref-images`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ episodeNumber, sessionId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '参考图生成失败');
+      if (data.project) setProject(data.project);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRegenRefEp(prev => ({ ...prev, [episodeNumber]: false }));
+    }
+  };
+
+  // Step 5.6: 为每集生成专属参考图（异步+WebSocket进度）
+  const handleGenerateRefImages = async () => {
+    if (!project) return;
+    setGeneratingRefImages(true);
+    setRefImageProgress(t('drama.refImageStarting'));
+    setError('');
+
+    try {
+      const res = await fetch(`/api/drama/${project.id}/generate-ref-images`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error); setGeneratingRefImages(false); return; }
+
+      if (data.async && data.taskId) {
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+        wsRef.current = ws;
+        ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId: data.taskId }));
+        ws.onmessage = async (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.taskId !== data.taskId) return;
+            if (msg.type === 'task_progress') {
+              setRefImageProgress(msg.data?.progress || '');
+            } else if (msg.type === 'task_done') {
+              ws.close();
+              const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
+              if (projData?.project) setProject(projData.project);
+              setGeneratingRefImages(false);
+              setRefImageProgress('');
+            } else if (msg.type === 'task_error') {
+              ws.close();
+              setError(msg.data?.error || t('drama.refImageFailed'));
+              setGeneratingRefImages(false);
+            }
+          } catch { /* ignore */ }
+        };
+        ws.onerror = () => {
+          setGeneratingRefImages(false);
+          setError(t('drama.refImageFailed'));
+        };
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      setGeneratingRefImages(false);
     }
   };
 
@@ -467,22 +972,33 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   // 清理 WebSocket
   useEffect(() => {
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+      for (const ws of charWsRefs.current.values()) ws.close();
+      charWsRefs.current.clear();
     };
   }, []);
 
   // 渲染步骤指示器（drafts 步骤不显示）
+  // 步骤指示器容器 ref（用于滚轮横向滚动）
+  const stepBarRef = useRef<HTMLDivElement>(null);
+
   const renderStepIndicator = () => {
     if (step === 'drafts') return null;
     const displaySteps = STEPS.filter(s => s !== 'drafts');
     const displayIndex = displaySteps.indexOf(step);
     return (
-      <div className="flex items-center gap-1 mb-4 overflow-x-auto pb-2">
+      <div ref={stepBarRef} className="flex items-center gap-1 mb-4 overflow-x-auto pb-2"
+        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+        onWheel={e => {
+          // 鼠标滚轮转为横向滚动
+          if (stepBarRef.current && e.deltaY !== 0) {
+            e.preventDefault();
+            stepBarRef.current.scrollLeft += e.deltaY;
+          }
+        }}>
         {displaySteps.map((s, i) => (
-          <div key={s} className="flex items-center">
+          <div key={s} className="flex items-center"
+            ref={el => { if (i === displayIndex && el) el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' }); }}>
             <div className={`px-2 py-1 rounded-lg text-xs whitespace-nowrap ${
               i === displayIndex ? 'bg-purple-600 text-white' :
               i < displayIndex ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-500'
@@ -508,7 +1024,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-[#1c1f2e] border border-gray-800 rounded-3xl p-6 max-w-3xl w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col">
+      <div className="relative bg-[#1c1f2e] border border-gray-800 rounded-3xl p-6 max-w-3xl w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
@@ -529,7 +1045,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar">
+        <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
           {/* Step: drafts - 草稿箱 */}
           {step === 'drafts' && (
             <div className="space-y-4">
@@ -600,7 +1116,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 </div>
                 <div>
                   <label className="text-xs text-gray-400 block mb-1">{t('drama.episodeDuration')}</label>
-                  <input type="number" value={episodeDuration} onChange={(e) => setEpisodeDuration(Number(e.target.value))} min={5} max={60}
+                  <input type="number" value={episodeDuration} onChange={(e) => setEpisodeDuration(Number(e.target.value))} min={5} max={300}
                     className="w-full bg-[#161824] border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-purple-500" />
                 </div>
                 <div>
@@ -703,9 +1219,41 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
           {/* Step: characters - 显示所有角色，按主次分组 */}
           {step === 'characters' && project && (
             <div className="space-y-3">
-              <p className="text-sm text-gray-400">{t('drama.confirmCharHint')}</p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm text-gray-400">{t('drama.confirmCharHint')}</p>
+                <div className="flex gap-1.5 flex-shrink-0">
+                  {/* 一键批量生图 */}
+                  {!batchCharImageRunning && project.novel.characters.some(c => c.role !== 'minor' && !c.confirmed) && (
+                    <button onClick={handleBatchCharImages}
+                      className="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors whitespace-nowrap">
+                      {t('drama.batchGenImages') || '批量生图'}
+                    </button>
+                  )}
+                  {batchCharImageRunning && (
+                    <button onClick={() => { batchCharImageAbort.current = true; }}
+                      className="text-[10px] px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white transition-colors whitespace-nowrap">
+                      {t('drama.stopBatch') || '停止批量'}
+                    </button>
+                  )}
+                  <button onClick={async () => {
+                    setLoading(true);
+                    setError('');
+                    const data = await apiCall(`/api/drama/${project.id}/refresh-prompts`, 'POST');
+                    if (data?.project) setProject(data.project);
+                    setLoading(false);
+                  }}
+                    disabled={loading}
+                    className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-400 transition-colors whitespace-nowrap">
+                    {loading ? '...' : t('drama.refreshPrompts')}
+                  </button>
+                </div>
+              </div>
               {/* 主角和配角 - 需要生成角色图并确认 */}
-              {project.novel.characters.filter(c => c.role !== 'minor').map((char) => (
+              {project.novel.characters.filter(c => c.role !== 'minor').map((char) => {
+                const progress = charImageProgress[char.id];
+                const isGenerating = progress?.generating;
+                const selected = selectedImages[char.id];
+                return (
                 <div key={char.id} className="bg-[#161824] rounded-xl p-3 border border-gray-800">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
@@ -720,32 +1268,171 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                       <span className="text-xs text-green-400 flex items-center gap-1"><CheckIcon className="w-3 h-3" />{t('drama.confirmed')}</span>
                     ) : (
                       <div className="flex gap-2">
-                        {char.imageUrls.length === 0 && (
-                          <button onClick={() => handleGenerateCharImage(char.id)} disabled={loading}
-                            className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 text-white transition-colors">
+                        {char.imageUrls.length === 0 && !isGenerating && (
+                          <button onClick={() => handleGenerateCharImage(char.id)}
+                            className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
                             {t('drama.genImage')}
                           </button>
                         )}
-                        {char.imageUrls.length > 0 && (
-                          <button onClick={() => handleConfirmCharacter(char.id)} disabled={loading}
-                            className="text-xs px-2 py-1 rounded bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                            {t('common.confirm')}
-                          </button>
+                        {char.imageUrls.length > 0 && !isGenerating && (
+                          <>
+                            <button onClick={() => handleGenerateCharImage(char.id)}
+                              className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                              {t('drama.genImage')}
+                            </button>
+                            <button onClick={() => handleConfirmCharacter(char.id)} disabled={loading}
+                              className="text-xs px-2 py-1 rounded bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
+                              {t('common.confirm')}{selected && selected.size > 0 ? ` (${selected.size})` : ''}
+                            </button>
+                          </>
                         )}
                       </div>
                     )}
                   </div>
                   <p className="text-xs text-gray-500 mb-2">{char.description}</p>
+                  {/* 参考图区域 */}
+                  {!char.confirmed && (
+                    <div className="mb-2 flex items-center gap-2">
+                      {(char as CharacterInfo & { refImageUrl?: string }).refImageUrl ? (
+                        <div className="relative group flex-shrink-0">
+                          <img src={(char as CharacterInfo & { refImageUrl?: string }).refImageUrl}
+                            alt="参考图" loading="lazy" className="w-16 h-20 object-cover rounded border border-cyan-700/50" />
+                          <button onClick={() => handleRemoveCharRefImage(char.id)}
+                            className="absolute -top-1 -right-1 w-4 h-4 bg-red-600 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                            <CloseIcon className="w-2.5 h-2.5 text-white" />
+                          </button>
+                          <span className="text-[9px] text-cyan-500 block text-center mt-0.5">{t('drama.refImage') || '参考图'}</span>
+                        </div>
+                      ) : (
+                        <label className="flex-shrink-0 w-16 h-20 border border-dashed border-gray-600 rounded flex flex-col items-center justify-center cursor-pointer hover:border-cyan-500 transition-colors">
+                          {charRefUploading[char.id] ? (
+                            <div className="w-3 h-3 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <>
+                              <span className="text-gray-500 text-lg leading-none">+</span>
+                              <span className="text-[9px] text-gray-600 mt-0.5">{t('drama.uploadRef') || '参考图'}</span>
+                            </>
+                          )}
+                          <input type="file" accept="image/*" className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleUploadCharRefImage(char.id, file);
+                              e.target.value = '';
+                            }} />
+                        </label>
+                      )}
+                    </div>
+                  )}
+                  {/* 进度条 */}
+                  {isGenerating && (
+                    <div className="mb-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                        <span className="text-xs text-purple-400">
+                          {t('drama.genImageProgress', { done: progress.done, total: progress.total })}
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-800 rounded-full h-1.5">
+                        <div className="bg-purple-500 h-1.5 rounded-full transition-all duration-500"
+                          style={{ width: `${(progress.done / progress.total) * 100}%` }} />
+                      </div>
+                    </div>
+                  )}
+                  {/* 图片网格（可勾选+可预览） */}
                   {char.imageUrls.length > 0 && (
-                    <div className="flex gap-2 flex-wrap">
-                      {char.imageUrls.map((url, i) => (
-                        <img key={i} src={url} alt={`${char.newName} ${i + 1}`}
-                          className="w-20 h-24 object-cover rounded-lg border border-gray-700" />
-                      ))}
+                    <div>
+                      {!char.confirmed && char.imageUrls.length > 0 && (
+                        <p className="text-[10px] text-gray-600 mb-1">{t('drama.selectImages')}</p>
+                      )}
+                      <div className="flex gap-2 flex-wrap">
+                        {char.imageUrls.map((url, i) => {
+                          const isSelected = selected?.has(url);
+                          return (
+                            <div key={i} className="relative group">
+                              <img src={url} alt={`${char.newName} ${i + 1}`}
+                                loading="lazy"
+                                className={`w-20 h-24 object-cover rounded-lg border-2 cursor-pointer transition-all ${
+                                  isSelected ? 'border-purple-500 ring-1 ring-purple-500/50' : 'border-gray-700 hover:border-gray-500'
+                                }`}
+                                onClick={() => !char.confirmed && toggleImageSelection(char.id, url)} />
+                              {/* 勾选标记 */}
+                              {!char.confirmed && isSelected && (
+                                <div className="absolute top-1 right-1 w-4 h-4 bg-purple-500 rounded-full flex items-center justify-center">
+                                  <CheckIcon className="w-2.5 h-2.5 text-white" />
+                                </div>
+                              )}
+                              {/* 预览按钮 */}
+                              <button onClick={(e) => { e.stopPropagation(); setPreviewImage(url); }}
+                                className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/70 rounded text-[9px] text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity">
+                                {t('drama.previewImage')}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
+              {/* 场景列表 - 生成场景参考图 */}
+              {project.novel.locations.length > 0 && (
+                <details className="bg-[#161824] rounded-xl border border-gray-800" open>
+                  <summary className="px-3 py-2 text-xs text-purple-400 cursor-pointer hover:text-purple-300 transition-colors font-medium flex items-center justify-between">
+                    <span>{t('drama.locations')} ({project.novel.locations.length})</span>
+                    <span className="flex gap-1.5" onClick={e => e.preventDefault()}>
+                      {!batchLocImageRunning && project.novel.locations.some(l => !l.imageUrl) && (
+                        <button onClick={handleBatchLocImages}
+                          className="text-[10px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                          {t('drama.batchGenImages') || '批量生图'}
+                        </button>
+                      )}
+                      {batchLocImageRunning && (
+                        <button onClick={() => { batchLocImageAbort.current = true; }}
+                          className="text-[10px] px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white transition-colors">
+                          {t('drama.stopBatch') || '停止批量'}
+                        </button>
+                      )}
+                    </span>
+                  </summary>
+                  <div className="px-3 pb-2 space-y-2">
+                    {project.novel.locations.map(loc => (
+                      <div key={loc.id} className="flex items-center gap-2 text-xs py-1">
+                        {loc.imageUrl ? (
+                          <div className="relative group flex-shrink-0">
+                            <img src={loc.imageUrl} alt={loc.newName}
+                              loading="lazy"
+                              className="w-16 h-10 object-cover rounded border border-gray-700 cursor-pointer"
+                              onClick={() => setPreviewImage(loc.imageUrl!)} />
+                            <button onClick={() => handleGenerateLocImage(loc.id)}
+                              className="absolute inset-0 bg-black/50 rounded opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-[9px] text-white">
+                              {t('drama.regenImage')}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="w-16 h-10 bg-gray-800 rounded border border-gray-700 flex items-center justify-center flex-shrink-0">
+                            {locImageGenerating[loc.id] ? (
+                              <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                              <button onClick={() => handleGenerateLocImage(loc.id)}
+                                className="text-[9px] text-gray-500 hover:text-purple-400 transition-colors">
+                                {t('drama.genSceneImage')}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <span className="text-gray-300">{loc.newName}</span>
+                          {loc.originalName !== loc.newName && (
+                            <span className="text-gray-700 ml-1">← {loc.originalName}</span>
+                          )}
+                          <p className="text-gray-600 truncate">{loc.description}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {/* 龙套角色 - 折叠显示，无需生成图片 */}
               {project.novel.characters.filter(c => c.role === 'minor').length > 0 && (
                 <details className="bg-[#161824] rounded-xl border border-gray-800">
@@ -777,6 +1464,65 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
           {/* Step: scripting (LLM 自动处理中) */}
           {step === 'scripting' && loading && renderLoading(progressMsg || t('drama.scriptGenerating'))}
+          {step === 'scripting' && !loading && (
+            <div className="space-y-4">
+              {project && project.episodes.length > 0 ? (
+                <>
+                  <p className="text-sm text-gray-400">{t('drama.readySummary', { title: project.novel.title, episodes: project.episodes.length })}</p>
+                  <div className="space-y-1.5 max-h-[400px] overflow-y-auto custom-scrollbar">
+                    {project.episodes.map(ep => (
+                      <details key={ep.number} className="bg-[#161824] rounded-lg border border-gray-800 text-xs">
+                        <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-gray-800/30 transition-colors">
+                          <span className="text-purple-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
+                          <span className="text-gray-300 truncate flex-1">{ep.title}</span>
+                          <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
+                        </summary>
+                        <div className="px-2.5 pb-2.5 border-t border-gray-800/50">
+                          <textarea
+                            value={editingEpisodes[ep.number] ?? ep.prompt}
+                            onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
+                            className="w-full bg-[#0d0f1a] border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-purple-500 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
+                          />
+                          {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
+                            <div className="flex gap-2 mt-1.5">
+                              <button onClick={async () => {
+                                const updatedEpisodes = project.episodes.map(e =>
+                                  e.number === ep.number ? { ...e, prompt: editingEpisodes[ep.number] } : e
+                                );
+                                await apiCall(`/api/drama/${project.id}/update-episodes`, 'POST', { episodes: updatedEpisodes });
+                                const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
+                                if (projData?.project) setProject(projData.project);
+                                setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; });
+                              }}
+                                className="text-[10px] px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors">
+                                {t('common.save')}
+                              </button>
+                              <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
+                                className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                                {t('common.cancel')}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                  <button onClick={() => setStep('ready')}
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    <ArrowRightIcon className="w-4 h-4" />{t('drama.nextStep')}
+                  </button>
+                </>
+              ) : (
+                <div className="text-center py-6">
+                  <p className="text-sm text-gray-400 mb-4">{t('drama.confirmCharHint')}</p>
+                  <button onClick={handleGenerateScript}
+                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all inline-flex items-center gap-2">
+                    <SparkleIcon className="w-4 h-4" />{t('drama.genScript')}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Step: ready - 脚本就绪 + 批量视频生成 */}
           {step === 'ready' && project && (
@@ -789,6 +1535,28 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 </p>
               </div>
 
+              {/* 创意优化进度 */}
+              {optimizing && (
+                <div className="bg-[#161824] rounded-xl p-3 border border-indigo-700/50">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm text-indigo-300">{t('drama.optimizeInProgress')}</span>
+                  </div>
+                  <p className="text-xs text-gray-400">{optimizeProgress}</p>
+                </div>
+              )}
+
+              {/* 参考图生成进度 */}
+              {generatingRefImages && (
+                <div className="bg-[#161824] rounded-xl p-3 border border-cyan-700/50">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm text-cyan-300">{t('drama.refImageInProgress')}</span>
+                  </div>
+                  <p className="text-xs text-gray-400">{refImageProgress}</p>
+                </div>
+              )}
+
               {/* 批量生成进度 */}
               {batchGenerating && (
                 <div className="bg-[#161824] rounded-xl p-3 border border-purple-700/50">
@@ -800,53 +1568,191 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 </div>
               )}
 
-              {/* 每集状态列表 */}
+              {/* 每集状态列表（可展开查看/编辑脚本） */}
               {project.episodes.length > 0 && (
-                <div className="space-y-1.5 max-h-[300px] overflow-y-auto custom-scrollbar">
+                <div className="space-y-1.5 max-h-[400px] overflow-y-auto custom-scrollbar">
                   {project.episodes.map(ep => (
-                    <div key={ep.number} className={`bg-[#161824] rounded-lg p-2.5 border text-xs flex items-center gap-2 ${
+                    <details key={ep.number} className={`bg-[#161824] rounded-lg border text-xs ${
                       ep.videoStatus === 'done' ? 'border-green-700/50' :
                       ep.videoStatus === 'generating' ? 'border-yellow-700/50' :
                       ep.videoStatus === 'error' ? 'border-red-700/50' : 'border-gray-800'
                     }`}>
-                      {/* 状态图标 */}
-                      <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
-                        {ep.videoStatus === 'done' && <CheckIcon className="w-4 h-4 text-green-400" />}
-                        {ep.videoStatus === 'generating' && <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />}
-                        {ep.videoStatus === 'error' && <span className="text-red-400">✗</span>}
-                        {(!ep.videoStatus || ep.videoStatus === 'pending') && <span className="text-gray-600">○</span>}
+                      <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-gray-800/30 transition-colors">
+                        {/* 状态图标 */}
+                        <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+                          {ep.videoStatus === 'done' && <CheckIcon className="w-4 h-4 text-green-400" />}
+                          {ep.videoStatus === 'generating' && <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />}
+                          {ep.videoStatus === 'error' && <span className="text-red-400">✗</span>}
+                          {(!ep.videoStatus || ep.videoStatus === 'pending') && <span className="text-gray-600">○</span>}
+                        </div>
+                        <span className="text-purple-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
+                        <span className="text-gray-300 truncate flex-1">{ep.title}</span>
+                        <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
+                        {/* 优化分数 */}
+                        {ep.score != null && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0 font-medium ${
+                            ep.score >= 8 ? 'bg-green-900/50 text-green-400' :
+                            ep.score >= 6 ? 'bg-yellow-900/50 text-yellow-400' :
+                            'bg-red-900/50 text-red-400'
+                          }`}>{ep.score}分</span>
+                        )}
+                        {/* 单集优化按钮 */}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleOptimizeSingle(ep.number); }}
+                          disabled={optimizingEp[ep.number]}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600/50 hover:bg-indigo-500/50 text-indigo-300 flex-shrink-0 transition-colors disabled:opacity-50"
+                          title={t('drama.optimizeSingle')}
+                        >
+                          {optimizingEp[ep.number] ? (
+                            <div className="w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                          ) : '✦'}
+                        </button>
+                        {ep.videoStatus === 'done' && ep.videoUrl && (
+                          <a href={`/api/video-proxy?url=${encodeURIComponent(ep.videoUrl)}`}
+                            target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+                            className="text-purple-400 hover:text-purple-300 flex-shrink-0 underline">
+                            {t('drama.watchVideo')}
+                          </a>
+                        )}
+                        {ep.videoStatus === 'error' && ep.videoError && (
+                          <span className="text-red-400 truncate max-w-[120px]" title={ep.videoError}>
+                            {ep.videoError.substring(0, 20)}...
+                          </span>
+                        )}
+                      </summary>
+                      <div className="px-2.5 pb-2.5 border-t border-gray-800/50">
+                        {/* 参考图预览 + 单集重新生成 */}
+                        <div className="flex items-center gap-1.5 mt-2 mb-1.5 flex-wrap">
+                          {ep.refImageUrls && ep.refImageUrls.length > 0 && ep.refImageUrls.map((url, ri) => (
+                            <img key={ri} src={url} alt={`ref ${ri + 1}`}
+                              loading="lazy"
+                              className="w-16 h-10 object-cover rounded border border-gray-700 cursor-pointer hover:border-cyan-500 transition-colors"
+                              onClick={() => setPreviewImage(url)} />
+                          ))}
+                          {ep.refImageUrls && ep.refImageUrls.length > 0 && (
+                            <span className="text-[9px] text-cyan-600 self-center ml-1">{t('drama.refImages')}</span>
+                          )}
+                          <button
+                            onClick={() => handleRegenEpRefImages(ep.number)}
+                            disabled={regenRefEp[ep.number]}
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/40 hover:bg-cyan-600/50 text-cyan-300 transition-colors disabled:opacity-50 ml-auto flex-shrink-0"
+                            title={t('drama.regenRefImages')}
+                          >
+                            {regenRefEp[ep.number] ? (
+                              <div className="w-3 h-3 border border-cyan-400 border-t-transparent rounded-full animate-spin inline-block" />
+                            ) : '🔄 ' + t('drama.regenRefImages')}
+                          </button>
+                        </div>
+                        {/* 分镜列表 */}
+                        {ep.shots && ep.shots.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <div className="text-[9px] text-gray-500">🎬 {ep.shots.length} 个分镜 · 共 {ep.shots[ep.shots.length - 1]?.endTime || 0}s</div>
+                              <button
+                                onClick={() => handleRegenShots(ep.number)}
+                                disabled={regenShotsEp[ep.number]}
+                                className="text-[9px] px-1.5 py-0.5 rounded bg-purple-700/40 hover:bg-purple-600/50 text-purple-300 transition-colors disabled:opacity-50 ml-auto"
+                              >
+                                {regenShotsEp[ep.number] ? (
+                                  <div className="w-3 h-3 border border-purple-400 border-t-transparent rounded-full animate-spin inline-block" />
+                                ) : '🔄 ' + t('drama.regenShots')}
+                              </button>
+                            </div>
+                            {ep.shots.map((shot) => (
+                              <details key={shot.index} className={`bg-[#0d0f1a] rounded border text-[10px] ${
+                                shot.videoStatus === 'done' ? 'border-green-800/50' :
+                                shot.videoStatus === 'generating' ? 'border-yellow-800/50' :
+                                shot.videoStatus === 'error' ? 'border-red-800/50' : 'border-gray-800/50'
+                              }`}>
+                                <summary className="flex items-center gap-1.5 p-1.5 cursor-pointer select-none hover:bg-white/5">
+                                  <span className="text-purple-400 font-mono">S{String(shot.index).padStart(2, '0')}</span>
+                                  <span className="text-gray-500">{shot.startTime}-{shot.endTime}s</span>
+                                  {shot.transition && <span className="text-yellow-600 text-[9px]">→ {shot.transition}</span>}
+                                  {shot.videoStatus === 'done' && <span className="text-green-400 text-[9px]">✓</span>}
+                                  {shot.videoStatus === 'generating' && <div className="w-2 h-2 border border-yellow-400 border-t-transparent rounded-full animate-spin" />}
+                                  {shot.videoStatus === 'error' && <span className="text-red-400 text-[9px]">✗</span>}
+                                  <span className="text-gray-500 ml-auto truncate max-w-[120px]">{shot.prompt.split('\n')[0]}</span>
+                                </summary>
+                                <div className="px-2 pb-2 space-y-1">
+                                  {/* 关联角色 */}
+                                  {shot.characterRefs?.length > 0 && (
+                                    <div className="flex items-center gap-1 flex-wrap">
+                                      <span className="text-gray-500">{t('drama.shotCharacters')}:</span>
+                                      {shot.characterRefs.map(cid => {
+                                        const char = project.novel?.characters?.find((c: CharacterInfo) => c.id === cid);
+                                        return <span key={cid} className="px-1 py-0.5 rounded bg-blue-900/40 text-blue-300 text-[9px]">{char?.newName || cid}</span>;
+                                      })}
+                                    </div>
+                                  )}
+                                  {/* 关联场景 */}
+                                  {shot.locationRefs?.length > 0 && (
+                                    <div className="flex items-center gap-1 flex-wrap">
+                                      <span className="text-gray-500">{t('drama.shotLocations')}:</span>
+                                      {shot.locationRefs.map(lid => {
+                                        const loc = project.novel?.locations?.find((l: LocationInfo) => l.id === lid);
+                                        return <span key={lid} className="px-1 py-0.5 rounded bg-emerald-900/40 text-emerald-300 text-[9px]">{loc?.newName || lid}</span>;
+                                      })}
+                                    </div>
+                                  )}
+                                  {/* 完整 prompt */}
+                                  <pre className="text-gray-400 whitespace-pre-wrap text-[9px] leading-relaxed mt-1 max-h-[200px] overflow-y-auto">{shot.prompt}</pre>
+                                </div>
+                              </details>
+                            ))}
+                          </div>
+                        )}
+                        {/* 整集脚本编辑 */}
+                        <textarea
+                          value={editingEpisodes[ep.number] ?? ep.prompt}
+                          onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
+                          className="w-full bg-[#0d0f1a] border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-purple-500 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
+                        />
+                        {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
+                          <div className="flex gap-2 mt-1.5">
+                            <button onClick={async () => {
+                              // 保存编辑的脚本到后端
+                              const updatedEpisodes = project.episodes.map(e =>
+                                e.number === ep.number ? { ...e, prompt: editingEpisodes[ep.number] } : e
+                              );
+                              await apiCall(`/api/drama/${project.id}/update-episodes`, 'POST', { episodes: updatedEpisodes });
+                              const projData = await apiCall(`/api/drama/${project.id}`, 'GET');
+                              if (projData?.project) setProject(projData.project);
+                              setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; });
+                            }}
+                              className="text-[10px] px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors">
+                              {t('common.save')}
+                            </button>
+                            <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
+                              className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">
+                              {t('common.cancel')}
+                            </button>
+                          </div>
+                        )}
                       </div>
-                      {/* 集信息 */}
-                      <span className="text-purple-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
-                      <span className="text-gray-300 truncate flex-1">{ep.title}</span>
-                      <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
-                      {/* 视频链接 */}
-                      {ep.videoStatus === 'done' && ep.videoUrl && (
-                        <a href={`/api/video-proxy?url=${encodeURIComponent(ep.videoUrl)}`}
-                          target="_blank" rel="noopener noreferrer"
-                          className="text-purple-400 hover:text-purple-300 flex-shrink-0 underline">
-                          {t('drama.watchVideo')}
-                        </a>
-                      )}
-                      {ep.videoStatus === 'error' && ep.videoError && (
-                        <span className="text-red-400 truncate max-w-[120px]" title={ep.videoError}>
-                          {ep.videoError.substring(0, 20)}...
-                        </span>
-                      )}
-                    </div>
+                    </details>
                   ))}
                 </div>
               )}
 
-              {/* 批量生成按钮 */}
-              {!batchGenerating && (
-                <button onClick={handleBatchGenerate} disabled={loading}
-                  className="w-full py-3 rounded-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:from-gray-700 disabled:to-gray-700 text-white font-bold transition-all flex items-center justify-center gap-2">
-                  <SparkleIcon className="w-4 h-4" />
-                  {project.episodes.some(e => e.videoStatus === 'done')
-                    ? t('drama.batchRetry')
-                    : t('drama.batchStart')}
-                </button>
+              {/* 操作按钮 */}
+              {!batchGenerating && !optimizing && !generatingRefImages && (
+                <div className="flex gap-2 flex-wrap">
+                  <button onClick={handleOptimizeScripts}
+                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    <SparkleIcon className="w-4 h-4" />{t('drama.optimizeScripts')}
+                  </button>
+                  <button onClick={handleGenerateRefImages}
+                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    <SparkleIcon className="w-4 h-4" />{t('drama.genRefImages')}
+                  </button>
+                  <button onClick={handleBatchGenerate} disabled={loading}
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:from-gray-700 disabled:to-gray-700 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    <SparkleIcon className="w-4 h-4" />
+                    {project.episodes.some(e => e.videoStatus === 'done')
+                      ? t('drama.batchRetry')
+                      : t('drama.batchStart')}
+                  </button>
+                </div>
               )}
 
               {/* 完成统计 */}
@@ -863,21 +1769,41 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
         </div>
 
         {/* 底部导航 */}
-        {stepIndex > 0 && step !== 'drafts' && step !== 'ready' && !loading && (
-          <div className="mt-4 pt-3 border-t border-gray-800">
+        {stepIndex > 0 && step !== 'drafts' && !loading && (
+          <div className="mt-4 pt-3 border-t border-gray-800 flex items-center justify-between">
             <button onClick={() => {
               const prevSteps: Record<Step, Step> = {
                 drafts: 'drafts', setup: 'drafts', novel: 'setup', analyzing: 'novel', review: 'novel',
-                copyright: 'review', characters: 'review', scripting: 'characters', ready: 'ready',
+                copyright: 'review', characters: 'review', scripting: 'characters', ready: 'scripting',
               };
               setStep(prevSteps[step]);
             }}
               className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 transition-colors">
               <ArrowLeftIcon className="w-3 h-3" />{t('drama.prevStep')}
             </button>
+            {step === 'ready' && !batchGenerating && (
+              <button onClick={handleGenerateScript}
+                className="flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                <SparkleIcon className="w-3 h-3" />{t('drama.regenScript')}
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* 图片预览弹窗 */}
+      {previewImage && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center" onClick={() => setPreviewImage(null)}>
+          <div className="absolute inset-0 bg-black/80" />
+          <div className="relative max-w-[90vw] max-h-[90vh]">
+            <img src={previewImage} alt="preview" className="max-w-full max-h-[90vh] object-contain rounded-lg" />
+            <button onClick={() => setPreviewImage(null)}
+              className="absolute top-2 right-2 p-1.5 bg-black/60 rounded-full hover:bg-black/80 transition-colors">
+              <CloseIcon className="w-5 h-5 text-white" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

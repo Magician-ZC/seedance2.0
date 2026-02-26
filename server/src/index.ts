@@ -5,6 +5,7 @@ import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
 import http from 'http';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { generateSeedanceVideo } from './video-generator.js';
 import browserService from './browser-service.js';
@@ -14,12 +15,14 @@ import type { TaskInfo, ModelKey, HistoryRecord } from './types.js';
 import { DEFAULT_PRESETS } from './types.js';
 import { loadWords, checkText, sanitizeText, addManualWords, removeWord, getWordsDetail, learnFromFailure, confirmLearnedWord } from './sensitive-words.js';
 import {
-  createProject, getProject, listProjects, removeProject,
+  createProject, getProject, updateProject, listProjects, removeProject,
   analyzeNovel, transformCopyright, generateScript, confirmCharacter,
-  updateCharacterImages, getProjectLogs, batchGenerateVideos,
-  type CharacterInfo,
+  updateCharacterImages, updateLocationImage, getProjectLogs, batchGenerateVideos, optimizeScripts,
+  batchGenerateRefImages, refreshVisualPrompts, updateCharacterRefImage, optimizeSingleEpisode,
+  generateEpisodeRefImages, regenerateEpisodeShots, getProjectImageSubDir,
+  type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
-import { generateImage, generateCharacterImages } from './image-generator.js';
+import { generateImage, generateCharacterImages, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, getLocalImagePath, httpsDownload } from './image-generator.js';
 import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB } from './db-service.js';
 import { getLLMConfig, updateLLMConfig } from './llm-service.js';
 
@@ -30,6 +33,9 @@ const DEFAULT_SESSION_ID = process.env.VITE_DEFAULT_SESSION_ID || '';
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+
+// 静态文件服务：本地角色图片
+app.use('/api/images', express.static(path.join(__dirname, '../../data/images')));
 
 // 启动时加载敏感词库
 loadWords();
@@ -106,8 +112,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
           const genResults = await generateImage(prompt, authToken, { width: 1280, height: 720, count: 1 });
           if (genResults.length > 0) {
             // 下载生成的图片到内存作为 file
-            const imgResp = await fetch(genResults[0].imageUrl);
-            const imgBuffer = Buffer.from(await imgResp.arrayBuffer());
+            const imgBuffer = await httpsDownload(genResults[0].imageUrl);
             actualFiles = [{
               fieldname: 'files', originalname: 'auto-generated.jpg',
               encoding: '7bit', mimetype: 'image/jpeg',
@@ -425,7 +430,15 @@ app.post('/api/drama/:id/copyright', async (req, res) => {
   res.json({ project: result.project });
 });
 
-// POST /api/drama/:id/generate-character-images - 生成角色图
+// POST /api/drama/:id/refresh-prompts - 刷新 visualPrompt 为中文（拯救旧项目）
+app.post('/api/drama/:id/refresh-prompts', async (req, res) => {
+  const result = await refreshVisualPrompts(req.params.id);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  const project = getProject(req.params.id);
+  res.json({ success: true, project });
+});
+
+// POST /api/drama/:id/generate-character-images - 生成角色图（异步+WebSocket进度）
 app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -436,24 +449,183 @@ app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   const character = project.novel.characters.find((c: CharacterInfo) => c.id === characterId);
   if (!character) return res.status(404).json({ error: '角色不存在' });
 
-  try {
-    const images = await generateCharacterImages(character.newName, character.description, project.style, authToken, character.visualPrompt);
-    updateCharacterImages(req.params.id, characterId, images.map(img => img.imageUrl));
-    res.json({ characterId, images, imageUrls: images.map(img => img.imageUrl) });
-  } catch (err) {
-    res.status(500).json({ error: `角色图生成失败: ${(err as Error).message}` });
-  }
+  const taskId = `charimg_${req.params.id}_${characterId}`;
+  res.json({ taskId, characterId });
+
+  // 后台异步生成，通过 WebSocket 推送进度
+  generateCharacterImages(character.newName, character.description, project.style, authToken, character.visualPrompt,
+    (done, total) => {
+      const progressTask: TaskInfo = {
+        id: taskId, status: 'processing', startTime: Date.now(), result: null, error: null,
+        progress: JSON.stringify({ done, total, characterId }),
+      };
+      wsManager.broadcast(taskId, progressTask);
+    },
+    character.refImageUrl,
+  ).then(async (images) => {
+    // 下载图片到本地，存本地路径
+    const localUrls: string[] = [];
+    for (const img of images) {
+      try {
+        const filename = await downloadImageToLocal(img.imageUrl, authToken, `char_${characterId}`, getProjectImageSubDir(project, 'characters', character.newName));
+        localUrls.push(`/api/images/${filename}`);
+      } catch (err) {
+        console.log(`[image-gen] 下载角色图到本地失败: ${(err as Error).message}，重试一次...`);
+        // 重试一次
+        try {
+          await new Promise(r => setTimeout(r, 2000));
+          const filename = await downloadImageToLocal(img.imageUrl, authToken, `char_${characterId}`, getProjectImageSubDir(project, 'characters', character.newName));
+          localUrls.push(`/api/images/${filename}`);
+        } catch (err2) {
+          console.log(`[image-gen] 重试仍失败: ${(err2 as Error).message}`);
+        }
+      }
+    }
+    if (localUrls.length === 0) throw new Error('所有角色图下载到本地失败');
+    updateCharacterImages(req.params.id, characterId, localUrls);
+    const doneTask: TaskInfo = {
+      id: taskId, status: 'done', startTime: Date.now(), result: null, error: null,
+      progress: JSON.stringify({ done: 3, total: 3, characterId, imageUrls: localUrls }),
+    };
+    wsManager.broadcast(taskId, doneTask);
+  }).catch((err: Error) => {
+    const errTask: TaskInfo = {
+      id: taskId, status: 'error', startTime: Date.now(), result: null, error: err.message,
+      progress: JSON.stringify({ characterId }),
+    };
+    wsManager.broadcast(taskId, errTask);
+  });
 });
 
 // POST /api/drama/:id/confirm-character - 确认角色
 app.post('/api/drama/:id/confirm-character', (req, res) => {
   const { characterId, selectedImageUrls } = req.body;
+
+  // 确认前获取角色的所有图片，用于清理未选中的
+  const projectBefore = getProject(req.params.id);
+  const charBefore = projectBefore?.novel.characters.find((c: CharacterInfo) => c.id === characterId);
+  const allUrls = charBefore?.imageUrls || [];
+
   const result = confirmCharacter(req.params.id, characterId, selectedImageUrls);
   if (!result.success) return res.status(400).json({ error: result.error });
+
+  // 删除未选中的本地图片
+  if (selectedImageUrls && Array.isArray(selectedImageUrls)) {
+    const selectedSet = new Set(selectedImageUrls);
+    for (const url of allUrls) {
+      if (!selectedSet.has(url) && isLocalImageUrl(url)) {
+        deleteLocalImage(localUrlToFilename(url));
+      }
+    }
+  }
+
   res.json({ confirmed: true, allConfirmed: result.allConfirmed, characterId });
 });
 
-// POST /api/drama/:id/generate-script - 第3步：LLM 自动生成分镜脚本
+// POST /api/drama/:id/upload-char-ref-image - 上传角色参考图
+const charRefUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+app.post('/api/drama/:id/upload-char-ref-image', charRefUpload.single('file'), async (req, res) => {
+  const projectId = req.params.id as string;
+  const project = getProject(projectId);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const characterId = String(req.body?.characterId || '');
+  if (!characterId) return res.status(400).json({ error: '缺少 characterId' });
+  if (!req.file) return res.status(400).json({ error: '缺少图片文件' });
+
+  const character = project.novel.characters.find((c: CharacterInfo) => c.id === characterId);
+  if (!character) return res.status(404).json({ error: '角色不存在' });
+
+  try {
+    // 保存到本地 data/images/{projectId}/characters/
+    const filename = `charref_${characterId}_${crypto.randomUUID().substring(0, 8)}.jpg`;
+    const subDir = `${projectId}/characters`;
+    const imagesDir = path.join(__dirname, '../../data/images', subDir);
+    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+    fs.writeFileSync(path.join(imagesDir, filename), req.file.buffer);
+    const localUrl = `/api/images/${subDir}/${filename}`;
+
+    // 删除旧参考图
+    const oldRef = (character as CharacterInfo & { refImageUrl?: string }).refImageUrl;
+    if (oldRef && isLocalImageUrl(oldRef)) deleteLocalImage(localUrlToFilename(oldRef));
+
+    // 更新角色数据
+    updateCharacterRefImage(projectId, characterId, localUrl);
+    res.json({ success: true, refImageUrl: localUrl });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// POST /api/drama/:id/remove-char-ref-image - 删除角色参考图
+app.post('/api/drama/:id/remove-char-ref-image', (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { characterId } = req.body;
+  const character = project.novel.characters.find((c: CharacterInfo) => c.id === characterId);
+  if (!character) return res.status(404).json({ error: '角色不存在' });
+
+  const oldRef = (character as CharacterInfo & { refImageUrl?: string }).refImageUrl;
+  if (oldRef && isLocalImageUrl(oldRef)) deleteLocalImage(localUrlToFilename(oldRef));
+  updateCharacterRefImage(req.params.id, characterId, undefined);
+  res.json({ success: true });
+});
+
+// POST /api/drama/:id/generate-location-image - 生成场景图（异步+WebSocket进度）
+app.post('/api/drama/:id/generate-location-image', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { sessionId, locationId } = req.body;
+  const authToken = sessionId || DEFAULT_SESSION_ID;
+  if (!authToken) return res.status(401).json({ error: '未配置 Session ID' });
+
+  const location = project.novel.locations.find((l: LocationInfo) => l.id === locationId);
+  if (!location) return res.status(404).json({ error: '场景不存在' });
+
+  const taskId = `locimg_${req.params.id}_${locationId}`;
+  res.json({ taskId, locationId });
+
+  // 后台异步生成
+  const prompt = location.visualPrompt || `${project.style}, ${location.description}`;
+  generateImage(prompt, authToken, { width: 1280, height: 720, count: 1, style: project.style })
+    .then(async (images) => {
+      if (images.length > 0) {
+        // 下载到本地
+        let localUrl: string;
+        try {
+          const filename = await downloadImageToLocal(images[0].imageUrl, authToken, `loc_${locationId}`, getProjectImageSubDir(project, 'locations', location.newName));
+          localUrl = `/api/images/${filename}`;
+        } catch (err) {
+          console.log(`[image-gen] 下载场景图到本地失败: ${(err as Error).message}，重试一次...`);
+          try {
+            await new Promise(r => setTimeout(r, 2000));
+            const filename = await downloadImageToLocal(images[0].imageUrl, authToken, `loc_${locationId}`, getProjectImageSubDir(project, 'locations', location.newName));
+            localUrl = `/api/images/${filename}`;
+          } catch {
+            throw new Error('场景图下载到本地失败');
+          }
+        }
+        // 删除旧的本地图片
+        if (location.imageUrl && isLocalImageUrl(location.imageUrl)) {
+          deleteLocalImage(localUrlToFilename(location.imageUrl));
+        }
+        updateLocationImage(req.params.id, locationId, localUrl);
+        const doneTask: TaskInfo = {
+          id: taskId, status: 'done', startTime: Date.now(), result: null, error: null,
+          progress: JSON.stringify({ locationId, imageUrl: localUrl }),
+        };
+        wsManager.broadcast(taskId, doneTask);
+      }
+    })
+    .catch((err: Error) => {
+      const errTask: TaskInfo = {
+        id: taskId, status: 'error', startTime: Date.now(), result: null, error: err.message,
+        progress: JSON.stringify({ locationId }),
+      };
+      wsManager.broadcast(taskId, errTask);
+    });
+});
+
+// POST /api/drama/:id/generate-script - 第3步：LLM 自动生成分镜脚本（异步+WebSocket进度）
 app.post('/api/drama/:id/generate-script', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -469,9 +641,130 @@ app.post('/api/drama/:id/generate-script', async (req, res) => {
     return res.status(400).json({ error: `项目内容包含敏感词: ${sensitiveHits.join(', ')}`, sensitiveWords: sensitiveHits });
   }
 
-  const result = await generateScript(req.params.id);
+  const taskId = `script_${req.params.id}`;
+  res.json({ taskId, async: true });
+
+  // 后台异步执行，通过 WebSocket 推送进度
+  generateScript(req.params.id, (progress) => {
+    const progressTask: TaskInfo = {
+      id: taskId, status: 'processing', startTime: Date.now(), result: null, error: null, progress,
+    };
+    wsManager.broadcast(taskId, progressTask);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error', startTime: Date.now(),
+      result: null, error: result.success ? null : (result.error || '脚本生成失败'),
+      progress: result.success ? '脚本生成完成' : '',
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/drama/:id/update-episodes - 更新集脚本内容
+app.post('/api/drama/:id/update-episodes', (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { episodes } = req.body;
+  if (!Array.isArray(episodes)) return res.status(400).json({ error: 'episodes 必须是数组' });
+  updateProject(req.params.id, { episodes });
+  res.json({ success: true });
+});
+
+// POST /api/drama/:id/optimize-scripts - 创意优化脚本（异步+WebSocket进度）
+app.post('/api/drama/:id/optimize-scripts', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  if (project.episodes.length === 0) return res.status(400).json({ error: '无脚本可优化' });
+
+  const taskId = `optimize_${req.params.id}`;
+  res.json({ taskId, async: true });
+
+  optimizeScripts(req.params.id, (progress) => {
+    const progressTask: TaskInfo = {
+      id: taskId, status: 'processing', startTime: Date.now(), result: null, error: null, progress,
+    };
+    wsManager.broadcast(taskId, progressTask);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error', startTime: Date.now(),
+      result: null, error: result.success ? null : (result.error || '优化失败'), progress: result.success ? '创意优化完成' : '',
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/drama/:id/optimize-single - 单集创意优化
+app.post('/api/drama/:id/optimize-single', async (req, res) => {
+  const { episodeNumber } = req.body;
+  if (typeof episodeNumber !== 'number') return res.status(400).json({ error: '缺少 episodeNumber' });
+
+  const result = await optimizeSingleEpisode(req.params.id, episodeNumber);
   if (!result.success) return res.status(500).json({ error: result.error });
-  res.json({ project: result.project });
+
+  const project = getProject(req.params.id);
+  res.json({ success: true, project });
+});
+
+// POST /api/drama/:id/regenerate-shots - 单集分镜重新生成
+app.post('/api/drama/:id/regenerate-shots', async (req, res) => {
+  const { episodeNumber } = req.body;
+  if (typeof episodeNumber !== 'number') return res.status(400).json({ error: '缺少 episodeNumber' });
+
+  const result = await regenerateEpisodeShots(req.params.id, episodeNumber);
+  if (!result.success) return res.status(500).json({ error: result.error });
+
+  const project = getProject(req.params.id);
+  res.json({ success: true, project });
+});
+
+// POST /api/drama/:id/regenerate-ep-ref-images - 单集参考图重新生成
+app.post('/api/drama/:id/regenerate-ep-ref-images', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { episodeNumber, sessionId } = req.body;
+  if (typeof episodeNumber !== 'number') return res.status(400).json({ error: '缺少 episodeNumber' });
+  const authToken = sessionId || DEFAULT_SESSION_ID;
+  if (!authToken) return res.status(401).json({ error: '未配置 Session ID' });
+
+  const episode = project.episodes.find(ep => ep.number === episodeNumber);
+  if (!episode) return res.status(404).json({ error: `第 ${episodeNumber} 集不存在` });
+
+  try {
+    const refUrls = await generateEpisodeRefImages(project, episode, authToken);
+    episode.refImageUrls = refUrls;
+    updateProject(req.params.id, { episodes: project.episodes });
+    res.json({ success: true, project: getProject(req.params.id) });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// POST /api/drama/:id/generate-ref-images - 为每集生成专属参考图（异步+WebSocket进度）
+app.post('/api/drama/:id/generate-ref-images', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  if (project.episodes.length === 0) return res.status(400).json({ error: '无脚本' });
+
+  const { sessionId } = req.body;
+  const authToken = sessionId || DEFAULT_SESSION_ID;
+  if (!authToken) return res.status(401).json({ error: '未配置 Session ID' });
+
+  const taskId = `refimg_${req.params.id}`;
+  res.json({ taskId, async: true });
+
+  batchGenerateRefImages(req.params.id, authToken, (progress) => {
+    const progressTask: TaskInfo = {
+      id: taskId, status: 'processing', startTime: Date.now(), result: null, error: null, progress,
+    };
+    wsManager.broadcast(taskId, progressTask);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error', startTime: Date.now(),
+      result: null, error: result.success ? null : (result.error || '参考图生成失败'),
+      progress: result.success ? '参考图生成完成' : '',
+    };
+    wsManager.broadcast(taskId, task);
+  });
 });
 
 // POST /api/drama/:id/auto-generate-image - 为集数自动生成参考图
@@ -509,7 +802,7 @@ app.post('/api/drama/:id/batch-generate', async (req, res) => {
   res.json({ batchTaskId, totalEpisodes: project.episodes.length });
 
   // 后台异步执行批量生成，通过 WebSocket 推送进度
-  batchGenerateVideos(req.params.id, authToken, tasks, (episode, total, status, detail) => {
+  batchGenerateVideos(req.params.id, authToken, tasks, (_episode, _total, status, detail) => {
     // 构造进度消息并广播
     const progressTask: TaskInfo = {
       id: batchTaskId,

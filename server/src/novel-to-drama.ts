@@ -31,8 +31,10 @@ export interface CharacterInfo {
   description: string;
   personality: string;
   visualPrompt: string;
+  costumeDesc?: string; // 默认服化道描述（服装、妆容、标志性道具）
   imageUrls: string[];
   confirmed: boolean;
+  refImageUrl?: string; // 用户上传的参考图
 }
 
 export interface LocationInfo {
@@ -41,6 +43,7 @@ export interface LocationInfo {
   newName: string;
   description: string;
   visualPrompt: string;
+  imageUrl?: string;
 }
 
 export interface PlotPoint {
@@ -50,18 +53,36 @@ export interface PlotPoint {
   keyEvents: string[];
 }
 
+// 分镜（Shot）：每集由多个分镜组成，每个分镜最长 15 秒
+export interface Shot {
+  index: number;           // 分镜序号（从1开始）
+  startTime: number;       // 起始秒数
+  endTime: number;         // 结束秒数
+  prompt: string;          // 该分镜的视频生成 prompt
+  characterRefs: string[]; // 出场角色 ID
+  locationRefs: string[];  // 场景 ID
+  transition?: string;     // 与下一分镜的转场方式
+  refImageUrls?: string[]; // 该分镜的参考图
+  videoUrl?: string;
+  videoStatus?: 'pending' | 'generating' | 'done' | 'error';
+  videoError?: string;
+}
+
 export interface EpisodeScript {
   number: number;
   title: string;
   act: string;
   emotionalTone: string;
-  prompt: string;
+  prompt: string;          // 整集概述 prompt（保留兼容）
+  shots: Shot[];            // 分镜列表
   characterRefs: string[];
   locationRefs: string[];
   endingFrame: string;
-  videoUrl?: string;
+  refImageUrls?: string[];
+  videoUrl?: string;       // 拼接后的完整视频（或最后一个分镜的视频）
   videoStatus?: 'pending' | 'generating' | 'done' | 'error';
   videoError?: string;
+  score?: number;
 }
 
 export interface DramaProject {
@@ -110,6 +131,24 @@ function projectToRow(p: DramaProject): DramaProjectRow {
     created_at: p.createdAt,
     updated_at: Date.now(),
   };
+}
+
+// ============================================================
+// 文件名安全化 & 图片目录辅助
+// ============================================================
+
+// 将中文/特殊字符转为安全的文件夹名
+function safeDirName(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, '_').substring(0, 60) || 'unnamed';
+}
+
+// 构建项目图片子目录路径（用项目名称 + 角色/场景名分子文件夹）
+export function getProjectImageSubDir(project: DramaProject, category: 'characters' | 'locations' | 'refs', entityName?: string): string {
+  const projectDir = safeDirName(project.novel.title || project.id);
+  if (entityName) {
+    return `${projectDir}/${category}/${safeDirName(entityName)}`;
+  }
+  return `${projectDir}/${category}`;
 }
 
 // ============================================================
@@ -278,8 +317,8 @@ const ANALYZE_SYSTEM_PROMPT = `你是一位专业的影视编剧，擅长将小�
 2. 识别所有角色，区分主角/配角/龙套，详细描述外貌特征（发型、服装、体型、年龄、标志性特征）
 3. 识别所有重要场景/地点，详细描述环境（建筑风格、氛围、光线、色调）
 4. 按章节/段落提取情节要点，标注情感基调和关键事件
-5. 为每个角色生成英文生图提示词（用于 AI 生图工具生成角色参考图）
-6. 为每个场景生成英文生图提示词
+5. 为每个角色生成中文生图提示词（用于 AI 生图工具生成角色参考图）
+6. 为每个场景生成中文生图提示词
 
 请以 JSON 格式返回：
 {
@@ -291,14 +330,14 @@ const ANALYZE_SYSTEM_PROMPT = `你是一位专业的影视编剧，擅长将小�
       "role": "protagonist/supporting/minor",
       "description": "详细外貌描述（发型、服装、体型、年龄、标志性特征等）",
       "personality": "性格特征和行为模式",
-      "visualPrompt": "English prompt for AI image generation"
+      "visualPrompt": "中文生图提示词，如：17岁高中男生，凌乱黑发，锐利眼神，穿着旧校服"
     }
   ],
   "locations": [
     {
       "name": "地点名",
       "description": "详细环境描述（建筑风格、氛围、光线、季节等）",
-      "visualPrompt": "English prompt for AI image generation"
+      "visualPrompt": "中文生图提示词，如：老旧教学楼走廊，午后阳光斜照"
     }
   ],
   "plotPoints": [
@@ -385,8 +424,8 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
 1. 提取所有出现的角色（名字、别名、身份、外貌、性格）
 2. 提取所有场景/地点（名称、环境描述）
 3. 提取本章核心情节（关键事件、情感基调）
-4. 为每个角色生成英文生图提示词（visualPrompt）
-5. 为每个场景生成英文生图提示词
+4. 为每个角色生成中文生图提示词（visualPrompt），描述外貌、服装、姿态、场景氛围
+5. 为每个场景生成中文生图提示词
 
 请以 JSON 格式返回：
 {
@@ -397,7 +436,7 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
       "role": "protagonist/supporting/minor",
       "description": "详细外貌描述（发型、服装、体型、年龄、标志性特征等）",
       "personality": "性格特征和行为模式",
-      "visualPrompt": "English prompt for AI image generation"
+      "visualPrompt": "中文生图提示词，如：17岁高中男生，凌乱黑发，锐利眼神，穿着旧校服，站在昏暗巷子里"
     }
   ],
   "locations": [
@@ -405,7 +444,7 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
       "name": "地点名",
       "aliases": ["别名"],
       "description": "详细环境描述（建筑风格、氛围、光线、季节等）",
-      "visualPrompt": "English prompt for AI image generation"
+      "visualPrompt": "中文生图提示词，如：老旧教学楼走廊，午后阳光斜照，墙壁斑驳"
     }
   ],
   "plotPoints": [
@@ -584,7 +623,7 @@ async function analyzeByChapters(
 3. 合并明显重复的场景（同一地点的不同描述），保留所有有独立功能的场景
 4. 按时间线重新排列情节点
 5. 提炼核心主题
-6. 为每个角色和场景补充英文 visualPrompt（如果缺失），visualPrompt 必须是纯英文
+6. 为每个角色和场景补充中文 visualPrompt（如果缺失），visualPrompt 必须是中文生图提示词
 7. 给出一个合适的故事标题
 
 重要：保留所有有名字的角色，即使只出现过一两次。只合并同一个人的不同称呼/别名，不要因为角色不重要就删除。
@@ -593,8 +632,8 @@ async function analyzeByChapters(
 {
   "title": "故事标题",
   "summary": "300字以内完整梗概",
-  "characters": [{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "..." }],
-  "locations": [{ "name": "...", "description": "...", "visualPrompt": "..." }],
+  "characters": [{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "中文生图提示词" }],
+  "locations": [{ "name": "...", "description": "...", "visualPrompt": "中文生图提示词" }],
   "plotPoints": [{ "chapter": 1, "summary": "...", "emotionalTone": "...", "keyEvents": ["..."] }],
   "themes": ["主题1", "主题2"]
 }`;
@@ -853,7 +892,7 @@ async function analyzeChunksAndMerge(
 3. 合并重复的场景
 4. 按时间线重新排列情节点
 5. 提炼核心主题
-6. 为每个角色和场景补充英文 visualPrompt（如果缺失）
+6. 为每个角色和场景补充中文 visualPrompt（如果缺失）
 
 返回与输入相同的 JSON 格式。`;
 
@@ -899,66 +938,98 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
   const project = getProject(projectId);
   if (!project) return { success: false, error: '项目不存在' };
 
-  const systemPrompt = `你是一位版权合规专家兼视觉设计师。请对以下故事元素进行改造，确保不侵犯原作版权，同时为每个角色和场景生成英文生图提示词。
+  const config = getLLMConfig();
+  // 只处理主角和配角，龙套不需要版权改造
+  const mainChars = project.novel.characters.filter(c => c.role !== 'minor');
+  const locs = project.novel.locations;
+
+  // 版权改造 system prompt（角色批次和场景批次共用基础指令）
+  const charSystemPrompt = `你是一位版权合规专家兼视觉设计师。请对以下角色进行版权改造。
 
 改造规则：
 1. 所有角色名更换为全新名字，保持角色性格和关系不变
-2. 所有地名更换，保持地理特征和氛围不变
-3. 核心情节保留，具体细节改编
-4. 保持故事情感内核和主题不变
-5. 公共领域作品（如水浒传、西游记等）可适度保留
-6. 为每个角色生成统一风格前缀的英文生图提示词（用于 AI 生图工具）
-7. 为每个场景生成英文生图提示词
+2. 公共领域作品（如水浒传、西游记等）可适度保留
+3. 为每个角色生成中文生图提示词（描述外貌、服装、姿态、场景氛围）
+4. 为每个角色设定默认服化道（costumeDesc）：日常服装、妆容特征、标志性道具
 
-请以 JSON 格式返回：
+返回 JSON：
 {
-  "newTitle": "新标题",
   "characters": [
     {
       "originalName": "原名",
       "newName": "新名",
       "adjustedDescription": "调整后的中文外貌描述",
-      "visualPrompt": "English image generation prompt with style prefix, e.g.: Chinese ink wash painting style, full body portrait, young warrior with..."
+      "visualPrompt": "中文生图提示词",
+      "costumeDesc": "默认服化道描述"
     }
-  ],
+  ]
+}`;
+
+  const locSystemPrompt = `你是一位版权合规专家兼视觉设计师。请对以下场景/地点进行版权改造。
+
+改造规则：
+1. 所有地名更换，保持地理特征和氛围不变
+2. 公共领域作品可适度保留
+3. 为每个场景生成中文生图提示词
+
+返回 JSON：
+{
   "locations": [
     {
       "originalName": "原名",
       "newName": "新名",
       "adjustedDescription": "调整后的中文环境描述",
-      "visualPrompt": "English image generation prompt with style prefix"
+      "visualPrompt": "中文生图提示词"
     }
   ]
 }`;
 
-  const userContent = `标题：${project.novel.originalTitle || project.novel.title}
-角色：${JSON.stringify(project.novel.characters.map(c => ({ name: c.originalName, role: c.role, desc: c.description })))}
-地点：${JSON.stringify(project.novel.locations.map(l => ({ name: l.originalName, desc: l.description })))}`;
+  // 分批处理角色（每批最多 10 个，避免输出截断）
+  const CHAR_BATCH_SIZE = 10;
+  const LOC_BATCH_SIZE = 15;
 
-  const config = getLLMConfig();
-  const startTime = Date.now();
-  const result = await chatCompletionJSON<Record<string, unknown>>(systemPrompt, userContent);
-  const durationMs = Date.now() - startTime;
+  for (let i = 0; i < mainChars.length; i += CHAR_BATCH_SIZE) {
+    const batch = mainChars.slice(i, i + CHAR_BATCH_SIZE);
+    const batchLabel = `角色 ${i + 1}-${Math.min(i + CHAR_BATCH_SIZE, mainChars.length)}/${mainChars.length}`;
+    const userContent = `故事标题：${project.novel.originalTitle || project.novel.title}\n角色列表：${JSON.stringify(batch.map(c => ({ name: c.originalName, role: c.role, desc: c.description })))}`;
 
-  logLLMCall({ projectId, step: 'copyright', provider: config.provider, model: config.model, durationMs, success: result.success, error: result.error });
+    const startTime = Date.now();
+    const result = await chatCompletionJSON<{ characters?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string; costumeDesc?: string }> }>(charSystemPrompt, userContent);
+    logLLMCall({ projectId, step: `copyright_chars_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
 
-  if (!result.success || !result.data) return { success: false, error: result.error || 'LLM 版权改造失败' };
+    if (!result.success || !result.data?.characters) {
+      console.log(`[drama] 版权改造 ${batchLabel} 失败: ${result.error}`);
+      continue; // 跳过失败批次，不中断整体流程
+    }
 
-  const transforms = result.data as { newTitle?: string; characters?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string }>; locations?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string }> };
-
-  // 应用改造
-  if (transforms.characters) {
-    for (const t of transforms.characters) {
+    for (const t of result.data.characters) {
       const char = project.novel.characters.find(c => c.originalName === t.originalName);
       if (char) {
         char.newName = t.newName;
         if (t.adjustedDescription) char.description = t.adjustedDescription;
         if (t.visualPrompt) char.visualPrompt = t.visualPrompt;
+        if (t.costumeDesc) char.costumeDesc = t.costumeDesc;
       }
     }
+    console.log(`[drama] 版权改造 ${batchLabel} 完成`);
   }
-  if (transforms.locations) {
-    for (const t of transforms.locations) {
+
+  // 分批处理场景
+  for (let i = 0; i < locs.length; i += LOC_BATCH_SIZE) {
+    const batch = locs.slice(i, i + LOC_BATCH_SIZE);
+    const batchLabel = `场景 ${i + 1}-${Math.min(i + LOC_BATCH_SIZE, locs.length)}/${locs.length}`;
+    const userContent = `故事标题：${project.novel.originalTitle || project.novel.title}\n场景列表：${JSON.stringify(batch.map(l => ({ name: l.originalName, desc: l.description })))}`;
+
+    const startTime = Date.now();
+    const result = await chatCompletionJSON<{ locations?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string }> }>(locSystemPrompt, userContent);
+    logLLMCall({ projectId, step: `copyright_locs_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+
+    if (!result.success || !result.data?.locations) {
+      console.log(`[drama] 版权改造 ${batchLabel} 失败: ${result.error}`);
+      continue;
+    }
+
+    for (const t of result.data.locations) {
       const loc = project.novel.locations.find(l => l.originalName === t.originalName);
       if (loc) {
         loc.newName = t.newName;
@@ -966,15 +1037,92 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
         if (t.visualPrompt) loc.visualPrompt = t.visualPrompt;
       }
     }
+    console.log(`[drama] 版权改造 ${batchLabel} 完成`);
   }
-  if (transforms.newTitle) project.novel.title = transforms.newTitle;
+
+  // 生成新标题
+  const titleResult = await chatCompletionJSON<{ newTitle: string }>(
+    '你是一位版权合规专家。请为以下故事生成一个全新的标题（不侵犯原作版权）。返回 JSON：{"newTitle": "新标题"}',
+    `原标题：${project.novel.originalTitle || project.novel.title}\n故事梗概：${project.novel.summary.substring(0, 500)}`,
+  );
+  if (titleResult.success && titleResult.data?.newTitle) {
+    project.novel.title = titleResult.data.newTitle;
+  }
 
   updateProject(projectId, { novel: project.novel, status: 'character_confirm' });
+  console.log(`[drama] 版权改造完成: ${mainChars.length} 角色 (已跳过 ${project.novel.characters.length - mainChars.length} 个龙套), ${locs.length} 场景`);
   return { success: true, project: getProject(projectId) };
 }
 
+// 刷新已有项目的 visualPrompt（英文→中文），不影响其他数据
+export async function refreshVisualPrompts(projectId: string): Promise<{ success: boolean; error?: string }> {
+  const project = getProject(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+
+  const systemPrompt = `你是一位视觉设计师。请为以下角色和场景生成中文生图提示词（visualPrompt）。
+要求：
+- 必须是纯中文
+- 包含外貌、服装、姿态、场景氛围等视觉细节
+- 风格前缀使用：${project.style}
+
+返回 JSON：
+{
+  "characters": [
+    { "id": "角色ID", "visualPrompt": "中文生图提示词" }
+  ],
+  "locations": [
+    { "id": "场景ID", "visualPrompt": "中文生图提示词" }
+  ]
+}`;
+
+  const userContent = JSON.stringify({
+    characters: project.novel.characters.filter(c => c.role !== 'minor').map(c => ({
+      id: c.id, name: c.newName, description: c.description, personality: c.personality,
+      currentPrompt: c.visualPrompt,
+    })),
+    locations: project.novel.locations.map(l => ({
+      id: l.id, name: l.newName, description: l.description,
+      currentPrompt: l.visualPrompt,
+    })),
+  });
+
+  const config = getLLMConfig();
+  const startTime = Date.now();
+  const result = await chatCompletionJSON<{ characters?: Array<{ id: string; visualPrompt: string }>; locations?: Array<{ id: string; visualPrompt: string }> }>(systemPrompt, userContent);
+  logLLMCall({ projectId, step: 'refresh_prompts', provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+
+  if (!result.success || !result.data) return { success: false, error: result.error || '刷新失败' };
+
+  const data = result.data;
+  if (data.characters) {
+    for (const item of data.characters) {
+      const char = project.novel.characters.find(c => c.id === item.id);
+      if (char && item.visualPrompt) {
+        char.visualPrompt = item.visualPrompt;
+        // 取消确认，清空旧图片，让用户用新 prompt 重新生成
+        char.confirmed = false;
+        char.imageUrls = [];
+      }
+    }
+  }
+  if (data.locations) {
+    for (const item of data.locations) {
+      const loc = project.novel.locations.find(l => l.id === item.id);
+      if (loc && item.visualPrompt) {
+        loc.visualPrompt = item.visualPrompt;
+        loc.imageUrl = undefined; // 清空旧场景图
+      }
+    }
+  }
+
+  updateProject(projectId, { novel: project.novel, status: 'character_confirm' });
+  console.log(`[drama] visualPrompt 已刷新为中文: ${data.characters?.length || 0} 角色, ${data.locations?.length || 0} 场景`);
+  return { success: true };
+}
+
+
 // 第3步：生成分镜脚本 - 集成阶段1（Seedance 时间轴格式）+ 阶段2（创意四关审核）
-export async function generateScript(projectId: string): Promise<{ success: boolean; project?: DramaProject; error?: string }> {
+export async function generateScript(projectId: string, onProgress?: (msg: string) => void): Promise<{ success: boolean; project?: DramaProject; error?: string }> {
   const project = getProject(projectId);
   if (!project) return { success: false, error: '项目不存在' };
 
@@ -982,30 +1130,47 @@ export async function generateScript(projectId: string): Promise<{ success: bool
   const total = project.targetEpisodes;
   const dur = project.episodeDuration;
 
-  // 构建角色和场景上下文（所有批次共用）
+  // 构建角色和场景上下文（精简版，减少 token 消耗）
+  const mainChars = project.novel.characters.filter(c => c.role !== 'minor');
   const storyContext = `故事：${project.novel.summary}
 风格：${project.style}
-角色：
-${project.novel.characters.filter(c => c.role !== 'minor').map(c => `- ${c.newName}(${c.id}): ${c.description}，性格：${c.personality}`).join('\n')}
-场景：
+
+## 角色（全剧外貌统一，用ID引用）
+${mainChars.map(c => `- ${c.newName}(${c.id}): ${c.description}，${c.personality}${c.costumeDesc ? `｜服化道：${c.costumeDesc}` : ''}`).join('\n')}
+
+## 场景（同场景视觉统一，用ID引用）
 ${project.novel.locations.map(l => `- ${l.newName}(${l.id}): ${l.description}`).join('\n')}
+
+## 一致性规则
+- 角色外貌/服化道每次出场必须一致，换装需说明原因
+- 同一场景的光线、色调、布局在不同集中保持统一
+- 用角色ID(C01)和场景ID(S01)引用
+
 情节：
-${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${p.summary}\n  关键事件：${(p.keyEvents || []).join('、')}`).join('\n')}
+${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${p.summary}｜${(p.keyEvents || []).join('、')}`).join('\n')}
 主题：${project.novel.themes.join('、')}`;
 
-  // 构建时间轴模板
-  const timeSlots: string[] = [];
-  for (let t = 0; t < dur; t += 3) {
-    const end = Math.min(t + 3, dur);
-    timeSlots.push(`${t}-${end}s画面：[镜头运动]，[画面描述]`);
-  }
-  const timeTemplate = timeSlots.join('\n');
+  // 计算分镜参数
+  const MAX_SHOT_DURATION = 15; // Seedance 单次最长 15 秒
+  const shotsPerEp = Math.ceil(dur / MAX_SHOT_DURATION);
+  const lastShotDuration = dur % MAX_SHOT_DURATION || MAX_SHOT_DURATION;
+
+  // 构建分镜时间轴模板（每个 shot 内部的时间轴）
+  const buildShotTimeTemplate = (shotDuration: number) => {
+    const slots: string[] = [];
+    for (let t = 0; t < shotDuration; t += 3) {
+      const end = Math.min(t + 3, shotDuration);
+      slots.push(`${t}-${end}s画面：[景别+运镜]，[画面描述，包含角色外貌和服化道]`);
+    }
+    return slots.join('\n');
+  };
 
   // 根据模型输出能力决定每批生成多少集
-  // 每集脚本约 500-800 token 输出，保守按 800 算
+  // 分镜模式下每集输出更多，按 shotsPerEp * 400 token 估算
   const config = getLLMConfig();
   const outputTokens = config.maxTokens || 8000;
-  const epsPerBatch = Math.max(2, Math.floor(outputTokens / 800));
+  const tokensPerEp = shotsPerEp * 400;
+  const epsPerBatch = Math.max(1, Math.floor(outputTokens / tokensPerEp));
   const batches: Array<{ from: number; to: number; act: string }> = [];
 
   // 按四幕分配集数范围
@@ -1030,10 +1195,24 @@ ${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${
     }
   }
 
-  console.log(`[drama] 脚本生成: ${total} 集, 分 ${batches.length} 批 (每批约 ${epsPerBatch} 集)`);
+  console.log(`[drama] 脚本生成: ${total} 集, 每集 ${dur}s = ${shotsPerEp} 个分镜, 分 ${batches.length} 批 (每批约 ${epsPerBatch} 集)`);
+  onProgress?.(`脚本生成: ${total} 集 (每集 ${shotsPerEp} 个分镜), 分 ${batches.length} 批`);
+
+  // 构建分镜示例（只展示首尾两个，减少 token）
+  const shotExampleFirst = `      { "index": 1, "startTime": 0, "endTime": ${Math.min(MAX_SHOT_DURATION, dur)}, "prompt": "${project.style}，${project.ratio}，[氛围]\\n${buildShotTimeTemplate(Math.min(MAX_SHOT_DURATION, dur))}\\n【声音】[配乐]+[音效]+[对白]\\n【参考】@图片1 [用途]", "characterRefs": ["C01"], "locationRefs": ["S01"], "transition": "转场方式" }`;
+  const lastStart = (shotsPerEp - 1) * MAX_SHOT_DURATION;
+  const shotExampleLast = shotsPerEp > 1
+    ? `,\n      { "index": ${shotsPerEp}, "startTime": ${lastStart}, "endTime": ${lastStart + lastShotDuration}, "prompt": "...(同格式)", "characterRefs": ["C02"], "locationRefs": ["S02"], "transition": "" }`
+    : '';
+  const shotExample = shotExampleFirst + (shotsPerEp > 2 ? ',\n      "... 中间分镜省略，共 ' + shotsPerEp + ' 个"' : '') + shotExampleLast;
 
   const buildScriptSystemPrompt = (batchFrom: number, batchTo: number, batchAct: string, prevEndingFrame?: string) => {
-    let prompt = `你是一位专业的短剧编剧兼视频创意总监。请生成第 ${batchFrom}-${batchTo} 集的分镜脚本，每集 ${dur} 秒。
+    let prompt = `你是一位专业的短剧编剧兼视频创意总监。请生成第 ${batchFrom}-${batchTo} 集的分镜脚本。
+
+## 关键参数
+- 每集总时长：${dur} 秒
+- 每集分镜数：${shotsPerEp} 个（每个分镜最长 ${MAX_SHOT_DURATION} 秒，最后一个分镜 ${lastShotDuration} 秒）
+- 视频生成引擎每次只能生成最长 ${MAX_SHOT_DURATION} 秒视频，所以必须拆分为多个分镜
 
 ## 全剧四幕结构（起承转合）共 ${total} 集
 - 起（第1幕）：第 1-${actsDistribution[0]} 集 — 人物介绍、世界观建立、事件起因
@@ -1043,33 +1222,39 @@ ${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${
 
 当前批次属于【${batchAct}】阶段。
 
-## Seedance 2.0 时间轴分镜格式要求
-每集的 prompt 必须严格按以下格式：
+## 分镜 prompt 格式（每个 shot 的 prompt 必须独立完整）
+每个分镜的 prompt 格式：
 
-${project.style}，${project.ratio}，[整体氛围]
+${project.style}，${project.ratio}，[该分镜的氛围]
 
-${timeTemplate}
+[时间轴画面描述，每3秒一段]
 
 【声音】[配乐风格] + [音效] + [对白/旁白]
-【参考】@图片1 [角色/场景用途]，@图片2 [用途]...
+【参考】@图片1 [角色/场景用途]
+
+## 分镜拆分原则
+1. 每个分镜是一个独立的视频片段，prompt 必须自包含（不依赖其他分镜的上下文）
+2. 每个分镜的画面描述中必须包含角色的完整外貌和服化道描述（因为每个分镜独立生成）
+3. 分镜之间通过 transition 字段指定转场方式（如：硬切、淡入淡出、遮挡擦镜、无缝渐变等）
+4. 同一场景内的连续分镜，后一个分镜开头要与前一个分镜结尾画面衔接
+5. 场景切换时，transition 要明确标注转场类型
 
 ## 运镜关键词（必须从以下词库选取）
 景别：大远景、远景、全景、中景、近景、特写、大特写
 运镜：推镜头、拉镜头、摇镜头、移镜头、跟拍、环绕拍摄、航拍、手持跟拍、希区柯克变焦
 角度：平视、俯拍、仰拍、低角度、鸟瞰视角、第一人称视角
 节奏：慢动作、快切、延时摄影、一镜到底、升格拍摄
-特殊：遮挡擦镜转场、无缝渐变转场、环绕摇镜快切特写、定格慢放
+转场：硬切、淡入淡出、遮挡擦镜转场、无缝渐变转场、闪白、闪黑、叠化
 
 ## 创意四关自审
-生成每集脚本后，必须自我审核：
 1. 记忆点：观众看完能记住什么？
 2. 意外感：是否有反转、对比、夸张？
-3. 情绪弧线：有没有情绪变化？
-4. 叙事变化：即使 ${dur} 秒也要有"从A到B"的变化
+3. 情绪弧线：${dur} 秒内有没有情绪变化？
+4. 叙事变化：有清晰的从A到B的变化
 
 ## 集与集衔接
-- 每集必须有 endingFrame（最后一帧画面描述）
-- 下一集开头要与上一集 endingFrame 自然衔接`;
+- 每集最后一个分镜的最后一帧作为 endingFrame
+- 下一集第一个分镜开头要与上一集 endingFrame 自然衔接`;
 
     if (prevEndingFrame) {
       prompt += `\n\n## 上一集结尾画面（必须衔接）\n${prevEndingFrame}`;
@@ -1083,151 +1268,459 @@ ${timeTemplate}
     "title": "集标题",
     "act": "起/承/转/合",
     "emotionalTone": "情感基调",
-    "prompt": "完整的 Seedance 2.0 时间轴格式提示词",
+    "shots": [
+${shotExample}
+    ],
     "characterRefs": ["C01", "C02"],
     "locationRefs": ["S01"],
-    "endingFrame": "最后一帧的详细画面描述"
+    "endingFrame": "最后一个分镜最后一帧的详细画面描述"
   }
-]`;
+]
+
+注意：prompt 字段不再需要，用 shots 数组替代。每个 shot 的 prompt 是独立完整的视频生成提示词。`;
     return prompt;
   };
 
+  // 按四幕分组：同一幕内并发，幕间串行（传递 endingFrame 衔接）
+  const actGroups: Map<string, Array<{ from: number; to: number; act: string; idx: number }>> = new Map();
+  const actOrder: string[] = [];
+  batches.forEach((b, idx) => {
+    if (!actGroups.has(b.act)) {
+      actGroups.set(b.act, []);
+      actOrder.push(b.act);
+    }
+    actGroups.get(b.act)!.push({ ...b, idx: idx + 1 });
+  });
+
   const allEpisodes: EpisodeScript[] = [];
   let prevEndingFrame: string | undefined;
+  let completedBatches = 0;
+  const SCRIPT_CONCURRENCY = 2; // LLM 并发数，避免速率限制
 
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const systemPrompt = buildScriptSystemPrompt(batch.from, batch.to, batch.act, prevEndingFrame);
+  for (const act of actOrder) {
+    const actBatches = actGroups.get(act)!;
 
-    const startTime = Date.now();
-    const result = await chatCompletionJSON<EpisodeScript[]>(systemPrompt, storyContext);
-    const durationMs = Date.now() - startTime;
+    // 单批执行逻辑
+    const runBatch = async (batch: typeof actBatches[0]) => {
+      const isFirstInAct = batch === actBatches[0];
+      const systemPrompt = buildScriptSystemPrompt(batch.from, batch.to, batch.act, isFirstInAct ? prevEndingFrame : undefined);
 
-    logLLMCall({ projectId, step: `script_batch_${i + 1}`, provider: config.provider, model: config.model, durationMs, success: result.success, error: result.error });
+      console.log(`[drama] 脚本批次 ${batch.idx}/${batches.length} 开始: 第 ${batch.from}-${batch.to} 集 (${batch.act})`);
+      onProgress?.(`脚本批次 ${batch.idx}/${batches.length} 请求中: 第 ${batch.from}-${batch.to} 集...`);
 
-    if (!result.success || !result.data) {
-      console.log(`[drama] 脚本批次 ${i + 1}/${batches.length} 失败: ${result.error}`);
-      return { success: false, error: `第 ${batch.from}-${batch.to} 集脚本生成失败: ${result.error}` };
+      // 带重试的 LLM 调用（最多 2 次）
+      let result: { success: boolean; data?: EpisodeScript[]; error?: string; raw?: string } | null = null;
+      let durationMs = 0;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+          console.log(`[drama] 脚本批次 ${batch.idx} 重试 (第 ${attempt + 1} 次)`);
+          onProgress?.(`脚本批次 ${batch.idx} 重试中...`);
+        }
+        const startTime = Date.now();
+        result = await chatCompletionJSON<EpisodeScript[]>(systemPrompt, storyContext, { timeoutMs: 300000 });
+        durationMs = Date.now() - startTime;
+        if (result.success && result.data) break;
+        console.log(`[drama] 脚本批次 ${batch.idx} 第 ${attempt + 1} 次失败 (${(durationMs / 1000).toFixed(1)}s): ${result.error}`);
+      }
+
+      logLLMCall({ projectId, step: `script_batch_${batch.idx}`, provider: config.provider, model: config.model, durationMs, success: result!.success, error: result!.error });
+
+      completedBatches++;
+      console.log(`[drama] 脚本批次 ${batch.idx}/${batches.length} 完成 (${(durationMs / 1000).toFixed(1)}s): 第 ${batch.from}-${batch.to} 集`);
+      onProgress?.(`脚本批次 ${completedBatches}/${batches.length} 完成`);
+
+      return { batch, result: result!, durationMs };
+    };
+
+    // 带并发限制执行同一幕的批次
+    const actResults: Array<{ batch: typeof actBatches[0]; result: { success: boolean; data?: EpisodeScript[]; error?: string; raw?: string }; durationMs: number }> = [];
+    for (let i = 0; i < actBatches.length; i += SCRIPT_CONCURRENCY) {
+      const chunk = actBatches.slice(i, i + SCRIPT_CONCURRENCY);
+      const chunkResults = await Promise.all(chunk.map(runBatch));
+      actResults.push(...chunkResults);
     }
 
-    const batchEpisodes = Array.isArray(result.data) ? result.data : [];
-    allEpisodes.push(...batchEpisodes);
+    // 按集号排序合并结果
+    actResults.sort((a, b) => a.batch.from - b.batch.from);
 
-    // 记录最后一集的 endingFrame 供下批衔接
-    if (batchEpisodes.length > 0) {
-      prevEndingFrame = batchEpisodes[batchEpisodes.length - 1].endingFrame;
+    for (const { batch, result } of actResults) {
+      if (!result.success || !result.data) {
+        console.log(`[drama] 脚本批次 ${batch.idx}/${batches.length} 失败，跳过 (后续补生成): ${result.error}`);
+        continue;
+      }
+
+      const batchEpisodes = Array.isArray(result.data) ? result.data : [];
+      for (const ep of batchEpisodes) {
+        if (!ep.shots) ep.shots = [];
+        ep.prompt = ep.shots.map(s => `[分镜${s.index} ${s.startTime}-${s.endTime}s]\n${s.prompt}`).join('\n\n');
+      }
+      allEpisodes.push(...batchEpisodes);
+
+      // 记录本幕最后一集的 endingFrame 供下一幕衔接
+      if (batchEpisodes.length > 0) {
+        prevEndingFrame = batchEpisodes[batchEpisodes.length - 1].endingFrame;
+      }
     }
 
-    console.log(`[drama] 脚本批次 ${i + 1}/${batches.length} 完成: 第 ${batch.from}-${batch.to} 集 (${batchEpisodes.length} 集)`);
+    console.log(`[drama] 【${act}】阶段完成: ${actBatches.length} 批并发, 共 ${actResults.reduce((s, r) => s + (Array.isArray(r.result.data) ? r.result.data.length : 0), 0)} 集`);
   }
 
-  updateProject(projectId, { episodes: allEpisodes, status: 'optimizing' });
-
-  // 阶段2：创意优化 - 对生成的脚本进行创意四关审核
-  const optimizeResult = await optimizeScripts(projectId);
-  if (!optimizeResult.success) {
-    // 优化失败不阻塞，使用原始脚本
-    console.log(`[drama] 创意优化失败，使用原始脚本: ${optimizeResult.error}`);
-    updateProject(projectId, { status: 'ready' });
+  // 校验集数完整性：检查是否有缺失的集号
+  const existingNumbers = new Set(allEpisodes.map(ep => ep.number));
+  const missingNumbers: number[] = [];
+  for (let n = 1; n <= total; n++) {
+    if (!existingNumbers.has(n)) missingNumbers.push(n);
   }
+
+  if (missingNumbers.length > 0) {
+    console.log(`[drama] 检测到缺失集: ${missingNumbers.join(', ')}，补生成中...`);
+    onProgress?.(`补生成缺失的 ${missingNumbers.length} 集: ${missingNumbers.join(', ')}`);
+
+    // 逐集补生成
+    for (const num of missingNumbers) {
+      const prevEp = allEpisodes.find(e => e.number === num - 1);
+      const actRange = actRanges.find(r => num >= r.from && num <= r.to);
+      const act = actRange?.act || '承';
+      const systemPrompt = buildScriptSystemPrompt(num, num, act, prevEp?.endingFrame);
+
+      const result = await chatCompletionJSON<EpisodeScript[]>(systemPrompt, storyContext, { timeoutMs: 300000 });
+      if (result.success && result.data) {
+        const eps = Array.isArray(result.data) ? result.data : [];
+        for (const ep of eps) {
+          if (!ep.shots) ep.shots = [];
+          ep.prompt = ep.shots.map(s => `[分镜${s.index} ${s.startTime}-${s.endTime}s]\n${s.prompt}`).join('\n\n');
+        }
+        allEpisodes.push(...eps);
+        console.log(`[drama] 补生成第 ${num} 集完成`);
+      } else {
+        console.log(`[drama] 补生成第 ${num} 集失败: ${result.error}`);
+      }
+    }
+  }
+
+  // 按集号排序
+  allEpisodes.sort((a, b) => a.number - b.number);
+
+  // 去重（同一集号保留最后一个）
+  const deduped: EpisodeScript[] = [];
+  const seen = new Set<number>();
+  for (let i = allEpisodes.length - 1; i >= 0; i--) {
+    if (!seen.has(allEpisodes[i].number)) {
+      seen.add(allEpisodes[i].number);
+      deduped.unshift(allEpisodes[i]);
+    }
+  }
+
+  console.log(`[drama] 脚本生成完成: 目标 ${total} 集, 实际 ${deduped.length} 集`);
+  updateProject(projectId, { episodes: deduped, status: 'ready' });
+  onProgress?.(`脚本生成完成: ${deduped.length} 集`);
 
   return { success: true, project: getProject(projectId) };
 }
 
-// 阶段2：创意四关审核与优化（支持分批处理大量集数）
-async function optimizeScripts(projectId: string): Promise<{ success: boolean; error?: string }> {
+// 创意优化：逐集优化，并发处理，支持进度回调
+const OPTIMIZE_SINGLE_PROMPT = `你是视频创意总监。请对以下单集分镜脚本进行创意四关审核和优化。
+
+## 创意四关审核标准（严格评分，禁止虚高）
+1. **记忆点**(0-3分)：有让人过目不忘的画面/台词=3分，有亮点但不够震撼=2分，一般=1分，没有=0分
+2. **意外感**(0-3分)：有出人意料的反转/对比=3分，有小巧思=2分，有轻微变化=1分，全是套路=0分
+3. **情绪弧线**(0-2分)：有明显情绪起伏和转折=2分，有轻微变化=1分，平淡=0分
+4. **叙事变化**(0-2分)：有清晰的从A到B的变化=2分，有变化但不明显=1分，静态展示=0分
+
+⚠ 评分规则：
+- 满分10分极其罕见，只有真正惊艳的作品才配得上
+- 大多数脚本应该在 5-7 分之间
+- 如果你给出 8 分以上，必须在 notes 中详细说明每项为什么值这个分数
+- 先优化再打分，打分基于优化后的版本
+- 5分以下的必须大幅重写
+
+## 优化手段
+- 选择更有表现力的运镜（如：普通推镜头→希区柯克变焦）
+- 增加情绪对比和视觉冲突
+- 优化时间轴节奏分配（重点画面给更多时间）
+- 加入声音设计细节（环境音、音效先行、ASMR质感等）
+
+## 集间衔接要求（极其重要）
+- 如果提供了"上一集结尾画面"，本集开头必须与之自然衔接（画面、情绪、节奏平滑过渡）
+- 如果提供了"下一集开头画面"，本集结尾必须为其做好铺垫
+- endingFrame 必须精确描述最后一帧，作为下一集的衔接锚点
+- 转场不能生硬跳切，优先使用：情绪延续、视觉呼应、声音桥接等手法
+
+## 服化道一致性（不可破坏）
+- 优化时不得随意更改角色的服装、妆容、道具描述
+- 如果原脚本中角色穿的是默认服装，优化后必须保持一致
+- 如果原脚本中有换装描述和原因，优化后必须保留
+- 标志性道具（手链、眼镜、绷带等）不可遗漏
+
+返回 JSON：
+{
+  "number": 集号,
+  "title": "优化后标题",
+  "act": "起/承/转/合",
+  "emotionalTone": "情感基调",
+  "shots": [{"index": 1, "startTime": 0, "endTime": 15, "prompt": "优化后的分镜提示词", "characterRefs": ["C01"], "locationRefs": ["S01"], "transition": "转场方式"}],
+  "characterRefs": ["C01"],
+  "locationRefs": ["S01"],
+  "endingFrame": "最后一帧画面描述",
+  "score": 总分(0-10整数),
+  "scoreDetail": {"记忆点": 0-3, "意外感": 0-3, "情绪弧线": 0-2, "叙事变化": 0-2},
+  "notes": "各项扣分原因和优化说明"
+}
+注意：如果输入有 shots 数组，必须逐分镜优化并返回 shots；如果输入只有 prompt，返回优化后的 prompt 即可。`;
+
+// 构建角色服化道上下文（供优化和生成时复用）
+function buildCostumeContext(characters: CharacterInfo[]): string {
+  const mainChars = characters.filter(c => c.role !== 'minor' && c.costumeDesc);
+  if (mainChars.length === 0) return '';
+  return '\n\n角色服化道设定（全剧基准）：\n' + mainChars.map(c =>
+    `- ${c.newName}(${c.id}): ${c.costumeDesc}`
+  ).join('\n');
+}
+
+export async function optimizeScripts(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; error?: string }> {
   const project = getProject(projectId);
   if (!project || project.episodes.length === 0) return { success: false, error: '无脚本可优化' };
 
   const config = getLLMConfig();
-  const contextLimit = getModelContextLimit(config);
-  const outputTokens = config.maxTokens || 8000;
-  const safeInputChars = Math.floor((contextLimit - 2000 - outputTokens) / 1.5);
+  const total = project.episodes.length;
+  const CONCURRENCY = 5;
+  let doneCount = 0;
 
-  const optimizeSystemPrompt = `你是视频创意总监。请对以下短剧分镜脚本进行创意四关审核和优化。
+  console.log(`[drama] 创意优化: ${total} 集, 并发 ${CONCURRENCY}`);
+  onProgress?.(`创意优化: ${total} 集, 并发 ${CONCURRENCY}`);
 
-## 创意四关审核标准
-对每集逐一检查：
-1. **记忆点**：观众看完能记住什么？答案是"没什么"就重写
-2. **意外感**：是否有反转、对比、夸张、不寻常的细节？全是意料之中=无聊
-3. **情绪弧线**：有没有情绪变化？紧张→释放、平静→爆发、温馨→反转
-4. **叙事变化**：即使几秒也要有"从A到B"的变化，不是静态展示
+  const optimizedEpisodes = [...project.episodes]; // 拷贝，逐集替换
+  const scores: number[] = [];
 
-## 优化手段
-- 调整运镜关键词，选择更有表现力的运镜（如：普通推镜头→希区柯克变焦）
-- 增加情绪对比和视觉冲突
-- 优化时间轴节奏分配（不要平均分配，重点画面给更多时间）
-- 确保集与集之间衔接自然（endingFrame → 下集开头）
-- 加入声音设计细节（环境音、音效先行、ASMR质感等）
+  // 优化单集（带上下集衔接上下文）
+  const optimizeOne = async (index: number): Promise<void> => {
+    const ep = project.episodes[index];
+    const prevEp = index > 0 ? project.episodes[index - 1] : null;
+    const nextEp = index < project.episodes.length - 1 ? project.episodes[index + 1] : null;
 
-## 要求
-- 对每集给出审核评分（1-10分）和修改说明
-- 评分低于7分的集数必须重写 prompt
-- 返回优化后的完整脚本数组（格式与输入相同）
-
-返回 JSON：
-{
-  "episodes": [原格式的优化后脚本数组],
-  "reviews": [
-    { "number": 1, "score": 8, "notes": "记忆点：xxx，优化了xxx" }
-  ]
-}`;
-
-  // 将集数分批，每批不超过 token 限制
-  const allEpisodes = project.episodes;
-  const batches: EpisodeScript[][] = [];
-  let currentBatch: EpisodeScript[] = [];
-  let currentSize = 0;
-
-  for (const ep of allEpisodes) {
-    const epSize = JSON.stringify(ep).length;
-    // 预留 style 前缀和 JSON 格式开销
-    if (currentSize + epSize > safeInputChars - 200 && currentBatch.length > 0) {
-      batches.push(currentBatch);
-      currentBatch = [];
-      currentSize = 0;
+    let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
+    if (prevEp?.endingFrame) {
+      userContent += `\n\n上一集(E${String(prevEp.number).padStart(2, '0')})结尾画面：${prevEp.endingFrame}`;
     }
-    currentBatch.push(ep);
-    currentSize += epSize;
-  }
-  if (currentBatch.length > 0) batches.push(currentBatch);
-
-  console.log(`[drama] 创意优化: ${allEpisodes.length} 集, 分 ${batches.length} 批处理`);
-
-  const allOptimized: EpisodeScript[] = [];
-  const allReviews: Array<{ number: number; score: number; notes: string }> = [];
-
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const userContent = `风格：${project.style}
-当前脚本（第 ${batch[0].number}-${batch[batch.length - 1].number} 集，共 ${allEpisodes.length} 集中的第 ${i + 1} 批）：
-${JSON.stringify(batch, null, 2)}`;
+    if (nextEp) {
+      const nextOpening = nextEp.prompt.split('\n').find(l => l.match(/^0-\d+s/)) || nextEp.prompt.split('\n')[2] || '';
+      userContent += `\n\n下一集(E${String(nextEp.number).padStart(2, '0')})开头画面：${nextOpening}`;
+    }
 
     const startTime = Date.now();
-    const result = await chatCompletionJSON<{ episodes?: EpisodeScript[]; reviews?: Array<{ number: number; score: number; notes: string }> }>(
-      optimizeSystemPrompt, userContent,
-    );
-    logLLMCall({ projectId, step: `optimize_batch_${i + 1}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+    const result = await chatCompletionJSON<Record<string, unknown>>(OPTIMIZE_SINGLE_PROMPT, userContent);
+    logLLMCall({ projectId, step: `optimize_ep_${ep.number}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
 
-    if (result.success && result.data?.episodes) {
-      allOptimized.push(...result.data.episodes);
-      if (result.data.reviews) allReviews.push(...result.data.reviews);
-      console.log(`[drama] 优化批次 ${i + 1}/${batches.length} 完成: ${result.data.episodes.length} 集`);
+    if (result.success && result.data) {
+      const d = result.data;
+      // 用优化结果替换，保留原始字段作为 fallback
+      optimizedEpisodes[index] = {
+        number: (d.number as number) || ep.number,
+        title: (d.title as string) || ep.title,
+        act: (d.act as string) || ep.act,
+        emotionalTone: (d.emotionalTone as string) || ep.emotionalTone,
+        prompt: (d.prompt as string) || ep.prompt,
+        shots: (d.shots as Shot[]) || ep.shots, // 保留分镜
+        characterRefs: (d.characterRefs as string[]) || ep.characterRefs,
+        locationRefs: (d.locationRefs as string[]) || ep.locationRefs,
+        endingFrame: (d.endingFrame as string) || ep.endingFrame,
+        score: typeof d.score === 'number' ? d.score : undefined,
+      };
+      // 如果优化返回了 shots，同步更新 prompt 用于显示
+      if (d.shots && Array.isArray(d.shots) && (d.shots as Shot[]).length > 0) {
+        optimizedEpisodes[index].prompt = (d.shots as Shot[]).map(s =>
+          `[分镜${s.index} ${s.startTime}-${s.endTime}s]\n${s.prompt}`
+        ).join('\n\n');
+      }
+      if (typeof d.score === 'number') scores.push(d.score);
+      console.log(`[drama] 优化第 ${ep.number} 集完成 (评分: ${d.score || 'N/A'})`);
     } else {
-      // 该批次优化失败，保留原始脚本
-      allOptimized.push(...batch);
-      console.log(`[drama] 优化批次 ${i + 1}/${batches.length} 失败，保留原始: ${result.error}`);
+      // 失败保留原始
+      console.log(`[drama] 优化第 ${ep.number} 集失败: ${result.error}`);
     }
+
+    doneCount++;
+    onProgress?.(`创意优化: ${doneCount}/${total} 集完成`);
+  };
+
+  // 并发控制：每次最多 CONCURRENCY 个
+  for (let i = 0; i < total; i += CONCURRENCY) {
+    const batch = [];
+    for (let j = i; j < Math.min(i + CONCURRENCY, total); j++) {
+      batch.push(optimizeOne(j));
+    }
+    await Promise.allSettled(batch);
   }
 
-  if (allOptimized.length > 0) {
-    updateProject(projectId, { episodes: allOptimized, status: 'ready' });
-    const avgScore = allReviews.length > 0 ? (allReviews.reduce((s, r) => s + r.score, 0) / allReviews.length).toFixed(1) : 'N/A';
-    console.log(`[drama] 创意优化完成: ${allOptimized.length} 集，平均评分 ${avgScore}`);
-  } else {
-    updateProject(projectId, { status: 'ready' });
+  // 保存优化结果
+  updateProject(projectId, { episodes: optimizedEpisodes });
+  const avgScore = scores.length > 0 ? (scores.reduce((s, v) => s + v, 0) / scores.length).toFixed(1) : 'N/A';
+  console.log(`[drama] 创意优化完成: ${total} 集，平均评分 ${avgScore}`);
+  onProgress?.(`创意优化完成: ${total} 集，平均评分 ${avgScore}`);
+
+  return { success: true };
+}
+
+// 单集创意优化
+export async function optimizeSingleEpisode(
+  projectId: string,
+  episodeNumber: number,
+): Promise<{ success: boolean; error?: string }> {
+  const project = getProject(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+
+  const epIndex = project.episodes.findIndex(e => e.number === episodeNumber);
+  if (epIndex < 0) return { success: false, error: '集数不存在' };
+
+  const ep = project.episodes[epIndex];
+  const config = getLLMConfig();
+  const prevEp = epIndex > 0 ? project.episodes[epIndex - 1] : null;
+  const nextEp = epIndex < project.episodes.length - 1 ? project.episodes[epIndex + 1] : null;
+
+  let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
+  if (prevEp?.endingFrame) {
+    userContent += `\n\n上一集(E${String(prevEp.number).padStart(2, '0')})结尾画面：${prevEp.endingFrame}`;
+  }
+  if (nextEp) {
+    const nextOpening = nextEp.prompt.split('\n').find(l => l.match(/^0-\d+s/)) || nextEp.prompt.split('\n')[2] || '';
+    userContent += `\n\n下一集(E${String(nextEp.number).padStart(2, '0')})开头画面：${nextOpening}`;
   }
 
+  const startTime = Date.now();
+  const result = await chatCompletionJSON<Record<string, unknown>>(OPTIMIZE_SINGLE_PROMPT, userContent);
+  logLLMCall({ projectId, step: `optimize_ep_${ep.number}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+
+  if (!result.success || !result.data) {
+    return { success: false, error: result.error || '优化失败' };
+  }
+
+  const d = result.data;
+  project.episodes[epIndex] = {
+    ...ep, // 保留 refImageUrls、videoUrl 等字段
+    number: (d.number as number) || ep.number,
+    title: (d.title as string) || ep.title,
+    act: (d.act as string) || ep.act,
+    emotionalTone: (d.emotionalTone as string) || ep.emotionalTone,
+    prompt: (d.prompt as string) || ep.prompt,
+    shots: (d.shots as Shot[]) || ep.shots,
+    characterRefs: (d.characterRefs as string[]) || ep.characterRefs,
+    locationRefs: (d.locationRefs as string[]) || ep.locationRefs,
+    endingFrame: (d.endingFrame as string) || ep.endingFrame,
+    score: typeof d.score === 'number' ? d.score : undefined,
+  };
+  // 如果优化返回了 shots，同步更新 prompt
+  if (d.shots && Array.isArray(d.shots) && (d.shots as Shot[]).length > 0) {
+    project.episodes[epIndex].prompt = (d.shots as Shot[]).map(s =>
+      `[分镜${s.index} ${s.startTime}-${s.endTime}s]\n${s.prompt}`
+    ).join('\n\n');
+  }
+
+  updateProject(projectId, { episodes: project.episodes });
+  console.log(`[drama] 单集优化完成: 第 ${episodeNumber} 集 (评分: ${d.score || 'N/A'})`);
+  return { success: true };
+}
+
+// 单集分镜重新生成（保留集的标题/幕/情感基调，只重新生成 shots）
+export async function regenerateEpisodeShots(
+  projectId: string,
+  episodeNumber: number,
+): Promise<{ success: boolean; error?: string }> {
+  const project = getProject(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+
+  const epIndex = project.episodes.findIndex(e => e.number === episodeNumber);
+  if (epIndex < 0) return { success: false, error: '集数不存在' };
+
+  const ep = project.episodes[epIndex];
+  const dur = project.episodeDuration;
+  const total = project.targetEpisodes;
+  const MAX_SHOT_DURATION = 15;
+  const shotsPerEp = Math.ceil(dur / MAX_SHOT_DURATION);
+  const lastShotDuration = dur % MAX_SHOT_DURATION || MAX_SHOT_DURATION;
+  const actsDistribution = distributeEpisodes(total);
+
+  // 上下集衔接上下文
+  const prevEp = epIndex > 0 ? project.episodes[epIndex - 1] : null;
+  const nextEp = epIndex < project.episodes.length - 1 ? project.episodes[epIndex + 1] : null;
+
+  // 构建角色/场景上下文（复用 generateScript 的格式）
+  const storyContext = `故事：${project.novel.summary}
+风格：${project.style}
+${buildCostumeContext(project.novel.characters)}
+
+角色：
+${project.novel.characters.filter(c => c.role !== 'minor').map(c =>
+    `- ${c.newName}(${c.id}): 外貌=${c.description}${c.costumeDesc ? `，服化道=${c.costumeDesc}` : ''}`
+  ).join('\n')}
+
+场景：
+${project.novel.locations.map(l => `- ${l.newName}(${l.id}): ${l.description}`).join('\n')}
+
+本集信息：第 ${ep.number} 集「${ep.title}」(${ep.act}) 情感基调=${ep.emotionalTone}
+角色出场：${ep.characterRefs.join(', ')}
+场景使用：${ep.locationRefs.join(', ')}`;
+
+  let systemPrompt = `你是一位专业的短剧编剧兼视频创意总监。请为第 ${ep.number} 集重新生成分镜列表。
+
+## 关键参数
+- 每集总时长：${dur} 秒
+- 分镜数：${shotsPerEp} 个（每个最长 ${MAX_SHOT_DURATION} 秒，最后一个 ${lastShotDuration} 秒）
+
+## 分镜要求
+1. 每个分镜的 prompt 必须独立完整（包含角色外貌、服化道、场景描述）
+2. 分镜之间通过 transition 指定转场方式
+3. characterRefs 和 locationRefs 必须使用角色ID和场景ID（如 C01、S01）
+4. 每个分镜的画面描述按每3秒一段
+
+## 运镜词库
+景别：大远景、远景、全景、中景、近景、特写、大特写
+运镜：推镜头、拉镜头、摇镜头、移镜头、跟拍、环绕拍摄、航拍、手持跟拍
+转场：硬切、淡入淡出、遮挡擦镜转场、无缝渐变转场、闪白、闪黑、叠化`;
+
+  if (prevEp?.endingFrame) {
+    systemPrompt += `\n\n## 上一集结尾画面（必须衔接）\n${prevEp.endingFrame}`;
+  }
+  if (nextEp?.shots?.[0]?.prompt) {
+    systemPrompt += `\n\n## 下一集开头分镜（必须铺垫）\n${nextEp.shots[0].prompt.split('\n')[0]}`;
+  }
+
+  systemPrompt += `\n\n## 输出格式
+返回 JSON：
+{
+  "shots": [
+    { "index": 1, "startTime": 0, "endTime": ${MAX_SHOT_DURATION}, "prompt": "完整的视频生成提示词", "characterRefs": ["C01"], "locationRefs": ["S01"], "transition": "转场方式" }
+  ],
+  "endingFrame": "最后一帧画面描述"
+}`;
+
+  const config = getLLMConfig();
+  const startTime = Date.now();
+  const result = await chatCompletionJSON<{ shots?: Shot[]; endingFrame?: string }>(systemPrompt, storyContext);
+  logLLMCall({ projectId, step: `regen_shots_ep_${ep.number}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+
+  if (!result.success || !result.data?.shots || result.data.shots.length === 0) {
+    return { success: false, error: result.error || '分镜生成失败' };
+  }
+
+  // 更新分镜，保留原有的 refImageUrls、videoUrl 等状态
+  const newShots = result.data.shots;
+  project.episodes[epIndex].shots = newShots;
+  project.episodes[epIndex].prompt = newShots.map(s =>
+    `[分镜${s.index} ${s.startTime}-${s.endTime}s]\n${s.prompt}`
+  ).join('\n\n');
+  if (result.data.endingFrame) {
+    project.episodes[epIndex].endingFrame = result.data.endingFrame;
+  }
+  // 清除旧的视频状态（分镜变了，视频需要重新生成）
+  project.episodes[epIndex].videoUrl = undefined;
+  project.episodes[epIndex].videoStatus = undefined;
+  project.episodes[epIndex].videoError = undefined;
+
+  updateProject(projectId, { episodes: project.episodes });
+  console.log(`[drama] 单集分镜重新生成完成: 第 ${ep.number} 集 (${newShots.length} 个分镜)`);
   return { success: true };
 }
 
@@ -1260,11 +1753,33 @@ export function updateCharacterImages(projectId: string, characterId: string, im
   return true;
 }
 
+// 更新角色参考图
+export function updateCharacterRefImage(projectId: string, characterId: string, refImageUrl: string | undefined): boolean {
+  const project = getProject(projectId);
+  if (!project) return false;
+  const char = project.novel.characters.find(c => c.id === characterId);
+  if (!char) return false;
+  char.refImageUrl = refImageUrl;
+  updateProject(projectId, { novel: project.novel });
+  return true;
+}
+
+// 更新场景图 URL
+export function updateLocationImage(projectId: string, locationId: string, imageUrl: string): boolean {
+  const project = getProject(projectId);
+  if (!project) return false;
+  const loc = project.novel.locations.find(l => l.id === locationId);
+  if (!loc) return false;
+  loc.imageUrl = imageUrl;
+  updateProject(projectId, { novel: project.novel });
+  return true;
+}
+
 // 角色生图提示词
 export function buildCharacterImagePrompt(character: CharacterInfo, style: string): string {
-  return `${style}, full body character reference sheet, multiple angles (front, side, back), ` +
-    `${character.description}, ${character.personality} expression, ` +
-    `consistent design, clean background, high quality, detailed`;
+  return `${style}, 全身角色设定图, 多角度（正面、侧面、背面）, ` +
+    `${character.description}, ${character.personality}的表情, ` +
+    `统一设计, 干净背景, 高质量, 细节丰富`;
 }
 
 // 集数分配到四幕
@@ -1280,12 +1795,32 @@ function distributeEpisodes(total: number): [number, number, number, number] {
 
 import { generateSeedanceVideo } from './video-generator.js';
 import type { TaskInfo } from './types.js';
+import { isLocalImageUrl, localUrlToFilename, getLocalImagePath, generateImage as genImage, downloadImageToLocal } from './image-generator.js';
+import { FAKE_HEADERS } from './utils.js';
+import fs from 'fs';
 
 // 下载远程图片/视频到内存 Buffer，构造 Multer 兼容的 File 对象
+// 支持本地路径（/api/images/xxx.jpg）和远程 URL
 async function downloadAsMulterFile(url: string, filename: string, mimetype: string): Promise<Express.Multer.File> {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`下载失败 (${resp.status}): ${url.substring(0, 80)}`);
-  const buffer = Buffer.from(await resp.arrayBuffer());
+  let buffer: Buffer;
+
+  if (isLocalImageUrl(url)) {
+    // 本地文件，直接读取
+    const localPath = getLocalImagePath(localUrlToFilename(url));
+    if (!fs.existsSync(localPath)) throw new Error(`本地图片不存在: ${url}`);
+    buffer = fs.readFileSync(localPath);
+  } else {
+    // 远程 URL，带 headers 下载
+    const resp = await fetch(url, {
+      headers: {
+        'User-Agent': FAKE_HEADERS['User-Agent'],
+        'Referer': 'https://jimeng.jianying.com/',
+      },
+    });
+    if (!resp.ok) throw new Error(`下载失败 (${resp.status}): ${url.substring(0, 80)}`);
+    buffer = Buffer.from(await resp.arrayBuffer());
+  }
+
   return {
     fieldname: 'files',
     originalname: filename,
@@ -1296,13 +1831,263 @@ async function downloadAsMulterFile(url: string, filename: string, mimetype: str
   } as Express.Multer.File;
 }
 
-// 收集角色参考图（已确认的角色图片）
-function collectCharacterImages(project: DramaProject, episode: EpisodeScript): string[] {
+// ============================================================
+// 每集专属参考图生成
+// ============================================================
+
+interface RefImageMark {
+  index: number;       // @图片N 的 N
+  description: string; // [描述内容]
+  characterName?: string; // 从描述中提取的角色名
+}
+
+// 解析脚本中的【参考】标记，提取每张参考图的描述
+// 格式: 【参考】@图片1 [陆燃打架凶狠], @图片2 [沈清言高冷进店]
+export function parseReferenceMarks(prompt: string): RefImageMark[] {
+  const marks: RefImageMark[] = [];
+  // 匹配【参考】后面的内容
+  const refMatch = prompt.match(/【参考】(.+?)(?:\n|$)/);
+  if (!refMatch) return marks;
+
+  const refLine = refMatch[1];
+  // 匹配 @图片N [描述] 或 @图片N【描述】
+  const pattern = /@图片(\d+)\s*[【\[](.*?)[】\]]/g;
+  let m;
+  while ((m = pattern.exec(refLine)) !== null) {
+    marks.push({
+      index: parseInt(m[1]),
+      description: m[2].trim(),
+    });
+  }
+
+  // 尝试从描述中提取角色名（描述通常是"角色名+动作/状态"）
+  return marks;
+}
+
+// 根据角色名匹配角色信息
+function matchCharacterByName(characters: CharacterInfo[], description: string): CharacterInfo | undefined {
+  // 优先精确匹配角色名
+  for (const char of characters) {
+    if (description.includes(char.newName) || description.includes(char.originalName)) {
+      return char;
+    }
+  }
+  return undefined;
+}
+
+// 为单集生成专属参考图
+// 解析脚本中的【参考】标记，用角色图+场景描述生成对应图片
+export async function generateEpisodeRefImages(
+  project: DramaProject,
+  episode: EpisodeScript,
+  sessionId: string,
+  onProgress?: (msg: string) => void,
+): Promise<string[]> {
+  const marks = parseReferenceMarks(episode.prompt);
+  if (marks.length === 0) {
+    // 没有参考标记，使用通用角色图
+    return collectReferenceImages(project, episode);
+  }
+
+  const refUrls: string[] = [];
+
+  for (const mark of marks) {
+    try {
+      // 匹配角色
+      const char = matchCharacterByName(project.novel.characters, mark.description);
+      // 构建生图 prompt：风格 + 角色外观 + 场景描述
+      let imgPrompt = `${project.style}, ${mark.description}`;
+      if (char) {
+        imgPrompt = `${project.style}, ${char.description}, ${mark.description}`;
+      }
+
+      onProgress?.(`E${String(episode.number).padStart(2, '0')} 生成参考图 ${mark.index}/${marks.length}: ${mark.description.substring(0, 30)}`);
+      console.log(`[ref-img] E${episode.number} @图片${mark.index}: "${imgPrompt.substring(0, 80)}..."`);
+
+      const images = await genImage(imgPrompt, sessionId, {
+        width: 1280, height: 720, count: 1, style: project.style,
+      });
+
+      if (images.length > 0) {
+        // 下载到本地
+        const filename = await downloadImageToLocal(images[0].imageUrl, sessionId, `ref_ep${episode.number}_${mark.index}`, getProjectImageSubDir(project, 'refs'));
+        refUrls.push(`/api/images/${filename}`);
+      }
+    } catch (err) {
+      console.error(`[ref-img] E${episode.number} @图片${mark.index} 生成失败: ${(err as Error).message}`);
+      // 生成失败时，如果能匹配到角色，用角色的通用图
+      const char = matchCharacterByName(project.novel.characters, mark.description);
+      if (char && char.imageUrls.length > 0) {
+        refUrls.push(char.imageUrls[0]);
+      }
+    }
+  }
+
+  // 如果一张都没生成成功，使用通用角色图兜底
+  if (refUrls.length === 0) {
+    return collectReferenceImages(project, episode);
+  }
+
+  return refUrls;
+}
+
+// 批量为所有集生成专属参考图（并发控制）
+export async function batchGenerateRefImages(
+  projectId: string,
+  sessionId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; error?: string }> {
+  const project = getProject(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+  if (project.episodes.length === 0) return { success: false, error: '无脚本' };
+
+  const total = project.episodes.length;
+  const concurrency = 2; // 同时生成2集的参考图（每集可能有多张，避免并发过高）
+  let completed = 0;
+
+  // 先确保角色图和场景图都已下载到本地
+  const localResult = await ensureLocalImages(projectId, sessionId, onProgress);
+  if (localResult.expiredChars.length > 0) {
+    return { success: false, error: `以下角色图片已过期，请返回角色确认步骤重新生成: ${localResult.expiredChars.join('、')}` };
+  }
+
+  onProgress?.(`开始生成参考图: ${total} 集`);
+
+  // 分批并发
+  for (let i = 0; i < total; i += concurrency) {
+    const batch = project.episodes.slice(i, i + concurrency);
+    const results = await Promise.allSettled(
+      batch.map(async (episode) => {
+        const refUrls = await generateEpisodeRefImages(project, episode, sessionId, onProgress);
+        episode.refImageUrls = refUrls;
+        completed++;
+        onProgress?.(`参考图进度: ${completed}/${total} 集完成`);
+        return refUrls;
+      }),
+    );
+
+    // 记录失败
+    for (let j = 0; j < results.length; j++) {
+      if (results[j].status === 'rejected') {
+        const ep = batch[j];
+        console.error(`[ref-img] E${ep.number} 批量生成失败: ${(results[j] as PromiseRejectedResult).reason?.message}`);
+      }
+    }
+
+    // 每批完成后保存进度
+    updateProject(projectId, { episodes: project.episodes });
+
+    // 批间间隔
+    if (i + concurrency < total) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  updateProject(projectId, { episodes: project.episodes });
+  onProgress?.(`参考图生成完成: ${completed}/${total} 集`);
+  console.log(`[ref-img] 全部完成: ${completed}/${total} 集`);
+
+  return { success: true };
+}
+
+// 确保项目中所有角色图和场景图都已下载到本地
+// 自动检测远程 URL，下载到 data/images/ 并更新数据库
+export async function ensureLocalImages(
+  projectId: string,
+  sessionId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ downloaded: number; failed: number; expiredChars: string[] }> {
+  const project = getProject(projectId);
+  if (!project) return { downloaded: 0, failed: 0, expiredChars: [] };
+
+  let downloaded = 0;
+  let failed = 0;
+  let changed = false;
+  const expiredChars: string[] = []; // 图片过期需要重新生成的角色
+
+  // 检查角色图
+  for (const char of project.novel.characters) {
+    const remoteUrls = char.imageUrls.filter(u => !isLocalImageUrl(u));
+    if (remoteUrls.length === 0) continue; // 全部已是本地图，跳过
+
+    const newUrls: string[] = [];
+    let charFailed = 0;
+    for (const url of char.imageUrls) {
+      if (isLocalImageUrl(url)) {
+        newUrls.push(url);
+        continue;
+      }
+      try {
+        onProgress?.(`下载角色图: ${char.newName}`);
+        const filename = await downloadImageToLocal(url, sessionId, `char_${char.id}`, getProjectImageSubDir(project, 'characters', char.newName));
+        newUrls.push(`/api/images/${filename}`);
+        downloaded++;
+        changed = true;
+      } catch (err) {
+        console.log(`[ensure-local] 角色 ${char.newName} 图片下载失败: ${(err as Error).message}`);
+        charFailed++;
+        failed++;
+        // 不保留过期的远程 URL
+      }
+    }
+
+    if (charFailed > 0 && newUrls.length === 0) {
+      // 该角色所有图片都下载失败（CDN 过期），清空并取消确认
+      char.imageUrls = [];
+      char.confirmed = false;
+      expiredChars.push(char.newName);
+      changed = true;
+      console.log(`[ensure-local] 角色 ${char.newName} 所有图片已过期，需重新生成`);
+    } else {
+      char.imageUrls = newUrls;
+      changed = true;
+    }
+  }
+
+  // 检查场景图
+  for (const loc of project.novel.locations) {
+    if (!loc.imageUrl || isLocalImageUrl(loc.imageUrl)) continue;
+    try {
+      onProgress?.(`下载场景图: ${loc.newName}`);
+      const filename = await downloadImageToLocal(loc.imageUrl, sessionId, `loc_${loc.id}`, getProjectImageSubDir(project, 'locations', loc.newName));
+      loc.imageUrl = `/api/images/${filename}`;
+      downloaded++;
+      changed = true;
+    } catch (err) {
+      console.log(`[ensure-local] 场景 ${loc.newName} 图片下载失败: ${(err as Error).message}`);
+      loc.imageUrl = undefined; // 清除过期链接
+      changed = true;
+      failed++;
+    }
+  }
+
+  if (changed) {
+    updateProject(projectId, { novel: project.novel });
+  }
+
+  if (expiredChars.length > 0) {
+    const msg = `以下角色图片已过期，请返回角色确认步骤重新生成: ${expiredChars.join('、')}`;
+    onProgress?.(msg);
+    console.log(`[ensure-local] ${msg}`);
+  } else if (downloaded > 0 || failed > 0) {
+    const msg = `图片本地化: ${downloaded} 张成功, ${failed} 张失败`;
+    onProgress?.(msg);
+    console.log(`[ensure-local] ${msg}`);
+  }
+
+  return { downloaded, failed, expiredChars };
+}
+
+
+// 收集角色参考图和场景图（已确认的角色图片 + 对应场景图）
+function collectReferenceImages(project: DramaProject, episode: EpisodeScript): string[] {
   const urls: string[] = [];
+
+  // 收集角色图
   for (const charId of (episode.characterRefs || [])) {
     const char = project.novel.characters.find(c => c.id === charId);
     if (char && char.imageUrls.length > 0) {
-      urls.push(char.imageUrls[0]); // 取第一张
+      urls.push(char.imageUrls[0]);
     }
   }
   // 如果没有 characterRefs，取所有已确认主角的图
@@ -1313,6 +2098,19 @@ function collectCharacterImages(project: DramaProject, episode: EpisodeScript): 
       }
     }
   }
+
+  // 收集场景图
+  for (const locId of (episode.locationRefs || [])) {
+    const loc = project.novel.locations.find(l => l.id === locId);
+    if (loc?.imageUrl) urls.push(loc.imageUrl);
+  }
+  // 如果没有 locationRefs，取所有有图的场景
+  if (!(episode.locationRefs?.length)) {
+    for (const loc of project.novel.locations) {
+      if (loc.imageUrl) urls.push(loc.imageUrl);
+    }
+  }
+
   return urls.slice(0, 5); // 最多5张
 }
 
@@ -1334,108 +2132,163 @@ export async function batchGenerateVideos(
   const total = project.episodes.length;
   let prevVideoUrl: string | null = null;
 
+  // 先确保角色图和场景图都已下载到本地
+  onProgress(0, total, 'generating', '正在检查并下载图片到本地...');
+  const localResult = await ensureLocalImages(projectId, sessionId, (msg) => {
+    onProgress(0, total, 'generating', msg);
+  });
+  if (localResult.expiredChars.length > 0) {
+    updateProject(projectId, { status: 'character_confirm' });
+    return { success: false, error: `以下角色图片已过期，请返回角色确认步骤重新生成: ${localResult.expiredChars.join('、')}` };
+  }
+
   for (let i = 0; i < total; i++) {
     const episode = project.episodes[i];
     const epNum = episode.number || (i + 1);
+    const shots = episode.shots;
+    const totalShots = shots.length;
+
+    if (totalShots === 0) throw new Error(`第 ${epNum} 集没有分镜数据，请重新生成脚本`);
 
     // 更新当前集状态
     episode.videoStatus = 'generating';
     updateProject(projectId, { episodes: project.episodes });
-    onProgress(epNum, total, 'generating', `正在生成第 ${epNum}/${total} 集...`);
+    onProgress(epNum, total, 'generating', `正在生成第 ${epNum}/${total} 集 (${totalShots} 个分镜)...`);
 
     try {
-      // 构建参考文件列表
-      const files: Express.Multer.File[] = [];
+      let prevShotVideoUrl: string | null = null;
+      let allShotsDone = true;
 
-      if (i === 0) {
-        // 第1集：使用角色参考图
-        const charImageUrls = collectCharacterImages(project, episode);
-        for (let j = 0; j < charImageUrls.length; j++) {
-          try {
-            const file = await downloadAsMulterFile(charImageUrls[j], `char_${j + 1}.jpg`, 'image/jpeg');
-            files.push(file);
-            onProgress(epNum, total, 'generating', `第 ${epNum} 集：已下载角色图 ${j + 1}/${charImageUrls.length}`);
-          } catch (err) {
-            console.log(`[batch] 下载角色图失败: ${(err as Error).message}`);
-          }
-        }
-      } else if (prevVideoUrl) {
-        // 第2集起：使用上一集视频作为参考
+      // 逐分镜生成
+      for (let si = 0; si < shots.length; si++) {
+        const shot = shots[si];
+        const shotLabel = `E${String(epNum).padStart(2, '0')}-S${String(shot.index).padStart(2, '0')}`;
+        const shotDuration = shot.endTime - shot.startTime;
+
+        shot.videoStatus = 'generating';
+        updateProject(projectId, { episodes: project.episodes });
+        onProgress(epNum, total, 'generating', `第 ${epNum} 集 分镜 ${si + 1}/${totalShots} (${shot.startTime}-${shot.endTime}s)...`);
+
         try {
-          onProgress(epNum, total, 'generating', `第 ${epNum} 集：正在下载上一集视频作为参考...`);
-          const videoFile = await downloadAsMulterFile(prevVideoUrl, `prev_ep_${epNum - 1}.mp4`, 'video/mp4');
-          files.push(videoFile);
-        } catch (err) {
-          console.log(`[batch] 下载上一集视频失败，改用角色图: ${(err as Error).message}`);
-          // 降级：使用角色图
-          const charImageUrls = collectCharacterImages(project, episode);
-          for (const url of charImageUrls.slice(0, 3)) {
+          const files: Express.Multer.File[] = [];
+
+          // 第一个分镜：用参考图 + 上一集最后视频
+          if (si === 0) {
+            // 上一集的视频作为参考（跨集衔接）
+            if (i > 0 && prevVideoUrl) {
+              try {
+                const videoFile = await downloadAsMulterFile(prevVideoUrl, `prev_ep.mp4`, 'video/mp4');
+                files.push(videoFile);
+              } catch (err) {
+                console.log(`[batch] ${shotLabel} 下载上集视频失败: ${(err as Error).message}`);
+              }
+            }
+            // 本集参考图
+            const imageUrls = (episode.refImageUrls && episode.refImageUrls.length > 0)
+              ? episode.refImageUrls
+              : collectReferenceImages(project, episode);
+            for (const url of imageUrls.slice(0, files.length > 0 ? 3 : 5)) {
+              try {
+                const file = await downloadAsMulterFile(url, 'ref.jpg', 'image/jpeg');
+                files.push(file);
+              } catch { /* skip */ }
+            }
+          } else if (prevShotVideoUrl) {
+            // 后续分镜：用前一个分镜的视频作为参考（分镜间衔接）
             try {
-              const file = await downloadAsMulterFile(url, 'char.jpg', 'image/jpeg');
-              files.push(file);
-            } catch { /* skip */ }
+              const videoFile = await downloadAsMulterFile(prevShotVideoUrl, `prev_shot.mp4`, 'video/mp4');
+              files.push(videoFile);
+            } catch (err) {
+              console.log(`[batch] ${shotLabel} 下载前分镜视频失败: ${(err as Error).message}`);
+            }
+            // 补充本分镜的角色/场景参考图
+            const shotCharRefs = shot.characterRefs || episode.characterRefs || [];
+            const shotLocRefs = shot.locationRefs || episode.locationRefs || [];
+            for (const charId of shotCharRefs.slice(0, 2)) {
+              const char = project.novel.characters.find(c => c.id === charId);
+              if (char?.imageUrls?.[0]) {
+                try {
+                  const file = await downloadAsMulterFile(char.imageUrls[0], 'char.jpg', 'image/jpeg');
+                  files.push(file);
+                } catch { /* skip */ }
+              }
+            }
+            for (const locId of shotLocRefs.slice(0, 1)) {
+              const loc = project.novel.locations.find(l => l.id === locId);
+              if (loc?.imageUrl) {
+                try {
+                  const file = await downloadAsMulterFile(loc.imageUrl, 'loc.jpg', 'image/jpeg');
+                  files.push(file);
+                } catch { /* skip */ }
+              }
+            }
           }
+
+          // 兜底：前面的参考文件都获取失败时，收集项目中可用的参考图
+          if (files.length === 0) {
+            const fallbackUrls = collectReferenceImages(project, episode);
+            for (const url of fallbackUrls.slice(0, 3)) {
+              try {
+                const file = await downloadAsMulterFile(url, 'fallback.jpg', 'image/jpeg');
+                files.push(file);
+              } catch { /* skip */ }
+            }
+          }
+          if (files.length === 0) throw new Error('无可用参考图片');
+
+          // 构建 prompt
+          let prompt = shot.prompt || '';
+          if (si > 0 && prevShotVideoUrl) {
+            prompt = `将@视频1延长${shotDuration}s\n${prompt}`;
+          }
+
+          const taskId = `drama_${projectId}_ep${epNum}_s${shot.index}_${Date.now()}`;
+          const task: TaskInfo = {
+            id: taskId, status: 'processing', progress: `${shotLabel} 生成中...`,
+            startTime: Date.now(), result: null, error: null, prompt,
+            model: 'seedance-2.0', ratio: project.ratio, duration: shotDuration,
+          };
+          tasks.set(taskId, task);
+
+          const videoUrl = await generateSeedanceVideo(taskId, {
+            prompt, ratio: project.ratio, duration: shotDuration,
+            files, sessionId, model: 'seedance-2.0',
+          }, tasks);
+
+          shot.videoUrl = videoUrl;
+          shot.videoStatus = 'done';
+          prevShotVideoUrl = videoUrl;
+          console.log(`[batch] ${shotLabel} 生成成功`);
+
+          // 分镜间间隔
+          if (si < shots.length - 1) {
+            await new Promise(r => setTimeout(r, 2000));
+          }
+        } catch (err) {
+          shot.videoStatus = 'error';
+          shot.videoError = (err as Error).message;
+          allShotsDone = false;
+          console.error(`[batch] ${shotLabel} 生成失败: ${(err as Error).message}`);
+          // 继续下一个分镜
         }
+
+        updateProject(projectId, { episodes: project.episodes });
       }
 
-      // 如果完全没有参考文件，至少用一张角色图
-      if (files.length === 0) {
-        const fallbackUrls = collectCharacterImages(project, episode);
-        if (fallbackUrls.length > 0) {
-          try {
-            const file = await downloadAsMulterFile(fallbackUrls[0], 'fallback.jpg', 'image/jpeg');
-            files.push(file);
-          } catch { /* skip */ }
-        }
+      // 整集状态：最后一个成功分镜的视频作为整集视频
+      const lastDoneShot = [...shots].reverse().find(s => s.videoStatus === 'done');
+      if (lastDoneShot?.videoUrl) {
+        episode.videoUrl = lastDoneShot.videoUrl;
+        prevVideoUrl = lastDoneShot.videoUrl;
       }
 
-      if (files.length === 0) {
-        throw new Error('无可用参考图片，请先为角色生成参考图');
-      }
-
-      // 构建 prompt：第2集起加视频延长前缀
-      let prompt = episode.prompt || '';
-      if (i > 0 && prevVideoUrl) {
-        prompt = `将@视频1延长${project.episodeDuration}s\n${prompt}`;
-      }
-
-      // 创建任务并生成视频
-      const taskId = `drama_${projectId}_ep${epNum}_${Date.now()}`;
-      const task: TaskInfo = {
-        id: taskId,
-        status: 'processing',
-        progress: `第 ${epNum} 集生成中...`,
-        startTime: Date.now(),
-        result: null,
-        error: null,
-        prompt,
-        model: 'seedance-2.0',
-        ratio: project.ratio,
-        duration: project.episodeDuration,
-      };
-      tasks.set(taskId, task);
-
-      onProgress(epNum, total, 'generating', `第 ${epNum} 集：已提交视频生成请求...`);
-
-      const videoUrl = await generateSeedanceVideo(taskId, {
-        prompt,
-        ratio: project.ratio,
-        duration: project.episodeDuration,
-        files,
-        sessionId,
-        model: 'seedance-2.0',
-      }, tasks);
-
-      // 成功
-      episode.videoUrl = videoUrl;
       episode.videoStatus = 'done';
-      prevVideoUrl = videoUrl;
       updateProject(projectId, { episodes: project.episodes });
-      onProgress(epNum, total, 'done', `第 ${epNum} 集生成完成`);
+      onProgress(epNum, total, 'done', `第 ${epNum} 集生成完成 (${shots.filter(s => s.videoStatus === 'done').length}/${totalShots} 分镜)`);
 
-      console.log(`[batch] 第 ${epNum}/${total} 集生成成功: ${videoUrl.substring(0, 60)}...`);
+      console.log(`[batch] 第 ${epNum}/${total} 集生成成功`);
 
-      // 集间间隔，避免请求过快
+      // 集间间隔
       if (i < total - 1) {
         await new Promise(r => setTimeout(r, 3000));
       }
@@ -1445,7 +2298,6 @@ export async function batchGenerateVideos(
       updateProject(projectId, { episodes: project.episodes });
       onProgress(epNum, total, 'error', `第 ${epNum} 集失败: ${(err as Error).message}`);
       console.error(`[batch] 第 ${epNum}/${total} 集生成失败: ${(err as Error).message}`);
-      // 继续下一集（不中断整个流程）
     }
   }
 

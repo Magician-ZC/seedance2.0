@@ -113,7 +113,7 @@ class BrowserService {
 
       // 注册一次性响应监听，捕获 generate 接口的返回
       const resultPromise = new Promise<UIGenerateResult>((res, rej) => {
-        const timeout = setTimeout(() => rej(new Error('UI生图超时(30s)')), 30000);
+        const timeout = setTimeout(() => rej(new Error('UI生图超时(60s)')), 60000);
         const handler = async (resp: import('playwright-core').Response) => {
           if (!resp.url().includes('aigc_draft/generate') || resp.request().method() !== 'POST') return;
           try {
@@ -156,6 +156,20 @@ class BrowserService {
     } finally {
       resolve();
     }
+  }
+
+  // 通过浏览器代理下载图片，返回 base64（绕过 CDN 反爬）
+  async downloadAsBase64(sessionId: string, webId: number, userId: string, imageUrl: string): Promise<string> {
+    const session = await this.getSession(sessionId, webId, userId);
+    return session.page.evaluate(async (url: string) => {
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) throw new Error(`下载失败 (${resp.status})`);
+      const arrayBuffer = await resp.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    }, imageUrl);
   }
 
   // 原始 fetch 代理（用于视频生成等其他接口）

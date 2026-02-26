@@ -30,9 +30,13 @@ const LLM_PROVIDERS = [
 ];
 
 const LS_SESSION_KEY = 'seedance_session_id';
+const LS_MAX_CONCURRENT_CHARS_KEY = 'seedance_max_concurrent_chars';
 
 export function loadSettings() {
-  return { sessionId: localStorage.getItem(LS_SESSION_KEY) || '' };
+  return {
+    sessionId: localStorage.getItem(LS_SESSION_KEY) || '',
+    maxConcurrentChars: parseInt(localStorage.getItem(LS_MAX_CONCURRENT_CHARS_KEY) || '3') || 3,
+  };
 }
 
 export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdChange }: SettingsModalProps) {
@@ -40,6 +44,7 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const [tab, setTab] = useState<Tab>('general');
   const [localSessionId, setLocalSessionId] = useState(sessionId);
   const [showSessionId, setShowSessionId] = useState(false);
+  const [maxConcurrentChars, setMaxConcurrentChars] = useState(() => loadSettings().maxConcurrentChars);
 
   // LLM 配置
   const [llmConfig, setLlmConfig] = useState<LLMConfig>({
@@ -71,6 +76,7 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const handleSave = () => {
     onSessionIdChange(localSessionId);
     localStorage.setItem(LS_SESSION_KEY, localSessionId);
+    localStorage.setItem(LS_MAX_CONCURRENT_CHARS_KEY, String(maxConcurrentChars));
     onClose();
   };
 
@@ -175,6 +181,13 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
                   </button>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">{t('settings.sessionIdHint')}</p>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1.5">{t('drama.maxConcurrentChars')}</label>
+                <input type="number" value={maxConcurrentChars}
+                  onChange={(e) => setMaxConcurrentChars(Math.max(1, Math.min(5, Number(e.target.value))))}
+                  min={1} max={5} className={inputClass} />
+                <p className="text-xs text-gray-500 mt-1">{t('drama.maxConcurrentCharsHint')}</p>
               </div>
             </div>
           )}

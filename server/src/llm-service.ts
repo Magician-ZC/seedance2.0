@@ -167,6 +167,79 @@ function parseResponse(config: LLMConfig, data: Record<string, unknown>): string
   return choices?.[0]?.message?.content || choices?.[0]?.message?.reasoning || '';
 }
 
+// 尝试修复被截断的 JSON（LLM 输出 token 不够时常见）
+function tryRepairTruncatedJSON(text: string): unknown {
+  let repaired = text.trimEnd();
+
+  // 用状态机精确追踪字符串和括号
+  const stack: string[] = [];
+  let inString = false;
+  let escape = false;
+  let lastValidPos = 0; // 最后一个完整 token 结束位置
+
+  for (let i = 0; i < repaired.length; i++) {
+    const ch = repaired[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') {
+      if (inString) { inString = false; lastValidPos = i; }
+      else { inString = true; }
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') { stack.push(ch); lastValidPos = i; }
+    else if (ch === '}' || ch === ']') { stack.pop(); lastValidPos = i; }
+    else if (ch === ',' || ch === ':') { lastValidPos = i; }
+  }
+
+  // 如果在字符串中间截断，闭合字符串并回退到最后完整位置
+  if (inString) {
+    // 找到这个未闭合字符串的开始引号
+    repaired = repaired + '"';
+    // 重新扫描修复后的状态
+    const stack2: string[] = [];
+    let inStr2 = false;
+    let esc2 = false;
+    for (const ch of repaired) {
+      if (esc2) { esc2 = false; continue; }
+      if (ch === '\\' && inStr2) { esc2 = true; continue; }
+      if (ch === '"') { inStr2 = !inStr2; continue; }
+      if (inStr2) continue;
+      if (ch === '{' || ch === '[') stack2.push(ch);
+      if (ch === '}' || ch === ']') stack2.pop();
+    }
+    // 移除尾部不完整的键值对
+    repaired = repaired.replace(/,\s*"[^"]*"\s*:\s*"[^"]*"\s*$/, '');
+    repaired = repaired.replace(/,\s*$/, '');
+    // 补全括号
+    // 重新扫描
+    const stack3: string[] = [];
+    let inStr3 = false;
+    let esc3 = false;
+    for (const ch of repaired) {
+      if (esc3) { esc3 = false; continue; }
+      if (ch === '\\' && inStr3) { esc3 = true; continue; }
+      if (ch === '"') { inStr3 = !inStr3; continue; }
+      if (inStr3) continue;
+      if (ch === '{' || ch === '[') stack3.push(ch);
+      if (ch === '}' || ch === ']') stack3.pop();
+    }
+    while (stack3.length > 0) {
+      const open = stack3.pop();
+      repaired += open === '{' ? '}' : ']';
+    }
+  } else {
+    // 不在字符串中，直接清理尾部并补全括号
+    repaired = repaired.replace(/,\s*$/, '');
+    while (stack.length > 0) {
+      const open = stack.pop();
+      repaired += open === '{' ? '}' : ']';
+    }
+  }
+
+  return JSON.parse(repaired);
+}
+
 // 从 LLM 响应中提取 JSON
 export function extractJSON(text: string): unknown {
   // 去掉 <think>...</think>
@@ -177,10 +250,39 @@ export function extractJSON(text: string): unknown {
   else if (cleaned.includes('```')) {
     cleaned = cleaned.replace(/```\w*\n?/g, '').trim();
   }
+
+  // 清理 JSON 字符串值中的非法控制字符（LLM 常见问题）
+  const sanitizeControlChars = (s: string): string => {
+    // 在 JSON 字符串内部，将未转义的控制字符替换为转义形式
+    return s.replace(/[\x00-\x1f]/g, (ch) => {
+      if (ch === '\n') return '\\n';
+      if (ch === '\r') return '\\r';
+      if (ch === '\t') return '\\t';
+      return '';
+    });
+  };
+
   // 尝试找到 JSON 对象或数组
   const match = cleaned.match(/[\[{][\s\S]*[\]}]/);
-  if (match) return JSON.parse(match[0]);
-  return JSON.parse(cleaned);
+  if (match) {
+    const raw = match[0];
+    try { return JSON.parse(raw); } catch {
+      // 先尝试清理控制字符
+      try { return JSON.parse(sanitizeControlChars(raw)); } catch {
+        console.log(`[llm] JSON 解析失败，尝试修复截断的 JSON...`);
+        return tryRepairTruncatedJSON(sanitizeControlChars(raw));
+      }
+    }
+  }
+  try { return JSON.parse(cleaned); } catch {
+    try { return JSON.parse(sanitizeControlChars(cleaned)); } catch {
+      const jsonStart = cleaned.match(/[\[{]/);
+      if (jsonStart && jsonStart.index !== undefined) {
+        return tryRepairTruncatedJSON(sanitizeControlChars(cleaned.substring(jsonStart.index)));
+      }
+      throw new Error(`无法从 LLM 响应中提取有效 JSON`);
+    }
+  }
 }
 
 export interface LLMResult {
@@ -194,7 +296,7 @@ export interface LLMResult {
 export async function chatCompletion(
   systemPrompt: string,
   userContent: string,
-  options: { jsonMode?: boolean; config?: LLMConfig } = {},
+  options: { jsonMode?: boolean; config?: LLMConfig; timeoutMs?: number } = {},
 ): Promise<LLMResult> {
   const config = options.config || currentConfig;
   const startTime = Date.now();
@@ -205,25 +307,30 @@ export async function chatCompletion(
 
   const endpoint = getEndpoint(config);
   const headers = buildHeaders(config);
-  const body = buildBody(config, systemPrompt, userContent, options.jsonMode || false);
+  // 对不原生支持 response_format 的 provider，在 prompt 中强化 JSON 输出要求
+  const jsonHint = '\n\n⚠ 你必须只输出合法的 JSON，不要输出任何解释文字、markdown 或代码块标记。直接以 [ 或 { 开头。';
+  const needsJsonHint = options.jsonMode && ['custom', 'ollama', 'anthropic'].includes(config.provider);
+  const finalSystemPrompt = needsJsonHint ? systemPrompt + jsonHint : systemPrompt;
+  const body = buildBody(config, finalSystemPrompt, userContent, options.jsonMode || false);
+  const timeoutMs = options.timeoutMs || 600000; // 默认 10 分钟
 
   try {
     const response = await undiciFetch(endpoint, {
       method: 'POST', headers,
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(600000), // 10 分钟超时（长文本分析可能耗时较长）
+      signal: AbortSignal.timeout(timeoutMs),
       dispatcher: getDispatcher(),
     });
 
-    const duration = (Date.now() - startTime) / 1000;
-
     if (!response.ok) {
+      const duration = (Date.now() - startTime) / 1000;
       const errText = await response.text().catch(() => '');
       return { success: false, content: '', error: `LLM API 错误 (${response.status}): ${errText}`, duration };
     }
 
     const data = await response.json() as Record<string, unknown>;
     const content = parseResponse(config, data);
+    const duration = (Date.now() - startTime) / 1000;
     console.log(`[llm] ${config.provider}/${config.model} 调用成功 (${duration.toFixed(1)}s, ${content.length} chars)`);
     return { success: true, content, duration };
   } catch (err) {
@@ -236,7 +343,7 @@ export async function chatCompletion(
 export async function chatCompletionJSON<T = unknown>(
   systemPrompt: string,
   userContent: string,
-  options: { config?: LLMConfig } = {},
+  options: { config?: LLMConfig; timeoutMs?: number } = {},
 ): Promise<{ success: boolean; data?: T; error?: string; raw?: string }> {
   const result = await chatCompletion(systemPrompt, userContent, { jsonMode: true, ...options });
   if (!result.success) return { success: false, error: result.error };
