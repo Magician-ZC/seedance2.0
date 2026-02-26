@@ -18,7 +18,7 @@ import {
   createProject, getProject, updateProject, listProjects, removeProject,
   analyzeNovel, transformCopyright, generateScript, confirmCharacter,
   updateCharacterImages, updateLocationImage, getProjectLogs, batchGenerateVideos, optimizeScripts,
-  batchGenerateRefImages, refreshVisualPrompts, updateCharacterRefImage, optimizeSingleEpisode,
+  batchGenerateRefImages, refreshVisualPrompts, refreshTitleAndSummary, updateCharacterRefImage, optimizeSingleEpisode,
   generateEpisodeRefImages, regenerateEpisodeShots, getProjectImageSubDir,
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
@@ -430,9 +430,17 @@ app.post('/api/drama/:id/copyright', async (req, res) => {
   res.json({ project: result.project });
 });
 
-// POST /api/drama/:id/refresh-prompts - 刷新 visualPrompt 为中文（拯救旧项目）
+// POST /api/drama/:id/refresh-prompts - 刷新 visualPrompt
 app.post('/api/drama/:id/refresh-prompts', async (req, res) => {
   const result = await refreshVisualPrompts(req.params.id);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  const project = getProject(req.params.id);
+  res.json({ success: true, project });
+});
+
+// POST /api/drama/:id/refresh-summary - 重新生成标题和摘要
+app.post('/api/drama/:id/refresh-summary', async (req, res) => {
+  const result = await refreshTitleAndSummary(req.params.id);
   if (!result.success) return res.status(500).json({ error: result.error });
   const project = getProject(req.params.id);
   res.json({ success: true, project });
@@ -522,6 +530,29 @@ app.post('/api/drama/:id/confirm-character', (req, res) => {
   res.json({ confirmed: true, allConfirmed: result.allConfirmed, characterId });
 });
 
+// POST /api/drama/:id/confirm-location-image - 确认场景图（从候选中选1张）
+app.post('/api/drama/:id/confirm-location-image', (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { locationId, selectedImageUrl } = req.body;
+  const loc = project.novel.locations.find((l: LocationInfo) => l.id === locationId);
+  if (!loc) return res.status(404).json({ error: '场景不存在' });
+
+  const allUrls = loc.imageUrls || [];
+  loc.imageUrl = selectedImageUrl;
+  loc.imageUrls = undefined;
+  updateProject(req.params.id, { novel: project.novel });
+
+  // 删除未选中的本地图片
+  for (const url of allUrls) {
+    if (url !== selectedImageUrl && isLocalImageUrl(url)) {
+      deleteLocalImage(localUrlToFilename(url));
+    }
+  }
+
+  res.json({ success: true, locationId });
+});
+
 // POST /api/drama/:id/upload-char-ref-image - 上传角色参考图
 const charRefUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 app.post('/api/drama/:id/upload-char-ref-image', charRefUpload.single('file'), async (req, res) => {
@@ -586,32 +617,43 @@ app.post('/api/drama/:id/generate-location-image', async (req, res) => {
 
   // 后台异步生成
   const prompt = location.visualPrompt || `${project.style}, ${location.description}`;
-  generateImage(prompt, authToken, { width: 1280, height: 720, count: 1, style: project.style })
+  generateImage(prompt, authToken, { width: 1280, height: 720, count: 4, style: project.style })
     .then(async (images) => {
       if (images.length > 0) {
-        // 下载到本地
-        let localUrl: string;
-        try {
-          const filename = await downloadImageToLocal(images[0].imageUrl, authToken, `loc_${locationId}`, getProjectImageSubDir(project, 'locations', location.newName));
-          localUrl = `/api/images/${filename}`;
-        } catch (err) {
-          console.log(`[image-gen] 下载场景图到本地失败: ${(err as Error).message}，重试一次...`);
+        // 下载所有图片到本地
+        const localUrls: string[] = [];
+        for (let idx = 0; idx < images.length; idx++) {
           try {
-            await new Promise(r => setTimeout(r, 2000));
-            const filename = await downloadImageToLocal(images[0].imageUrl, authToken, `loc_${locationId}`, getProjectImageSubDir(project, 'locations', location.newName));
-            localUrl = `/api/images/${filename}`;
-          } catch {
-            throw new Error('场景图下载到本地失败');
+            const filename = await downloadImageToLocal(images[idx].imageUrl, authToken, `loc_${locationId}_${idx}`, getProjectImageSubDir(project, 'locations', location.newName));
+            localUrls.push(`/api/images/${filename}`);
+          } catch (err) {
+            console.log(`[image-gen] 下载场景图 ${idx} 失败: ${(err as Error).message}，重试...`);
+            try {
+              await new Promise(r => setTimeout(r, 2000));
+              const filename = await downloadImageToLocal(images[idx].imageUrl, authToken, `loc_${locationId}_${idx}`, getProjectImageSubDir(project, 'locations', location.newName));
+              localUrls.push(`/api/images/${filename}`);
+            } catch {
+              console.log(`[image-gen] 场景图 ${idx} 下载最终失败，跳过`);
+            }
           }
         }
+        if (localUrls.length === 0) throw new Error('所有场景图下载失败');
         // 删除旧的本地图片
         if (location.imageUrl && isLocalImageUrl(location.imageUrl)) {
           deleteLocalImage(localUrlToFilename(location.imageUrl));
         }
-        updateLocationImage(req.params.id, locationId, localUrl);
+        if (location.imageUrls) {
+          for (const oldUrl of location.imageUrls) {
+            if (isLocalImageUrl(oldUrl)) deleteLocalImage(localUrlToFilename(oldUrl));
+          }
+        }
+        // 保存候选图列表，不自动确认
+        location.imageUrls = localUrls;
+        location.imageUrl = undefined;
+        updateProject(req.params.id, { novel: project.novel });
         const doneTask: TaskInfo = {
           id: taskId, status: 'done', startTime: Date.now(), result: null, error: null,
-          progress: JSON.stringify({ locationId, imageUrl: localUrl }),
+          progress: JSON.stringify({ locationId, imageUrls: localUrls }),
         };
         wsManager.broadcast(taskId, doneTask);
       }
@@ -884,6 +926,67 @@ app.get('/api/thumbnail-proxy', async (req, res) => {
   if (!videoUrl) return res.status(400).json({ error: '缺少 url 参数' });
   // 返回视频代理URL，前端用 video 元素截取第一帧
   res.json({ proxyUrl: `/api/video-proxy?url=${encodeURIComponent(videoUrl)}` });
+});
+
+// POST /api/upload-material - 通用素材上传（保存到本地 data/materials 目录）
+const materialUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+app.post('/api/upload-material', materialUpload.array('files', 20), async (req, res) => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files?.length) return res.status(400).json({ error: '未上传文件' });
+    const materialsDir = path.join(__dirname, '../../data/materials');
+    const fs = await import('fs');
+    if (!fs.existsSync(materialsDir)) fs.mkdirSync(materialsDir, { recursive: true });
+    const urls: string[] = [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname) || '.png';
+      const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+      const filepath = path.join(materialsDir, filename);
+      fs.writeFileSync(filepath, file.buffer);
+      urls.push(`/api/material/${filename}`);
+    }
+    res.json({ urls });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// GET /api/material/:filename - 提供素材文件
+app.get('/api/material/:filename', (req, res) => {
+  const materialsDir = path.join(__dirname, '../../data/materials');
+  const filepath = path.join(materialsDir, req.params.filename);
+  res.sendFile(filepath);
+});
+
+// GET /api/materials - 列出所有已上传素材
+app.get('/api/materials', async (_req, res) => {
+  try {
+    const materialsDir = path.join(__dirname, '../../data/materials');
+    const fs = await import('fs');
+    if (!fs.existsSync(materialsDir)) return res.json({ files: [] });
+    const files = fs.readdirSync(materialsDir).map(f => ({
+      name: f,
+      url: `/api/material/${f}`,
+      size: fs.statSync(path.join(materialsDir, f)).size,
+    }));
+    res.json({ files });
+  } catch { res.json({ files: [] }); }
+});
+
+// DELETE /api/material/:filename - 删除已上传素材
+app.delete('/api/material/:filename', (req, res) => {
+  try {
+    const materialsDir = path.join(__dirname, '../../data/materials');
+    const filepath = path.join(materialsDir, req.params.filename);
+    if (fs.existsSync(filepath)) {
+      fs.unlinkSync(filepath);
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: '文件不存在' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // multer 错误处理

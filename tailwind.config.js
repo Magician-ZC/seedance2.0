@@ -4,9 +4,13 @@ export default {
   theme: {
     extend: {
       colors: {
-        'app-bg': '#0f111a',
-        'card-bg': '#1a1d2e',
+        'app-bg': '#0a0a0a',
+        'card-bg': '#1a1a1a',
+        'card-hover': '#222222',
         'toolbar-bg': '#2a2d3e',
+        'sidebar-bg': '#111111',
+        'accent': '#22c55e',
+        'accent-hover': '#16a34a',
       },
     },
   },

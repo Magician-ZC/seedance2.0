@@ -8,7 +8,7 @@ type Step = 'drafts' | 'setup' | 'novel' | 'analyzing' | 'review' | 'copyright' 
 
 // 后端 status → 前端 Step 映射
 const STATUS_TO_STEP: Record<string, Step> = {
-  analyzing: 'novel',        // 分析中/待分析 → 回到输入小说步骤
+  analyzing: 'setup',        // 分析中/待分析 → 回到创建项目步骤
   copyright_check: 'review', // 分析完成待确认 → 确认分析
   copyright: 'review',       // 版权改造中 → 确认分析
   character_confirm: 'characters', // 角色确认
@@ -86,6 +86,7 @@ interface EpisodeScript {
 interface NovelToDramaProps {
   onClose: () => void;
   sessionId: string;
+  onProjectCreated?: (projectId: string) => void;
 }
 
 const STEPS: Step[] = ['drafts', 'setup', 'novel', 'analyzing', 'review', 'copyright', 'characters', 'scripting', 'ready'];
@@ -101,7 +102,7 @@ interface DraftItem {
   updatedAt: number;
 }
 
-export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) {
+export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: NovelToDramaProps) {
   const { t } = useTranslation();
   const [step, setStep] = useState<Step>('drafts');
   const [project, setProject] = useState<DramaProject | null>(null);
@@ -115,6 +116,10 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   const [style, setStyle] = useState('水墨武侠风格');
   const [ratio, setRatio] = useState('16:9');
   const [episodeDuration, setEpisodeDuration] = useState(15);
+  // 创建项目子步骤: 1=故事剧本, 2=设置
+  const [createStep, setCreateStep] = useState<1 | 2>(1);
+  // 项目名称
+  const [projectName, setProjectName] = useState('');
 
   // novel 输入
   const [novelText, setNovelText] = useState('');
@@ -203,8 +208,13 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
       const res = await fetch(`/api/drama/${draftId}`);
       const data = await res.json();
       if (data?.project) {
+        // 如果有 onProjectCreated 回调，直接跳转到工作台
+        if (onProjectCreated && data.project.status !== 'analyzing') {
+          setLoading(false);
+          onProjectCreated(draftId);
+          return;
+        }
         setProject(data.project);
-        // 根据后端 status 映射到前端步骤
         const targetStep = STATUS_TO_STEP[data.project.status] || 'novel';
         setStep(targetStep);
       } else {
@@ -267,90 +277,32 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
     }
   }, []);
 
-  // Step 1: 创建项目
+  // Step 1: 创建项目（合并了setup+novel，创建后自动提交小说分析）
   const handleCreateProject = async () => {
     const data = await apiCall('/api/drama/create', 'POST', { targetEpisodes, style, ratio, episodeDuration });
     if (data?.project) {
-      setProject(data.project);
-      setStep('novel');
-    }
-  };
-
-  // Step 2: 提交小说 → 后端自动调用 LLM 分析（支持长文本异步）
-  const handleSubmitNovel = async () => {
-    if (!project || !novelText.trim()) return;
-    setStep('analyzing');
-    setProgressMsg(t('drama.analyzingNovel'));
-    setLoading(true);
-    setError('');
-
-    try {
-      // 超过 1MB 用 FormData 上传，否则用 JSON
-      let data;
-      if (novelText.length > 300000) {
-        const formData = new FormData();
-        const blob = new Blob([novelText], { type: 'text/plain' });
-        formData.append('novel', blob, 'novel.txt');
-        const res = await fetch(`/api/drama/${project.id}/analyze`, { method: 'POST', body: formData });
-        data = await res.json();
-        if (!res.ok) throw new Error(data.error || `请求失败 (${res.status})`);
-      } else {
-        data = await apiCall(`/api/drama/${project.id}/analyze`, 'POST', { novelText });
+      const proj = data.project;
+      // 如果有小说文本，先提交分析请求（不等待完成）
+      if (novelText.trim()) {
+        try {
+          if (novelText.length > 300000) {
+            const formData = new FormData();
+            const blob = new Blob([novelText], { type: 'text/plain' });
+            formData.append('novel', blob, 'novel.txt');
+            fetch(`/api/drama/${proj.id}/analyze`, { method: 'POST', body: formData }).catch(() => {});
+          } else {
+            fetch(`/api/drama/${proj.id}/analyze`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ novelText }),
+            }).catch(() => {});
+          }
+        } catch { /* 分析请求已发出，工作台会处理进度 */ }
       }
-
-      if (!data) { setStep('novel'); return; }
-
-      if (data.async) {
-        // 长文本异步模式：订阅 WebSocket 等待完成
-        setProgressMsg(data.message || t('drama.analyzingLong'));
-        const taskId = data.progressTaskId;
-        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
-        wsRef.current = ws;
-        ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId }));
-        ws.onmessage = async (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.taskId !== taskId) return;
-            if (msg.type === 'task_progress') {
-              setProgressMsg(msg.data.progress || '');
-            } else if (msg.type === 'task_done') {
-              ws.close();
-              const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json());
-              if (projData?.project) { setProject(projData.project); setStep('review'); }
-              else { setStep('novel'); }
-              setLoading(false);
-            } else if (msg.type === 'task_error') {
-              ws.close();
-              setError(msg.data.error || t('drama.analyzeFailed'));
-              setStep('novel');
-              setLoading(false);
-            }
-          } catch { /* ignore */ }
-        };
-        ws.onerror = () => {
-          const poll = setInterval(async () => {
-            const projData = await fetch(`/api/drama/${project.id}`).then(r => r.json()).catch(() => null);
-            if (projData?.project?.status && projData.project.status !== 'analyzing') {
-              clearInterval(poll);
-              setProject(projData.project);
-              setStep(projData.project.status === 'copyright_check' ? 'review' : 'novel');
-              setLoading(false);
-            }
-          }, 5000);
-        };
-      } else if (data.project) {
-        setProject(data.project);
-        setStep('review');
-      } else {
-        setStep('novel');
+      // 立即进入工作台
+      if (onProjectCreated) {
+        setLoading(false);
+        onProjectCreated(proj.id);
       }
-    } catch (err) {
-      setError((err as Error).message);
-      setStep('novel');
-    } finally {
-      // 异步模式下 loading 由 ws 回调控制，同步模式这里关闭
-      if (step !== 'analyzing') setLoading(false);
     }
   };
 
@@ -1000,8 +952,8 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
           <div key={s} className="flex items-center"
             ref={el => { if (i === displayIndex && el) el.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' }); }}>
             <div className={`px-2 py-1 rounded-lg text-xs whitespace-nowrap ${
-              i === displayIndex ? 'bg-purple-600 text-white' :
-              i < displayIndex ? 'bg-green-900/50 text-green-400' : 'bg-gray-800 text-gray-500'
+              i === displayIndex ? 'bg-green-600 text-white' :
+              i < displayIndex ? 'bg-green-900/50 text-green-400' : 'bg-[#2a2a2a] text-gray-500'
             }`}>
               {i + 1}. {stepLabels[s]}
             </div>
@@ -1015,7 +967,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   // 加载中状态
   const renderLoading = (msg: string) => (
     <div className="flex flex-col items-center justify-center py-12 gap-4">
-      <div className="w-10 h-10 border-3 border-purple-500 border-t-transparent rounded-full animate-spin" />
+      <div className="w-10 h-10 border-3 border-green-500 border-t-transparent rounded-full animate-spin" />
       <p className="text-sm text-gray-400">{msg}</p>
       <p className="text-xs text-gray-600">{t('drama.llmWorking')}</p>
     </div>
@@ -1024,19 +976,34 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-[#1c1f2e] border border-gray-800 rounded-3xl p-6 max-w-3xl w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden">
+      <div className="relative bg-[#1a1a1a] border border-white/10 rounded-2xl p-6 max-w-3xl w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <BookIcon className="w-5 h-5 text-purple-400" />
-            <h2 className="text-lg text-gray-200 font-medium">{t('drama.title')}</h2>
+            <BookIcon className="w-5 h-5 text-green-400" />
+            <h2 className="text-lg text-white font-semibold">
+              {step === 'drafts' || step === 'setup' ? (t('drama.title')) : t('drama.title')}
+            </h2>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-800">
+          {/* 创建项目时显示步骤指示器 */}
+          {step === 'setup' && (
+            <div className="flex items-center bg-[#2a2a2a] rounded-full px-1 py-1">
+              <button onClick={() => setCreateStep(1)}
+                className={`px-4 py-1.5 rounded-full text-sm transition-colors ${createStep === 1 ? 'bg-[#3a3a3a] text-white' : 'text-gray-500'}`}>
+                1. {t('drama.steps.novel')}
+              </button>
+              <button onClick={() => novelText.trim() ? setCreateStep(2) : undefined}
+                className={`px-4 py-1.5 rounded-full text-sm transition-colors ${createStep === 2 ? 'bg-[#3a3a3a] text-white' : 'text-gray-500'}`}>
+                2. {t('drama.steps.setup')}
+              </button>
+            </div>
+          )}
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors">
             <CloseIcon className="w-5 h-5 text-gray-400" />
           </button>
         </div>
 
-        {renderStepIndicator()}
+        {step !== 'drafts' && step !== 'setup' && renderStepIndicator()}
 
         {error && (
           <div className="mb-3 px-3 py-2 bg-red-900/30 border border-red-700/50 rounded-lg text-xs text-red-400">
@@ -1046,7 +1013,6 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
         )}
 
         <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0">
-          {/* Step: drafts - 草稿箱 */}
           {step === 'drafts' && (
             <div className="space-y-4">
               {drafts.length > 0 && (
@@ -1055,12 +1021,12 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                   <div className="space-y-2 max-h-[300px] overflow-y-auto custom-scrollbar">
                     {drafts.map(draft => (
                       <div key={draft.id} onClick={() => handleResumeDraft(draft.id)}
-                        className="bg-[#161824] rounded-xl p-3 border border-gray-800 hover:border-purple-500/50 cursor-pointer transition-all group">
+                        className="bg-[#111] rounded-xl p-3 border border-white/5 hover:border-green-500/30 cursor-pointer transition-all group">
                         <div className="flex items-center justify-between">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm text-gray-200 truncate">{draft.title}</span>
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-600/30 text-purple-300 flex-shrink-0">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/20 text-green-400 flex-shrink-0">
                                 {statusLabel(draft.status)}
                               </span>
                             </div>
@@ -1079,9 +1045,9 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                       </div>
                     ))}
                   </div>
-                  <div className="border-t border-gray-800 pt-3">
-                    <button onClick={() => setStep('setup')}
-                      className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                  <div className="border-t border-white/5 pt-3">
+                    <button onClick={() => { setCreateStep(1); setStep('setup'); }}
+                      className="w-full py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-medium transition-all flex items-center justify-center gap-2">
                       <SparkleIcon className="w-4 h-4" />{t('drama.createNew')}
                     </button>
                   </div>
@@ -1091,90 +1057,145 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 <div className="text-center py-8">
                   <BookIcon className="w-10 h-10 text-gray-700 mx-auto mb-3" />
                   <p className="text-sm text-gray-500 mb-4">{t('drama.noDrafts')}</p>
-                  <button onClick={() => setStep('setup')}
-                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all inline-flex items-center gap-2">
+                  <button onClick={() => { setCreateStep(1); setStep('setup'); }}
+                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-medium transition-all inline-flex items-center gap-2">
                     <SparkleIcon className="w-4 h-4" />{t('drama.createProject')}
                   </button>
                 </div>
               )}
               {loading && (
                 <div className="flex items-center justify-center py-8">
-                  <div className="w-6 h-6 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                  <div className="w-6 h-6 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
                 </div>
               )}
             </div>
           )}
 
-          {/* Step: setup */}
-          {step === 'setup' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-gray-400 block mb-1">{t('drama.targetEpisodes')}</label>
-                  <input type="number" value={targetEpisodes} onChange={(e) => setTargetEpisodes(Number(e.target.value))} min={2} max={100}
-                    className="w-full bg-[#161824] border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-purple-500" />
+          {/* Step: setup — MkAnime 风格两步创建 */}
+          {step === 'setup' && createStep === 1 && (
+            <div className="space-y-5">
+              {/* 项目名称 */}
+              <div>
+                <label className="block text-sm font-medium text-white mb-2">{t('drama.steps.setup')}</label>
+                <input type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)}
+                  placeholder={t('drama.untitledProject')}
+                  className="w-full bg-[#111] border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-green-500/50/50 transition-colors" />
+              </div>
+              {/* 故事描述 / 小说输入 */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-sm font-medium text-white">{t('drama.pasteNovel')}</label>
+                  <label className="text-xs px-3 py-1 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30 cursor-pointer transition-colors">
+                    {t('drama.uploadFile')}
+                    <input type="file" accept=".txt,.md,.text" onChange={handleFileUpload} className="hidden" />
+                  </label>
                 </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-1">{t('drama.episodeDuration')}</label>
-                  <input type="number" value={episodeDuration} onChange={(e) => setEpisodeDuration(Number(e.target.value))} min={5} max={300}
-                    className="w-full bg-[#161824] border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-purple-500" />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-1">{t('drama.style')}</label>
-                  <select value={style} onChange={(e) => setStyle(e.target.value)}
-                    className="w-full bg-[#161824] border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-purple-500">
-                    <option value="水墨武侠风格">水墨武侠</option>
-                    <option value="写实电影风格">写实电影</option>
-                    <option value="日系动画风格">日系动画</option>
-                    <option value="赛博朋克风格">赛博朋克</option>
-                    <option value="复古胶片风格">复古胶片</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-1">{t('drama.ratio')}</label>
-                  <select value={ratio} onChange={(e) => setRatio(e.target.value)}
-                    className="w-full bg-[#161824] border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-purple-500">
-                    <option value="16:9">16:9</option>
-                    <option value="9:16">9:16</option>
-                    <option value="21:9">21:9</option>
-                    <option value="4:3">4:3</option>
-                  </select>
+                <textarea
+                  value={novelText} onChange={(e) => setNovelText(e.target.value)}
+                  placeholder={t('drama.novelPlaceholder')}
+                  className="w-full bg-[#111] border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-green-500/50/50 transition-colors resize-none min-h-[200px]"
+                />
+                <div className="flex items-center justify-between text-xs text-gray-600 mt-1">
+                  <span>
+                    {novelText.length > 50000
+                      ? t('drama.longNovelHint', { chars: (novelText.length / 10000).toFixed(1) })
+                      : ''}
+                  </span>
+                  <span>{novelText.length.toLocaleString()} {t('drama.chars')}</span>
                 </div>
               </div>
-              <button onClick={handleCreateProject} disabled={loading}
-                className="w-full py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
-                <SparkleIcon className="w-4 h-4" />{loading ? t('common.loading') : t('drama.createProject')}
-              </button>
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button onClick={() => setStep('drafts')}
+                  className="px-5 py-2.5 rounded-xl text-sm text-gray-400 bg-[#2a2a2a] hover:bg-[#333] transition-colors">
+                  {t('common.cancel')}
+                </button>
+                <button onClick={() => setCreateStep(2)} disabled={!novelText.trim()}
+                  className="px-5 py-2.5 rounded-xl text-sm font-medium text-white bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 transition-all flex items-center gap-2">
+                  {t('drama.nextStep')} →
+                </button>
+              </div>
             </div>
           )}
 
-          {/* Step: novel */}
-          {step === 'novel' && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="text-sm text-gray-300">{t('drama.pasteNovel')}</label>
-                <label className="text-xs px-2 py-1 rounded bg-purple-600/30 text-purple-300 hover:bg-purple-600/50 cursor-pointer transition-colors">
-                  {t('drama.uploadFile')}
-                  <input type="file" accept=".txt,.md,.text" onChange={handleFileUpload} className="hidden" />
-                </label>
+          {step === 'setup' && createStep === 2 && (
+            <div className="space-y-6">
+              {/* 视频设置 */}
+              <div className="flex items-center gap-2 text-white">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+                  <polygon points="23 7 16 12 23 17 23 7" />
+                  <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+                </svg>
+                <span className="font-medium">{t('generate.title')}</span>
               </div>
-              <textarea
-                value={novelText} onChange={(e) => setNovelText(e.target.value)}
-                placeholder={t('drama.novelPlaceholder')}
-                className="w-full bg-[#161824] border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-purple-500 min-h-[200px] resize-y"
-              />
-              <div className="flex items-center justify-between text-xs text-gray-500">
-                <span>
-                  {novelText.length > 50000
-                    ? t('drama.longNovelHint', { chars: (novelText.length / 10000).toFixed(1) })
-                    : ''}
-                </span>
-                <span>{novelText.length.toLocaleString()} {t('drama.chars')}</span>
+
+              {/* 视频比例 */}
+              <div className="flex items-start gap-6">
+                <span className="text-sm text-gray-400 w-24 flex-shrink-0 pt-2">{t('drama.ratio')}</span>
+                <div className="flex gap-2">
+                  {['16:9', '9:16', '21:9', '4:3'].map(r => (
+                    <button key={r} onClick={() => setRatio(r)}
+                      className={`px-4 py-2 rounded-xl text-sm transition-all ${ratio === r ? 'bg-[#2a2a2a] text-white border border-white/20' : 'bg-[#111] text-gray-500 border border-white/5 hover:border-white/10'}`}>
+                      {r === '16:9' ? '▭ ' : r === '9:16' ? '▯ ' : ''}{r}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <button onClick={handleSubmitNovel} disabled={loading || !novelText.trim()}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 text-white font-bold transition-all">
-                {loading ? t('common.loading') : t('drama.startAnalysis')}
-              </button>
+
+              {/* 视觉风格 */}
+              <div className="flex items-start gap-6">
+                <span className="text-sm text-gray-400 w-24 flex-shrink-0 pt-2">{t('drama.style')}</span>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { value: '水墨武侠风格', label: '水墨武侠' },
+                    { value: '写实电影风格', label: '写实电影' },
+                    { value: '日系动画风格', label: '日系动画' },
+                    { value: '赛博朋克风格', label: '赛博朋克' },
+                    { value: '复古胶片风格', label: '复古胶片' },
+                  ].map(s => (
+                    <button key={s.value} onClick={() => setStyle(s.value)}
+                      className={`px-4 py-2 rounded-xl text-sm transition-all ${style === s.value ? 'bg-[#2a2a2a] text-white border border-white/20' : 'bg-[#111] text-gray-500 border border-white/5 hover:border-white/10'}`}>
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 剧集数 */}
+              <div className="flex items-start gap-6">
+                <span className="text-sm text-gray-400 w-24 flex-shrink-0 pt-2">{t('drama.targetEpisodes')}</span>
+                <input type="number" value={targetEpisodes} onChange={(e) => setTargetEpisodes(Number(e.target.value))} min={2} max={100}
+                  className="w-24 bg-[#111] border border-white/10 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-green-500/50/50" />
+              </div>
+
+              {/* 单集时长 */}
+              <div className="flex items-start gap-6">
+                <span className="text-sm text-gray-400 w-24 flex-shrink-0 pt-2">{t('drama.episodeDuration')}</span>
+                <div className="flex flex-wrap gap-2">
+                  {[5, 10, 15, 30, 60].map(d => (
+                    <button key={d} onClick={() => setEpisodeDuration(d)}
+                      className={`px-4 py-2 rounded-xl text-sm transition-all ${episodeDuration === d ? 'bg-[#2a2a2a] text-white border border-white/20' : 'bg-[#111] text-gray-500 border border-white/5 hover:border-white/10'}`}>
+                      {d} S
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button onClick={() => setStep('drafts')}
+                  className="px-5 py-2.5 rounded-xl text-sm text-gray-400 bg-[#2a2a2a] hover:bg-[#333] transition-colors">
+                  {t('common.cancel')}
+                </button>
+                <button onClick={() => setCreateStep(1)}
+                  className="px-5 py-2.5 rounded-xl text-sm text-gray-300 bg-[#2a2a2a] hover:bg-[#333] transition-colors flex items-center gap-1">
+                  ← {t('drama.prevStep')}
+                </button>
+                <button onClick={handleCreateProject} disabled={loading || !novelText.trim()}
+                  className="px-5 py-2.5 rounded-xl text-sm font-medium text-white bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 transition-all flex items-center gap-2">
+                  {loading ? t('common.loading') : t('drama.createProject')} →
+                </button>
+              </div>
             </div>
           )}
 
@@ -1184,8 +1205,8 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
           {/* Step: review - 查看分析结果 */}
           {step === 'review' && project && (
             <div className="space-y-3">
-              <div className="bg-[#161824] rounded-xl p-3 border border-gray-800">
-                <h3 className="text-sm text-purple-400 mb-2">{project.novel.title}</h3>
+              <div className="bg-[#111] rounded-xl p-3 border border-white/5">
+                <h3 className="text-sm text-green-400 mb-2">{project.novel.title}</h3>
                 <p className="text-xs text-gray-400 mb-3">{project.novel.summary}</p>
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   <div><span className="text-gray-500">{t('drama.charCount')}:</span> <span className="text-gray-300">{project.novel.characters.length}</span></div>
@@ -1198,8 +1219,8 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               <div className="space-y-2">
                 <label className="text-xs text-gray-500">{t('drama.characters')}</label>
                 {project.novel.characters.map(c => (
-                  <div key={c.id} className="bg-[#161824] rounded-lg p-2 border border-gray-800 flex items-center gap-2">
-                    <UserIcon className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                  <div key={c.id} className="bg-[#111] rounded-lg p-2 border border-white/5 flex items-center gap-2">
+                    <UserIcon className="w-3 h-3 text-green-400 flex-shrink-0" />
                     <span className="text-xs text-gray-200">{c.originalName}</span>
                     <span className="text-xs text-gray-600">({c.role})</span>
                     <span className="text-xs text-gray-500 truncate flex-1">{c.description}</span>
@@ -1207,7 +1228,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 ))}
               </div>
               <button onClick={handleStartCopyright} disabled={loading}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-bold transition-all flex items-center justify-center gap-2">
                 <ArrowRightIcon className="w-4 h-4" />{loading ? t('common.loading') : t('drama.startCopyright')}
               </button>
             </div>
@@ -1225,7 +1246,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                   {/* 一键批量生图 */}
                   {!batchCharImageRunning && project.novel.characters.some(c => c.role !== 'minor' && !c.confirmed) && (
                     <button onClick={handleBatchCharImages}
-                      className="text-[10px] px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors whitespace-nowrap">
+                      className="text-[10px] px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white transition-colors whitespace-nowrap">
                       {t('drama.batchGenImages') || '批量生图'}
                     </button>
                   )}
@@ -1254,10 +1275,10 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 const isGenerating = progress?.generating;
                 const selected = selectedImages[char.id];
                 return (
-                <div key={char.id} className="bg-[#161824] rounded-xl p-3 border border-gray-800">
+                <div key={char.id} className="bg-[#111] rounded-xl p-3 border border-white/5">
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2">
-                      <UserIcon className="w-4 h-4 text-purple-400" />
+                      <UserIcon className="w-4 h-4 text-green-400" />
                       <span className="text-sm text-gray-200">{char.newName}</span>
                       {char.originalName !== char.newName && (
                         <span className="text-xs text-gray-600">← {char.originalName}</span>
@@ -1270,7 +1291,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                       <div className="flex gap-2">
                         {char.imageUrls.length === 0 && !isGenerating && (
                           <button onClick={() => handleGenerateCharImage(char.id)}
-                            className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                            className="text-xs px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white transition-colors">
                             {t('drama.genImage')}
                           </button>
                         )}
@@ -1327,13 +1348,13 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                   {isGenerating && (
                     <div className="mb-2">
                       <div className="flex items-center gap-2 mb-1">
-                        <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-                        <span className="text-xs text-purple-400">
+                        <div className="w-3 h-3 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+                        <span className="text-xs text-green-400">
                           {t('drama.genImageProgress', { done: progress.done, total: progress.total })}
                         </span>
                       </div>
                       <div className="w-full bg-gray-800 rounded-full h-1.5">
-                        <div className="bg-purple-500 h-1.5 rounded-full transition-all duration-500"
+                        <div className="bg-green-500 h-1.5 rounded-full transition-all duration-500"
                           style={{ width: `${(progress.done / progress.total) * 100}%` }} />
                       </div>
                     </div>
@@ -1352,12 +1373,12 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                               <img src={url} alt={`${char.newName} ${i + 1}`}
                                 loading="lazy"
                                 className={`w-20 h-24 object-cover rounded-lg border-2 cursor-pointer transition-all ${
-                                  isSelected ? 'border-purple-500 ring-1 ring-purple-500/50' : 'border-gray-700 hover:border-gray-500'
+                                  isSelected ? 'border-green-500 ring-1 ring-green-500/50' : 'border-white/10 hover:border-gray-500'
                                 }`}
                                 onClick={() => !char.confirmed && toggleImageSelection(char.id, url)} />
                               {/* 勾选标记 */}
                               {!char.confirmed && isSelected && (
-                                <div className="absolute top-1 right-1 w-4 h-4 bg-purple-500 rounded-full flex items-center justify-center">
+                                <div className="absolute top-1 right-1 w-4 h-4 bg-green-500 rounded-full flex items-center justify-center">
                                   <CheckIcon className="w-2.5 h-2.5 text-white" />
                                 </div>
                               )}
@@ -1377,13 +1398,13 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               })}
               {/* 场景列表 - 生成场景参考图 */}
               {project.novel.locations.length > 0 && (
-                <details className="bg-[#161824] rounded-xl border border-gray-800" open>
-                  <summary className="px-3 py-2 text-xs text-purple-400 cursor-pointer hover:text-purple-300 transition-colors font-medium flex items-center justify-between">
+                <details className="bg-[#111] rounded-xl border border-white/5" open>
+                  <summary className="px-3 py-2 text-xs text-green-400 cursor-pointer hover:text-green-300 transition-colors font-medium flex items-center justify-between">
                     <span>{t('drama.locations')} ({project.novel.locations.length})</span>
                     <span className="flex gap-1.5" onClick={e => e.preventDefault()}>
                       {!batchLocImageRunning && project.novel.locations.some(l => !l.imageUrl) && (
                         <button onClick={handleBatchLocImages}
-                          className="text-[10px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                          className="text-[10px] px-2 py-0.5 rounded bg-green-600 hover:bg-green-500 text-white transition-colors">
                           {t('drama.batchGenImages') || '批量生图'}
                         </button>
                       )}
@@ -1402,7 +1423,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                           <div className="relative group flex-shrink-0">
                             <img src={loc.imageUrl} alt={loc.newName}
                               loading="lazy"
-                              className="w-16 h-10 object-cover rounded border border-gray-700 cursor-pointer"
+                              className="w-16 h-10 object-cover rounded border border-white/10 cursor-pointer"
                               onClick={() => setPreviewImage(loc.imageUrl!)} />
                             <button onClick={() => handleGenerateLocImage(loc.id)}
                               className="absolute inset-0 bg-black/50 rounded opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-[9px] text-white">
@@ -1410,12 +1431,12 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                             </button>
                           </div>
                         ) : (
-                          <div className="w-16 h-10 bg-gray-800 rounded border border-gray-700 flex items-center justify-center flex-shrink-0">
+                          <div className="w-16 h-10 bg-gray-800 rounded border border-white/10 flex items-center justify-center flex-shrink-0">
                             {locImageGenerating[loc.id] ? (
-                              <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                              <div className="w-3 h-3 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
                             ) : (
                               <button onClick={() => handleGenerateLocImage(loc.id)}
-                                className="text-[9px] text-gray-500 hover:text-purple-400 transition-colors">
+                                className="text-[9px] text-gray-500 hover:text-green-400 transition-colors">
                                 {t('drama.genSceneImage')}
                               </button>
                             )}
@@ -1435,7 +1456,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               )}
               {/* 龙套角色 - 折叠显示，无需生成图片 */}
               {project.novel.characters.filter(c => c.role === 'minor').length > 0 && (
-                <details className="bg-[#161824] rounded-xl border border-gray-800">
+                <details className="bg-[#111] rounded-xl border border-white/5">
                   <summary className="px-3 py-2 text-xs text-gray-500 cursor-pointer hover:text-gray-300 transition-colors">
                     {t('drama.minorChars', { count: project.novel.characters.filter(c => c.role === 'minor').length })}
                   </summary>
@@ -1455,7 +1476,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               )}
               {project.novel.characters.filter(c => c.role !== 'minor').every(c => c.confirmed) && (
                 <button onClick={handleGenerateScript} disabled={loading}
-                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white font-bold transition-all flex items-center justify-center gap-2">
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-green-500 text-white font-bold transition-all flex items-center justify-center gap-2">
                   <ArrowRightIcon className="w-4 h-4" />{loading ? t('common.loading') : t('drama.genScript')}
                 </button>
               )}
@@ -1471,17 +1492,17 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                   <p className="text-sm text-gray-400">{t('drama.readySummary', { title: project.novel.title, episodes: project.episodes.length })}</p>
                   <div className="space-y-1.5 max-h-[400px] overflow-y-auto custom-scrollbar">
                     {project.episodes.map(ep => (
-                      <details key={ep.number} className="bg-[#161824] rounded-lg border border-gray-800 text-xs">
-                        <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-gray-800/30 transition-colors">
-                          <span className="text-purple-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
+                      <details key={ep.number} className="bg-[#111] rounded-lg border border-white/5 text-xs">
+                        <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-white/5/30 transition-colors">
+                          <span className="text-green-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
                           <span className="text-gray-300 truncate flex-1">{ep.title}</span>
                           <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
                         </summary>
-                        <div className="px-2.5 pb-2.5 border-t border-gray-800/50">
+                        <div className="px-2.5 pb-2.5 border-t border-white/5/50">
                           <textarea
                             value={editingEpisodes[ep.number] ?? ep.prompt}
                             onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
-                            className="w-full bg-[#0d0f1a] border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-purple-500 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
+                            className="w-full bg-[#0a0a0a] border border-white/10 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-green-500/50 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
                           />
                           {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
                             <div className="flex gap-2 mt-1.5">
@@ -1494,7 +1515,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                                 if (projData?.project) setProject(projData.project);
                                 setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; });
                               }}
-                                className="text-[10px] px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors">
+                                className="text-[10px] px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white transition-colors">
                                 {t('common.save')}
                               </button>
                               <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
@@ -1508,7 +1529,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                     ))}
                   </div>
                   <button onClick={() => setStep('ready')}
-                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-bold transition-all flex items-center justify-center gap-2">
                     <ArrowRightIcon className="w-4 h-4" />{t('drama.nextStep')}
                   </button>
                 </>
@@ -1516,7 +1537,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                 <div className="text-center py-6">
                   <p className="text-sm text-gray-400 mb-4">{t('drama.confirmCharHint')}</p>
                   <button onClick={handleGenerateScript}
-                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold transition-all inline-flex items-center gap-2">
+                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-bold transition-all inline-flex items-center gap-2">
                     <SparkleIcon className="w-4 h-4" />{t('drama.genScript')}
                   </button>
                 </div>
@@ -1537,10 +1558,10 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
               {/* 创意优化进度 */}
               {optimizing && (
-                <div className="bg-[#161824] rounded-xl p-3 border border-indigo-700/50">
+                <div className="bg-[#111] rounded-xl p-3 border border-green-700/50">
                   <div className="flex items-center gap-2 mb-2">
-                    <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm text-indigo-300">{t('drama.optimizeInProgress')}</span>
+                    <div className="w-4 h-4 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm text-green-300">{t('drama.optimizeInProgress')}</span>
                   </div>
                   <p className="text-xs text-gray-400">{optimizeProgress}</p>
                 </div>
@@ -1548,7 +1569,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
               {/* 参考图生成进度 */}
               {generatingRefImages && (
-                <div className="bg-[#161824] rounded-xl p-3 border border-cyan-700/50">
+                <div className="bg-[#111] rounded-xl p-3 border border-cyan-700/50">
                   <div className="flex items-center gap-2 mb-2">
                     <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
                     <span className="text-sm text-cyan-300">{t('drama.refImageInProgress')}</span>
@@ -1559,10 +1580,10 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
               {/* 批量生成进度 */}
               {batchGenerating && (
-                <div className="bg-[#161824] rounded-xl p-3 border border-purple-700/50">
+                <div className="bg-[#111] rounded-xl p-3 border border-green-700/50">
                   <div className="flex items-center gap-2 mb-2">
-                    <div className="w-4 h-4 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
-                    <span className="text-sm text-purple-300">{t('drama.batchInProgress')}</span>
+                    <div className="w-4 h-4 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-sm text-green-300">{t('drama.batchInProgress')}</span>
                   </div>
                   <p className="text-xs text-gray-400">{batchProgress}</p>
                 </div>
@@ -1572,12 +1593,12 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               {project.episodes.length > 0 && (
                 <div className="space-y-1.5 max-h-[400px] overflow-y-auto custom-scrollbar">
                   {project.episodes.map(ep => (
-                    <details key={ep.number} className={`bg-[#161824] rounded-lg border text-xs ${
+                    <details key={ep.number} className={`bg-[#111] rounded-lg border text-xs ${
                       ep.videoStatus === 'done' ? 'border-green-700/50' :
                       ep.videoStatus === 'generating' ? 'border-yellow-700/50' :
-                      ep.videoStatus === 'error' ? 'border-red-700/50' : 'border-gray-800'
+                      ep.videoStatus === 'error' ? 'border-red-700/50' : 'border-white/5'
                     }`}>
-                      <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-gray-800/30 transition-colors">
+                      <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-white/5/30 transition-colors">
                         {/* 状态图标 */}
                         <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
                           {ep.videoStatus === 'done' && <CheckIcon className="w-4 h-4 text-green-400" />}
@@ -1585,7 +1606,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                           {ep.videoStatus === 'error' && <span className="text-red-400">✗</span>}
                           {(!ep.videoStatus || ep.videoStatus === 'pending') && <span className="text-gray-600">○</span>}
                         </div>
-                        <span className="text-purple-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
+                        <span className="text-green-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
                         <span className="text-gray-300 truncate flex-1">{ep.title}</span>
                         <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
                         {/* 优化分数 */}
@@ -1600,17 +1621,17 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                         <button
                           onClick={(e) => { e.stopPropagation(); handleOptimizeSingle(ep.number); }}
                           disabled={optimizingEp[ep.number]}
-                          className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600/50 hover:bg-indigo-500/50 text-indigo-300 flex-shrink-0 transition-colors disabled:opacity-50"
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/50 hover:bg-green-500/50 text-green-300 flex-shrink-0 transition-colors disabled:opacity-50"
                           title={t('drama.optimizeSingle')}
                         >
                           {optimizingEp[ep.number] ? (
-                            <div className="w-3 h-3 border border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                            <div className="w-3 h-3 border border-green-400 border-t-transparent rounded-full animate-spin" />
                           ) : '✦'}
                         </button>
                         {ep.videoStatus === 'done' && ep.videoUrl && (
                           <a href={`/api/video-proxy?url=${encodeURIComponent(ep.videoUrl)}`}
                             target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-                            className="text-purple-400 hover:text-purple-300 flex-shrink-0 underline">
+                            className="text-green-400 hover:text-green-300 flex-shrink-0 underline">
                             {t('drama.watchVideo')}
                           </a>
                         )}
@@ -1620,13 +1641,13 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                           </span>
                         )}
                       </summary>
-                      <div className="px-2.5 pb-2.5 border-t border-gray-800/50">
+                      <div className="px-2.5 pb-2.5 border-t border-white/5/50">
                         {/* 参考图预览 + 单集重新生成 */}
                         <div className="flex items-center gap-1.5 mt-2 mb-1.5 flex-wrap">
                           {ep.refImageUrls && ep.refImageUrls.length > 0 && ep.refImageUrls.map((url, ri) => (
                             <img key={ri} src={url} alt={`ref ${ri + 1}`}
                               loading="lazy"
-                              className="w-16 h-10 object-cover rounded border border-gray-700 cursor-pointer hover:border-cyan-500 transition-colors"
+                              className="w-16 h-10 object-cover rounded border border-white/10 cursor-pointer hover:border-cyan-500 transition-colors"
                               onClick={() => setPreviewImage(url)} />
                           ))}
                           {ep.refImageUrls && ep.refImageUrls.length > 0 && (
@@ -1651,21 +1672,21 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                               <button
                                 onClick={() => handleRegenShots(ep.number)}
                                 disabled={regenShotsEp[ep.number]}
-                                className="text-[9px] px-1.5 py-0.5 rounded bg-purple-700/40 hover:bg-purple-600/50 text-purple-300 transition-colors disabled:opacity-50 ml-auto"
+                                className="text-[9px] px-1.5 py-0.5 rounded bg-green-700/40 hover:bg-green-600/50 text-green-300 transition-colors disabled:opacity-50 ml-auto"
                               >
                                 {regenShotsEp[ep.number] ? (
-                                  <div className="w-3 h-3 border border-purple-400 border-t-transparent rounded-full animate-spin inline-block" />
+                                  <div className="w-3 h-3 border border-green-400 border-t-transparent rounded-full animate-spin inline-block" />
                                 ) : '🔄 ' + t('drama.regenShots')}
                               </button>
                             </div>
                             {ep.shots.map((shot) => (
-                              <details key={shot.index} className={`bg-[#0d0f1a] rounded border text-[10px] ${
+                              <details key={shot.index} className={`bg-[#0a0a0a] rounded border text-[10px] ${
                                 shot.videoStatus === 'done' ? 'border-green-800/50' :
                                 shot.videoStatus === 'generating' ? 'border-yellow-800/50' :
-                                shot.videoStatus === 'error' ? 'border-red-800/50' : 'border-gray-800/50'
+                                shot.videoStatus === 'error' ? 'border-red-800/50' : 'border-white/5/50'
                               }`}>
                                 <summary className="flex items-center gap-1.5 p-1.5 cursor-pointer select-none hover:bg-white/5">
-                                  <span className="text-purple-400 font-mono">S{String(shot.index).padStart(2, '0')}</span>
+                                  <span className="text-green-400 font-mono">S{String(shot.index).padStart(2, '0')}</span>
                                   <span className="text-gray-500">{shot.startTime}-{shot.endTime}s</span>
                                   {shot.transition && <span className="text-yellow-600 text-[9px]">→ {shot.transition}</span>}
                                   {shot.videoStatus === 'done' && <span className="text-green-400 text-[9px]">✓</span>}
@@ -1705,7 +1726,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                         <textarea
                           value={editingEpisodes[ep.number] ?? ep.prompt}
                           onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
-                          className="w-full bg-[#0d0f1a] border border-gray-700 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-purple-500 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
+                          className="w-full bg-[#0a0a0a] border border-white/10 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-green-500/50 mt-2 min-h-[120px] resize-y font-mono leading-relaxed"
                         />
                         {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
                           <div className="flex gap-2 mt-1.5">
@@ -1719,7 +1740,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
                               if (projData?.project) setProject(projData.project);
                               setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; });
                             }}
-                              className="text-[10px] px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors">
+                              className="text-[10px] px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white transition-colors">
                               {t('common.save')}
                             </button>
                             <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
@@ -1738,7 +1759,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
               {!batchGenerating && !optimizing && !generatingRefImages && (
                 <div className="flex gap-2 flex-wrap">
                   <button onClick={handleOptimizeScripts}
-                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold transition-all flex items-center justify-center gap-2">
+                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-bold transition-all flex items-center justify-center gap-2">
                     <SparkleIcon className="w-4 h-4" />{t('drama.optimizeScripts')}
                   </button>
                   <button onClick={handleGenerateRefImages}
@@ -1770,10 +1791,10 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
 
         {/* 底部导航 */}
         {stepIndex > 0 && step !== 'drafts' && !loading && (
-          <div className="mt-4 pt-3 border-t border-gray-800 flex items-center justify-between">
+          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
             <button onClick={() => {
               const prevSteps: Record<Step, Step> = {
-                drafts: 'drafts', setup: 'drafts', novel: 'setup', analyzing: 'novel', review: 'novel',
+                drafts: 'drafts', setup: 'drafts', novel: 'setup', analyzing: 'setup', review: 'setup',
                 copyright: 'review', characters: 'review', scripting: 'characters', ready: 'scripting',
               };
               setStep(prevSteps[step]);
@@ -1783,7 +1804,7 @@ export default function NovelToDrama({ onClose, sessionId }: NovelToDramaProps) 
             </button>
             {step === 'ready' && !batchGenerating && (
               <button onClick={handleGenerateScript}
-                className="flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition-colors">
+                className="flex items-center gap-1 text-xs text-green-400 hover:text-green-300 transition-colors">
                 <SparkleIcon className="w-3 h-3" />{t('drama.regenScript')}
               </button>
             )}

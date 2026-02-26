@@ -43,7 +43,8 @@ export interface LocationInfo {
   newName: string;
   description: string;
   visualPrompt: string;
-  imageUrl?: string;
+  imageUrl?: string;       // 确认后的单张图
+  imageUrls?: string[];    // 候选图列表（即梦返回4张）
 }
 
 export interface PlotPoint {
@@ -426,6 +427,7 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
 3. 提取本章核心情节（关键事件、情感基调）
 4. 为每个角色生成中文生图提示词（visualPrompt），描述外貌、服装、姿态、场景氛围
 5. 为每个场景生成中文生图提示词
+6. 重要：根据人名、地名、文化背景判断角色的民族/人种，在 visualPrompt 开头明确标注（如"中国人"、"东亚面孔"、"黄皮肤黑头发"等）
 
 请以 JSON 格式返回：
 {
@@ -436,7 +438,7 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
       "role": "protagonist/supporting/minor",
       "description": "详细外貌描述（发型、服装、体型、年龄、标志性特征等）",
       "personality": "性格特征和行为模式",
-      "visualPrompt": "中文生图提示词，如：17岁高中男生，凌乱黑发，锐利眼神，穿着旧校服，站在昏暗巷子里"
+      "visualPrompt": "中文生图提示词，开头写明人种，如：中国人，17岁高中男生，黑色短发，单眼皮，穿着蓝白校服，站在教室里"
     }
   ],
   "locations": [
@@ -444,7 +446,7 @@ const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分
       "name": "地点名",
       "aliases": ["别名"],
       "description": "详细环境描述（建筑风格、氛围、光线、季节等）",
-      "visualPrompt": "中文生图提示词，如：老旧教学楼走廊，午后阳光斜照，墙壁斑驳"
+      "visualPrompt": "中文生图提示词，写明地域风格，如：中国南方小城，老旧教学楼走廊，午后阳光斜照，墙壁斑驳"
     }
   ],
   "plotPoints": [
@@ -557,8 +559,9 @@ async function analyzeByChapters(
   progress: AnalyzeProgressCallback,
 ): Promise<{ title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, string>>; plotPoints?: PlotPoint[]; themes?: string[] }> {
   const batches = batchChapters(chapters, maxCharsPerBatch);
-  console.log(`[drama] 章节分析: ${chapters.length} 章, 分 ${batches.length} 批处理`);
-  progress('章节分析', `识别到 ${chapters.length} 个章节，分 ${batches.length} 批逐章提取实体...`);
+  const CONCURRENCY = Math.min(4, batches.length); // 最大并发数
+  console.log(`[drama] 章节分析: ${chapters.length} 章, 分 ${batches.length} 批处理, 并发 ${CONCURRENCY}`);
+  progress('章节分析', `识别到 ${chapters.length} 个章节，分 ${batches.length} 批提取实体（并发 ${CONCURRENCY}）...`);
 
   const accumulated = {
     characters: new Map<string, Record<string, unknown>>(),
@@ -568,12 +571,14 @@ async function analyzeByChapters(
     themes: [] as string[],
   };
 
-  for (let bi = 0; bi < batches.length; bi++) {
+  let completedCount = 0;
+
+  // 单批次处理函数
+  const processBatch = async (bi: number) => {
     const batch = batches[bi];
     const chapterRange = batch.length === 1
       ? `第${batch[0].number}章`
       : `第${batch[0].number}-${batch[batch.length - 1].number}章`;
-    progress('章节分析', `正在分析 ${chapterRange} (批次 ${bi + 1}/${batches.length})...`);
 
     // 拼接批次内所有章节内容
     const batchText = batch.map(ch => `=== ${ch.title} ===\n${ch.content}`).join('\n\n');
@@ -584,8 +589,7 @@ async function analyzeByChapters(
     for (let retry = 0; retry < 3; retry++) {
       if (retry > 0) {
         console.log(`[drama] 批次 ${bi + 1}/${batches.length} 第 ${retry + 1} 次重试...`);
-        progress('章节分析', `批次 ${bi + 1}/${batches.length} 重试中 (${retry + 1}/3)...`);
-        await new Promise(r => setTimeout(r, 3000 * retry)); // 递增等待
+        await new Promise(r => setTimeout(r, 3000 * retry));
       }
       const startTime = Date.now();
       result = await chatCompletionJSON<Record<string, unknown>>(CHAPTER_EXTRACT_PROMPT, userPrompt);
@@ -594,67 +598,156 @@ async function analyzeByChapters(
     }
 
     if (result.success && result.data) {
-      // 增量合并每章的实体
       for (const ch of batch) {
         mergeChapterEntities(accumulated, result.data, ch.number);
       }
+      completedCount++;
       console.log(`[drama] 批次 ${bi + 1}/${batches.length} 完成: 累计 ${accumulated.characters.size} 角色, ${accumulated.locations.size} 场景`);
+      progress('章节分析', `批次 ${completedCount}/${batches.length} 完成 (${accumulated.characters.size} 角色, ${accumulated.locations.size} 场景)`);
     } else {
+      completedCount++;
       console.log(`[drama] 批次 ${bi + 1}/${batches.length} 失败: ${result.error}`);
+      progress('章节分析', `批次 ${completedCount}/${batches.length} 完成（${bi + 1} 失败）`);
     }
-  }
-
-  // 最终精炼：用一次 LLM 调用整合所有章节的合并结果
-  progress('整合精炼', `正在整合 ${chapters.length} 章的分析结果...`);
-  const mergedData = {
-    characters: [...accumulated.characters.values()].map(c => {
-      const { _chapters, ...rest } = c as Record<string, unknown>;
-      return rest;
-    }),
-    locations: [...accumulated.locations.values()],
-    plotPoints: accumulated.plotPoints,
-    summary: accumulated.summaries.join('\n'),
   };
 
-  const refinePrompt = `你是一位专业编剧。以下是对一部长篇小说逐章分析后的合并结果。
-请精炼和整合这些信息：
-1. 写一个完整的 300 字以内故事梗概（不是片段拼接）
-2. 确认每个角色的主次关系（protagonist/supporting/minor），合并明显重复的角色（同一人的不同称呼），但不要删除有独立剧情作用的角色
-3. 合并明显重复的场景（同一地点的不同描述），保留所有有独立功能的场景
-4. 按时间线重新排列情节点
-5. 提炼核心主题
-6. 为每个角色和场景补充中文 visualPrompt（如果缺失），visualPrompt 必须是中文生图提示词
-7. 给出一个合适的故事标题
+  // 并发执行，控制并发数
+  const queue = Array.from({ length: batches.length }, (_, i) => i);
+  const running: Promise<void>[] = [];
+  while (queue.length > 0 || running.length > 0) {
+    while (running.length < CONCURRENCY && queue.length > 0) {
+      const bi = queue.shift()!;
+      const p = processBatch(bi).then(() => { running.splice(running.indexOf(p), 1); });
+      running.push(p);
+    }
+    if (running.length > 0) await Promise.race(running);
+  }
 
-重要：保留所有有名字的角色，即使只出现过一两次。只合并同一个人的不同称呼/别名，不要因为角色不重要就删除。
+  // 最终精炼：分批处理避免输出截断
+  progress('整合精炼', `正在整合 ${chapters.length} 章的分析结果...`);
+  const allCharacters = [...accumulated.characters.values()].map(c => {
+    const { _chapters, ...rest } = c as Record<string, unknown>;
+    return rest;
+  });
+  const allLocations = [...accumulated.locations.values()];
+
+  // 分批精炼角色（每批最多 15 个）
+  const REFINE_CHAR_BATCH = 15;
+  const refinedCharacters: Array<Record<string, string>> = [];
+  const charRefinePrompt = `你是一位专业编剧兼AI绘画提示词专家。以下是从小说中提取的角色列表（可能有重复）。
+请精炼：
+1. 合并同一人的不同称呼/别名，但保留所有有名字的独立角色
+2. 确认每个角色的主次关系（protagonist/supporting/minor）
+3. 根据小说背景（人名、地名、文化背景）判断角色的民族/人种，例如中文名字的角色就是中国人/东亚面孔
+4. 为每个角色生成详细的中文 visualPrompt（用于AI生图），要求：
+   - 开头必须明确人种/民族，如"中国人"、"东亚面孔"、"黄皮肤黑头发"等
+   - 必须包含：性别、年龄段、身高体型、发型发色、五官特征
+   - 必须包含：标志性服装（具体款式和颜色）、配饰、道具
+   - 必须包含：气质和表情特征
+   - 如果是学生，明确写出"穿着XX校服"等具体服装描述
+   - visualPrompt 至少80字，越详细越好
+返回 JSON 数组：[{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "详细的中文生图提示词，至少80字，开头必须写明人种" }]`;
+
+  const charBatchTasks = [];
+  for (let i = 0; i < allCharacters.length; i += REFINE_CHAR_BATCH) {
+    const batch = allCharacters.slice(i, i + REFINE_CHAR_BATCH);
+    charBatchTasks.push((async () => {
+      progress('整合精炼', `精炼角色 ${i + 1}-${Math.min(i + REFINE_CHAR_BATCH, allCharacters.length)}/${allCharacters.length}...`);
+      const st = Date.now();
+      const r = await chatCompletionJSON<Array<Record<string, string>>>(charRefinePrompt, JSON.stringify(batch));
+      logLLMCall({ projectId, step: `refine_chars_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
+      if (r.success && r.data) return Array.isArray(r.data) ? r.data : [];
+      return batch as Array<Record<string, string>>; // fallback 原始数据
+    })());
+  }
+
+  // 分批精炼场景（每批最多 20 个）
+  const REFINE_LOC_BATCH = 20;
+  const locRefinePrompt = `你是一位专业编剧兼AI绘画提示词专家。以下是从小说中提取的场景列表（可能有重复）。
+请精炼：
+1. 合并同一地点的不同描述
+2. 保留所有有独立功能的场景
+3. 根据小说背景判断场景所在的国家/地区文化风格（如中国城市、中式建筑等）
+4. 为每个场景生成详细的中文 visualPrompt（用于AI生图），要求：
+   - 开头必须明确地域文化风格，如"中国城市"、"中式校园"、"中国南方小城"等
+   - 必须包含：场景类型（室内/室外）、时间段（白天/夜晚/黄昏等）
+   - 必须包含：空间布局、主要物件和家具、建筑风格
+   - 必须包含：光线氛围（自然光/灯光/昏暗等）、色调
+   - 必须包含：环境细节（墙壁材质、地面、装饰物等）
+   - 如果是学校场景，写明具体是教室/操场/食堂等，包含桌椅黑板等细节
+   - visualPrompt 至少60字，越详细越好
+返回 JSON 数组：[{ "name": "...", "description": "...", "visualPrompt": "详细的中文生图提示词，至少60字" }]`;
+
+  const locBatchTasks = [];
+  for (let i = 0; i < allLocations.length; i += REFINE_LOC_BATCH) {
+    const batch = allLocations.slice(i, i + REFINE_LOC_BATCH);
+    locBatchTasks.push((async () => {
+      progress('整合精炼', `精炼场景 ${i + 1}-${Math.min(i + REFINE_LOC_BATCH, allLocations.length)}/${allLocations.length}...`);
+      const st = Date.now();
+      const r = await chatCompletionJSON<Array<Record<string, string>>>(locRefinePrompt, JSON.stringify(batch));
+      logLLMCall({ projectId, step: `refine_locs_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
+      if (r.success && r.data) return Array.isArray(r.data) ? r.data : [];
+      return batch as Array<Record<string, string>>; // fallback
+    })());
+  }
+
+  // 角色和场景并发精炼
+  const [charResults, locResults] = await Promise.all([
+    Promise.all(charBatchTasks),
+    Promise.all(locBatchTasks),
+  ]);
+  const finalCharacters = charResults.flat();
+  const finalLocations = locResults.flat();
+
+  // 最后一次调用：只精炼摘要、情节、主题（数据量小，不会截断）
+  progress('整合精炼', '生成故事梗概和主题...');
+  const summaryRefinePrompt = `你是一位专业编剧。根据以下章节摘要和情节点，生成精炼结果。
+
+严格要求：
+- title：为故事起一个吸引人的标题（不超过10个字）
+- summary：用300字以内写出完整故事梗概，包含主要人物、核心冲突、发展脉络和结局走向
+- plotPoints：只保留最关键的情节转折点（最多20个），按章节排序
+- themes：提炼2-5个核心主题
 
 返回 JSON：
 {
   "title": "故事标题",
   "summary": "300字以内完整梗概",
-  "characters": [{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "中文生图提示词" }],
-  "locations": [{ "name": "...", "description": "...", "visualPrompt": "中文生图提示词" }],
   "plotPoints": [{ "chapter": 1, "summary": "...", "emotionalTone": "...", "keyEvents": ["..."] }],
   "themes": ["主题1", "主题2"]
 }`;
+  // 限制输入量：只取前15个摘要，前20个情节点，避免输入过大
+  const summaryInput = JSON.stringify({
+    summaries: accumulated.summaries.slice(0, 15),
+    plotPoints: accumulated.plotPoints.slice(0, 20),
+    themes: [...new Set(accumulated.themes)].slice(0, 10),
+  });
 
-  const refineText = JSON.stringify(mergedData).substring(0, maxCharsPerBatch);
-  const startTime = Date.now();
-  const refineResult = await chatCompletionJSON<Record<string, unknown>>(refinePrompt, refineText);
-  logLLMCall({ projectId, step: 'chapter_refine', provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: refineResult.success, error: refineResult.error });
-
-  if (refineResult.success && refineResult.data) {
-    return refineResult.data as { title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, string>>; plotPoints?: PlotPoint[]; themes?: string[] };
+  // 带重试的 summary refine
+  let summaryResult: { success: boolean; data?: Record<string, unknown>; error?: string } = { success: false };
+  for (let retry = 0; retry < 3; retry++) {
+    if (retry > 0) {
+      console.log(`[drama] summary refine 第 ${retry + 1} 次重试...`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    const stSum = Date.now();
+    summaryResult = await chatCompletionJSON<Record<string, unknown>>(summaryRefinePrompt, summaryInput);
+    logLLMCall({ projectId, step: `refine_summary${retry > 0 ? `_retry${retry}` : ''}`, provider: config.provider, model: config.model, durationMs: Date.now() - stSum, success: summaryResult.success, error: summaryResult.error });
+    if (summaryResult.success && summaryResult.data?.title && summaryResult.data?.summary) break;
   }
 
-  // 精炼失败，返回原始合并结果
+  const finalTitle = (summaryResult.data?.title as string) || '未命名';
+  const finalSummary = (summaryResult.data?.summary as string) || accumulated.summaries.slice(0, 5).join(' ').substring(0, 500);
+  const finalPlotPoints = (summaryResult.data?.plotPoints as PlotPoint[]) || accumulated.plotPoints;
+  const finalThemes = (summaryResult.data?.themes as string[]) || [];
+
   return {
-    title: '未命名',
-    summary: accumulated.summaries.join(' ').substring(0, 500),
-    characters: mergedData.characters as Array<Record<string, string>>,
-    locations: mergedData.locations as Array<Record<string, string>>,
-    plotPoints: accumulated.plotPoints,
-    themes: [],
+    title: finalTitle,
+    summary: finalSummary,
+    characters: finalCharacters,
+    locations: finalLocations,
+    plotPoints: finalPlotPoints,
+    themes: finalThemes,
   };
 }
 
@@ -944,13 +1037,20 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
   const locs = project.novel.locations;
 
   // 版权改造 system prompt（角色批次和场景批次共用基础指令）
-  const charSystemPrompt = `你是一位版权合规专家兼视觉设计师。请对以下角色进行版权改造。
+  const charSystemPrompt = `你是一位版权合规专家兼AI绘画提示词专家。请对以下角色进行版权改造。
+
+故事背景：${project.novel.summary?.substring(0, 300) || ''}
 
 改造规则：
 1. 所有角色名更换为全新名字，保持角色性格和关系不变
 2. 公共领域作品（如水浒传、西游记等）可适度保留
-3. 为每个角色生成中文生图提示词（描述外貌、服装、姿态、场景氛围）
-4. 为每个角色设定默认服化道（costumeDesc）：日常服装、妆容特征、标志性道具
+3. 为每个角色设定默认服化道（costumeDesc）：日常服装、妆容特征、标志性道具
+4. 为每个角色生成详细的中文 visualPrompt（用于AI生图），严格要求：
+   - 开头必须写明人种/民族（如"中国人"、"东亚面孔"）
+   - 必须包含：性别、具体年龄、身高体型、发型发色、五官特征、肤色
+   - 必须包含：服装款式和颜色（如"蓝白条纹校服外套，深蓝校裤"）
+   - 必须包含：配饰/道具、气质表情
+   - visualPrompt 至少100字，不足视为不合格
 
 返回 JSON：
 {
@@ -959,18 +1059,25 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
       "originalName": "原名",
       "newName": "新名",
       "adjustedDescription": "调整后的中文外貌描述",
-      "visualPrompt": "中文生图提示词",
+      "visualPrompt": "至少100字的详细中文生图提示词",
       "costumeDesc": "默认服化道描述"
     }
   ]
 }`;
 
-  const locSystemPrompt = `你是一位版权合规专家兼视觉设计师。请对以下场景/地点进行版权改造。
+  const locSystemPrompt = `你是一位版权合规专家兼AI绘画提示词专家。请对以下场景/地点进行版权改造。
+
+故事背景：${project.novel.summary?.substring(0, 300) || ''}
 
 改造规则：
 1. 所有地名更换，保持地理特征和氛围不变
 2. 公共领域作品可适度保留
-3. 为每个场景生成中文生图提示词
+3. 为每个场景生成详细的中文 visualPrompt（用于AI生图），严格要求：
+   - 开头必须写明地域文化风格（如"中国南方小城"、"中式校园"）
+   - 必须包含：室内/室外、时间段、空间布局、建筑风格
+   - 必须包含：主要物件和家具、光线氛围、色调
+   - 必须包含：环境细节（墙壁材质、地面、装饰物等）
+   - visualPrompt 至少60字
 
 返回 JSON：
 {
@@ -979,27 +1086,32 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
       "originalName": "原名",
       "newName": "新名",
       "adjustedDescription": "调整后的中文环境描述",
-      "visualPrompt": "中文生图提示词"
+      "visualPrompt": "至少60字的详细中文生图提示词"
     }
   ]
 }`;
 
-  // 分批处理角色（每批最多 10 个，避免输出截断）
-  const CHAR_BATCH_SIZE = 10;
+  // 分批处理（角色每批5个确保详细输出，场景每批15个）
+  const CHAR_BATCH_SIZE = 5;
   const LOC_BATCH_SIZE = 15;
 
+  // 角色批次任务
+  const charBatches: Array<{ start: number; batch: typeof mainChars }> = [];
   for (let i = 0; i < mainChars.length; i += CHAR_BATCH_SIZE) {
-    const batch = mainChars.slice(i, i + CHAR_BATCH_SIZE);
-    const batchLabel = `角色 ${i + 1}-${Math.min(i + CHAR_BATCH_SIZE, mainChars.length)}/${mainChars.length}`;
+    charBatches.push({ start: i, batch: mainChars.slice(i, i + CHAR_BATCH_SIZE) });
+  }
+
+  const charTasks = charBatches.map(({ start, batch }) => async () => {
+    const batchLabel = `角色 ${start + 1}-${Math.min(start + CHAR_BATCH_SIZE, mainChars.length)}/${mainChars.length}`;
     const userContent = `故事标题：${project.novel.originalTitle || project.novel.title}\n角色列表：${JSON.stringify(batch.map(c => ({ name: c.originalName, role: c.role, desc: c.description })))}`;
 
     const startTime = Date.now();
     const result = await chatCompletionJSON<{ characters?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string; costumeDesc?: string }> }>(charSystemPrompt, userContent);
-    logLLMCall({ projectId, step: `copyright_chars_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+    logLLMCall({ projectId, step: `copyright_chars_${start}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
 
     if (!result.success || !result.data?.characters) {
       console.log(`[drama] 版权改造 ${batchLabel} 失败: ${result.error}`);
-      continue; // 跳过失败批次，不中断整体流程
+      return;
     }
 
     for (const t of result.data.characters) {
@@ -1012,21 +1124,25 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
       }
     }
     console.log(`[drama] 版权改造 ${batchLabel} 完成`);
+  });
+
+  // 场景批次任务
+  const locBatches: Array<{ start: number; batch: typeof locs }> = [];
+  for (let i = 0; i < locs.length; i += LOC_BATCH_SIZE) {
+    locBatches.push({ start: i, batch: locs.slice(i, i + LOC_BATCH_SIZE) });
   }
 
-  // 分批处理场景
-  for (let i = 0; i < locs.length; i += LOC_BATCH_SIZE) {
-    const batch = locs.slice(i, i + LOC_BATCH_SIZE);
-    const batchLabel = `场景 ${i + 1}-${Math.min(i + LOC_BATCH_SIZE, locs.length)}/${locs.length}`;
+  const locTasks = locBatches.map(({ start, batch }) => async () => {
+    const batchLabel = `场景 ${start + 1}-${Math.min(start + LOC_BATCH_SIZE, locs.length)}/${locs.length}`;
     const userContent = `故事标题：${project.novel.originalTitle || project.novel.title}\n场景列表：${JSON.stringify(batch.map(l => ({ name: l.originalName, desc: l.description })))}`;
 
     const startTime = Date.now();
     const result = await chatCompletionJSON<{ locations?: Array<{ originalName: string; newName: string; adjustedDescription?: string; visualPrompt?: string }> }>(locSystemPrompt, userContent);
-    logLLMCall({ projectId, step: `copyright_locs_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+    logLLMCall({ projectId, step: `copyright_locs_${start}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
 
     if (!result.success || !result.data?.locations) {
       console.log(`[drama] 版权改造 ${batchLabel} 失败: ${result.error}`);
-      continue;
+      return;
     }
 
     for (const t of result.data.locations) {
@@ -1038,7 +1154,12 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
       }
     }
     console.log(`[drama] 版权改造 ${batchLabel} 完成`);
-  }
+  });
+
+  // 角色和场景批次全部并发执行
+  const allTasks = [...charTasks, ...locTasks];
+  console.log(`[drama] 版权改造并发: ${charTasks.length} 角色批次 + ${locTasks.length} 场景批次`);
+  await Promise.all(allTasks.map(fn => fn()));
 
   // 生成新标题
   const titleResult = await chatCompletionJSON<{ newTitle: string }>(
@@ -1058,65 +1179,144 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
 export async function refreshVisualPrompts(projectId: string): Promise<{ success: boolean; error?: string }> {
   const project = getProject(projectId);
   if (!project) return { success: false, error: '项目不存在' };
-
-  const systemPrompt = `你是一位视觉设计师。请为以下角色和场景生成中文生图提示词（visualPrompt）。
-要求：
-- 必须是纯中文
-- 包含外貌、服装、姿态、场景氛围等视觉细节
-- 风格前缀使用：${project.style}
-
-返回 JSON：
-{
-  "characters": [
-    { "id": "角色ID", "visualPrompt": "中文生图提示词" }
-  ],
-  "locations": [
-    { "id": "场景ID", "visualPrompt": "中文生图提示词" }
-  ]
-}`;
-
-  const userContent = JSON.stringify({
-    characters: project.novel.characters.filter(c => c.role !== 'minor').map(c => ({
-      id: c.id, name: c.newName, description: c.description, personality: c.personality,
-      currentPrompt: c.visualPrompt,
-    })),
-    locations: project.novel.locations.map(l => ({
-      id: l.id, name: l.newName, description: l.description,
-      currentPrompt: l.visualPrompt,
-    })),
-  });
-
   const config = getLLMConfig();
-  const startTime = Date.now();
-  const result = await chatCompletionJSON<{ characters?: Array<{ id: string; visualPrompt: string }>; locations?: Array<{ id: string; visualPrompt: string }> }>(systemPrompt, userContent);
-  logLLMCall({ projectId, step: 'refresh_prompts', provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
 
-  if (!result.success || !result.data) return { success: false, error: result.error || '刷新失败' };
+  const charSystemPrompt = `你是一位专业的AI绘画提示词专家。请为以下角色生成详细的中文生图提示词（visualPrompt）。
 
-  const data = result.data;
-  if (data.characters) {
-    for (const item of data.characters) {
-      const char = project.novel.characters.find(c => c.id === item.id);
-      if (char && item.visualPrompt) {
-        char.visualPrompt = item.visualPrompt;
-        // 取消确认，清空旧图片，让用户用新 prompt 重新生成
-        char.confirmed = false;
-        char.imageUrls = [];
-      }
+故事背景：${project.novel.summary || ''}
+故事风格：${project.style}
+
+## 严格要求（每个角色的 visualPrompt 必须满足）：
+1. 开头必须写明人种/民族（如"中国人"、"东亚面孔"、"黄皮肤黑头发"）
+2. 必须包含以下所有维度，缺一不可：
+   - 性别和具体年龄（如"17岁少年"而非"青年"）
+   - 身高体型（如"身高175cm，偏瘦"）
+   - 发型发色（如"黑色短发微卷，刘海遮住额头"）
+   - 五官特征（如"单眼皮，高鼻梁，薄嘴唇"）
+   - 肤色（如"小麦色皮肤"）
+   - 服装（具体款式+颜色，如"蓝白条纹校服外套，内搭白色T恤，深蓝色校裤"）
+   - 配饰/道具（如"戴黑框眼镜，左手腕有红绳"）
+   - 气质表情（如"眼神锐利带着叛逆，嘴角微微上扬"）
+3. visualPrompt 必须至少100字，不足100字视为不合格
+4. 不要写"写实电影风格"等风格前缀，只写角色外貌描述
+
+返回 JSON 数组：[{ "id": "角色ID", "visualPrompt": "至少100字的详细中文生图提示词" }]`;
+
+  const locSystemPrompt = `你是一位专业的AI绘画提示词专家。请为以下场景生成详细的中文生图提示词（visualPrompt）。
+
+故事背景：${project.novel.summary || ''}
+故事风格：${project.style}
+
+## 严格要求（每个场景的 visualPrompt 必须满足）：
+1. 开头必须写明地域文化风格（如"中国南方小城"、"中式校园"）
+2. 必须包含以下所有维度：
+   - 室内/室外、时间段（白天/夜晚/黄昏）
+   - 空间布局和建筑风格
+   - 主要物件、家具、装饰
+   - 光线氛围和色调
+   - 环境细节（墙壁材质、地面、植物等）
+3. visualPrompt 必须至少60字
+4. 不要写"写实电影风格"等风格前缀，只写场景描述
+
+返回 JSON 数组：[{ "id": "场景ID", "visualPrompt": "至少60字的详细中文生图提示词" }]`;
+
+  // 分批处理角色（每批5个，确保每个角色有足够的输出空间）
+  const CHAR_BATCH = 5;
+  const mainChars = project.novel.characters.filter(c => c.role !== 'minor');
+  const charTasks = [];
+  for (let i = 0; i < mainChars.length; i += CHAR_BATCH) {
+    const batch = mainChars.slice(i, i + CHAR_BATCH);
+    charTasks.push((async () => {
+      const input = JSON.stringify(batch.map(c => ({ id: c.id, name: c.newName, description: c.description, personality: c.personality })));
+      const st = Date.now();
+      const r = await chatCompletionJSON<Array<{ id: string; visualPrompt: string }>>(charSystemPrompt, input);
+      logLLMCall({ projectId, step: `refresh_chars_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
+      return r.success && r.data ? (Array.isArray(r.data) ? r.data : []) : [];
+    })());
+  }
+
+  // 分批处理场景（每批15个）
+  const LOC_BATCH = 15;
+  const locTasks = [];
+  for (let i = 0; i < project.novel.locations.length; i += LOC_BATCH) {
+    const batch = project.novel.locations.slice(i, i + LOC_BATCH);
+    locTasks.push((async () => {
+      const input = JSON.stringify(batch.map(l => ({ id: l.id, name: l.newName, description: l.description })));
+      const st = Date.now();
+      const r = await chatCompletionJSON<Array<{ id: string; visualPrompt: string }>>(locSystemPrompt, input);
+      logLLMCall({ projectId, step: `refresh_locs_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
+      return r.success && r.data ? (Array.isArray(r.data) ? r.data : []) : [];
+    })());
+  }
+
+  // 角色和场景并发执行
+  const [charResults, locResults] = await Promise.all([
+    Promise.all(charTasks),
+    Promise.all(locTasks),
+  ]);
+
+  const charItems = charResults.flat();
+  const locItems = locResults.flat();
+
+  let charUpdated = 0, locUpdated = 0;
+  for (const item of charItems) {
+    const char = project.novel.characters.find(c => c.id === item.id);
+    if (char && item.visualPrompt) {
+      char.visualPrompt = item.visualPrompt;
+      char.confirmed = false;
+      char.imageUrls = [];
+      charUpdated++;
     }
   }
-  if (data.locations) {
-    for (const item of data.locations) {
-      const loc = project.novel.locations.find(l => l.id === item.id);
-      if (loc && item.visualPrompt) {
-        loc.visualPrompt = item.visualPrompt;
-        loc.imageUrl = undefined; // 清空旧场景图
-      }
+  for (const item of locItems) {
+    const loc = project.novel.locations.find(l => l.id === item.id);
+    if (loc && item.visualPrompt) {
+      loc.visualPrompt = item.visualPrompt;
+      loc.imageUrl = undefined;
+      loc.imageUrls = undefined;
+      locUpdated++;
     }
   }
 
   updateProject(projectId, { novel: project.novel, status: 'character_confirm' });
-  console.log(`[drama] visualPrompt 已刷新为中文: ${data.characters?.length || 0} 角色, ${data.locations?.length || 0} 场景`);
+  console.log(`[drama] visualPrompt 已刷新: ${charUpdated} 角色, ${locUpdated} 场景`);
+  return { success: true };
+}
+
+// 重新生成标题和摘要
+export async function refreshTitleAndSummary(projectId: string): Promise<{ success: boolean; error?: string }> {
+  const project = getProject(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+  const config = getLLMConfig();
+
+  const mainChars = project.novel.characters.filter(c => c.role !== 'minor').slice(0, 10);
+  const charNames = mainChars.map(c => c.newName).join('、');
+
+  const summaryPrompt = `你是一位专业编剧。根据以下角色、场景和情节信息，为这个故事生成标题和摘要。
+
+严格要求：
+- 必须使用以下角色名字，不得更改或编造新名字：${charNames}
+- title：不超过10个字，要有吸引力
+- summary：300字以内，使用上述角色名字，包含核心冲突、发展脉络和结局走向，语言流畅连贯
+
+返回 JSON：{ "title": "故事标题", "summary": "300字以内完整梗概" }`;
+
+  const input = JSON.stringify({
+    characters: mainChars.map(c => ({ name: c.newName, role: c.role, desc: c.description })),
+    locations: project.novel.locations.slice(0, 10).map(l => ({ name: l.newName, desc: l.description })),
+    themes: project.novel.themes,
+    plotPoints: project.novel.plotPoints?.slice(0, 15).map(p => p.summary),
+  });
+
+  const st = Date.now();
+  const result = await chatCompletionJSON<{ title?: string; summary?: string }>(summaryPrompt, input);
+  logLLMCall({ projectId, step: 'refresh_title_summary', provider: config.provider, model: config.model, durationMs: Date.now() - st, success: result.success, error: result.error });
+
+  if (!result.success || !result.data) return { success: false, error: result.error || '生成失败' };
+  if (result.data.title) project.novel.title = result.data.title;
+  if (result.data.summary) project.novel.summary = result.data.summary;
+  updateProject(projectId, { novel: project.novel });
+  console.log(`[drama] 标题和摘要已刷新: ${result.data.title}`);
   return { success: true };
 }
 
