@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { uploadMaterials } from '../services/uploadService';
+import CharacterSheetGenerator from './CharacterSheetGenerator';
 
 interface CharItem {
   id: string;
@@ -44,6 +45,7 @@ export default function GlobalCharactersPanel() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [generatingCharId, setGeneratingCharId] = useState<string | null>(null);
 
   useEffect(() => { loadAllCharacters(); }, []);
 
@@ -122,6 +124,35 @@ export default function GlobalCharactersPanel() {
       c.id === charId ? { ...c, name: editName.trim(), description: editDesc.trim() } : c
     ));
     setEditingId(null);
+  };
+
+  // 生成角色设定图
+  const handleGenerateSheet = async (prompt: string, negativePrompt: string): Promise<string> => {
+    // 获取 sessionId（从环境变量或用户配置）
+    const sessionId = localStorage.getItem('sessionId') || '';
+    
+    // 调用服务端生成图片
+    const response = await fetch('/api/generate-character-sheet', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, negativePrompt, sessionId }),
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || '生成失败');
+    }
+    
+    const data = await response.json();
+    return data.imageUrl;
+  };
+
+  // 保存生成的设定图
+  const handleSaveSheet = (charId: string, imageUrl: string) => {
+    setCharacters(prev => prev.map(c =>
+      c.id === charId ? { ...c, imageUrls: [imageUrl, ...c.imageUrls] } : c
+    ));
+    setGeneratingCharId(null);
   };
 
   if (loading) {
@@ -234,8 +265,24 @@ export default function GlobalCharactersPanel() {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
           {characters.map((char, idx) => (
             <div key={`${char.projectId}_${char.id}_${idx}`} className="bg-[#161616] rounded-2xl border border-white/5 overflow-hidden group/card relative">
-              {/* 编辑模式 */}
-              {editingId === char.id ? (
+              {/* 生成设定图模式 */}
+              {generatingCharId === char.id ? (
+                <div className="p-5">
+                  <CharacterSheetGenerator
+                    characterName={char.name}
+                    characterDesc={char.description}
+                    onGenerate={handleGenerateSheet}
+                    onSave={(imageUrl) => handleSaveSheet(char.id, imageUrl)}
+                    existingImage={char.imageUrls[0]}
+                  />
+                  <button
+                    onClick={() => setGeneratingCharId(null)}
+                    className="w-full mt-3 text-gray-500 hover:text-white py-2 text-sm transition-colors"
+                  >
+                    返回
+                  </button>
+                </div>
+              ) : editingId === char.id ? (
                 <div className="p-5 space-y-3">
                   <input value={editName} onChange={e => setEditName(e.target.value)}
                     className="w-full bg-[#1a1a1a] border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-green-500/50 transition-colors"
@@ -284,6 +331,14 @@ export default function GlobalCharactersPanel() {
                   {/* 本地角色操作按钮 - hover 显示 */}
                   {char.isLocal && (
                     <div className="absolute top-3 right-3 flex gap-1.5 opacity-0 group-hover/card:opacity-100 transition-opacity">
+                      <button onClick={() => setGeneratingCharId(char.id)}
+                        className="w-7 h-7 rounded-lg bg-black/60 hover:bg-green-600/80 flex items-center justify-center text-gray-400 hover:text-white transition-colors" title="生成设定图">
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+                          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                          <circle cx="8.5" cy="8.5" r="1.5" />
+                          <polyline points="21 15 16 10 5 21" />
+                        </svg>
+                      </button>
                       <button onClick={() => handleStartEdit(char)}
                         className="w-7 h-7 rounded-lg bg-black/60 hover:bg-white/10 flex items-center justify-center text-gray-400 hover:text-white transition-colors" title={isZh ? '编辑' : 'Edit'}>
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>

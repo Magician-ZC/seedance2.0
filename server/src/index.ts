@@ -23,7 +23,7 @@ import {
   repairProjectImages,
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
-import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
+import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
 import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
@@ -313,6 +313,67 @@ app.post('/api/sensitive-words/confirm', (req, res) => {
 });
 
 // ============================================================
+// 角色设定图生成 API
+// ============================================================
+
+// POST /api/generate-character-sheet - 生成角色设定图（三视图等）
+app.post('/api/generate-character-sheet', async (req, res) => {
+  try {
+    const { prompt, negativePrompt, sessionId } = req.body;
+    const authToken = sessionId || DEFAULT_SESSION_ID;
+    
+    if (!authToken) {
+      return res.status(401).json({ error: '未配置 Session ID' });
+    }
+    
+    if (!prompt) {
+      return res.status(400).json({ error: '缺少 prompt 参数' });
+    }
+
+    // 构建完整的生成提示词（包含负面提示词）
+    const fullPrompt = negativePrompt 
+      ? `${prompt}. Negative prompt: ${negativePrompt}`
+      : prompt;
+
+    console.log('[CharacterSheet] 生成角色设定图:', fullPrompt.substring(0, 100) + '...');
+
+    // 调用图片生成服务（1:1 方形画布，适合角色设定图）
+    const results = await generateImage(fullPrompt, authToken, {
+      width: 1024,
+      height: 1024,
+      count: 1,
+      style: '', // 风格已包含在 prompt 中
+    });
+
+    if (results.length === 0) {
+      throw new Error('生成失败，未返回图片');
+    }
+
+    // 下载到本地
+    const localFilename = await downloadImageToLocal(
+      results[0].imageUrl,
+      authToken,
+      'char_sheet',
+      'character-sheets'
+    );
+
+    const localUrl = `/api/images/${localFilename}`;
+    console.log('[CharacterSheet] 设定图已保存:', localUrl);
+
+    res.json({
+      success: true,
+      imageUrl: localUrl,
+      originalUrl: results[0].imageUrl,
+    });
+  } catch (error) {
+    console.error('[CharacterSheet] 生成失败:', error);
+    res.status(500).json({ 
+      error: error instanceof Error ? error.message : '生成失败' 
+    });
+  }
+});
+
+// ============================================================
 // LLM 配置 API
 // ============================================================
 
@@ -461,7 +522,7 @@ app.post('/api/drama/:id/refresh-summary', async (req, res) => {
   res.json({ success: true, project });
 });
 
-// POST /api/drama/:id/generate-character-images - 角色档案图生成（两阶段：主图候选→AI评分→多角度细节）
+// POST /api/drama/:id/generate-character-images - 角色档案图生成（新版：专业三视图设定图）
 app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -501,74 +562,80 @@ app.post('/api/drama/:id/generate-character-images', async (req, res) => {
 
   (async () => {
     const projectId = req.params.id;
-    // === 阶段1：生成全身主图候选（1次调用，即梦返回4张） ===
-    broadcast('processing', { phase: 'main', done: 0, total: 5, msg: '生成主图候选...' });
+    
+    // === 新版：生成专业角色设定图（包含三视图） ===
+    broadcast('processing', { phase: 'sheet', done: 0, total: 3, msg: '生成角色设定图（三视图+表情）...' });
     updateCharacterFields(projectId, characterId, { profileStatus: 'main_generating' });
 
-    const mainImages = await generateCharacterMainImages(
-      character.newName, character.description, project.style, authToken,
-      character.visualPrompt, character.refImageUrl,
+    // 生成包含三视图和表情的设定图
+    const sheetImage = await generateCharacterSheetImage(
+      character.newName,
+      character.description,
+      project.style,
+      authToken,
+      character.visualPrompt,
+      character.refImageUrl,
+      ['three-view', 'expressions'], // 默认生成三视图+表情
     );
 
-    // 下载主图候选到本地
-    const mainLocalUrls: string[] = [];
-    for (const img of mainImages) {
-      const url = await downloadWithRetry(img.imageUrl, `char_${characterId}_main`);
-      if (url) mainLocalUrls.push(url);
-    }
-    if (mainLocalUrls.length === 0) throw new Error('主图候选全部下载失败');
+    // 下载设定图到本地
+    const sheetLocalUrl = await downloadWithRetry(sheetImage.imageUrl, `char_${characterId}_sheet`);
+    if (!sheetLocalUrl) throw new Error('设定图下载失败');
 
-    // 更新候选图到 imageUrls（兼容旧版展示）
-    updateCharacterFields(projectId, characterId, { imageUrls: mainLocalUrls });
-    broadcast('processing', { phase: 'scoring', done: 1, total: 5, msg: 'AI评分选择最佳主图...' });
-
-    // === AI评分选最佳主图 ===
-    updateCharacterFields(projectId, characterId, { profileStatus: 'main_scoring' });
-
-    let bestMainUrl = mainLocalUrls[0]; // 默认第一张
-    try {
-      const { bestUrl, scores } = await autoSelectBestImage(
-        'character', character.newName, character.description, character.visualPrompt || '', mainLocalUrls,
-      );
-      bestMainUrl = bestUrl;
-      console.log(`[vision] 主图评分完成: ${bestUrl} (${scores[0]?.score || 'N/A'}分)`);
-    } catch (err) {
-      console.log(`[vision] 主图评分失败，使用第一张: ${(err as Error).message}`);
-    }
-
-    // 设置主图到 profileImages，将最佳主图排到第一位
-    const profileImages: Record<string, string> = { main: bestMainUrl };
-    const sortedUrls = [bestMainUrl, ...mainLocalUrls.filter(u => u !== bestMainUrl)];
-    updateCharacterFields(projectId, characterId, { imageUrls: sortedUrls, profileImages });
-
-    // === 阶段2：基于主图描述生成多角度/细节图 ===
+    broadcast('processing', { phase: 'detail', done: 1, total: 3, msg: '生成单独角度参考图...' });
     updateCharacterFields(projectId, characterId, { profileStatus: 'detail_generating' });
 
-    const detailTypes: ProfileImageType[] = ['front', 'side', 'back', 'costume'];
-    const detailResults = await generateCharacterDetailImages(
-      character.newName, character.description, project.style, authToken,
-      character.visualPrompt, detailTypes,
-      (done, total) => {
-        broadcast('processing', { phase: 'detail', done: done + 2, total: total + 2, msg: `生成${['正面', '侧面', '背面', '服装'][done - 1] || '细节'}图...` });
-      },
-    );
+    // === 生成单独的正面、侧面、背面图（用于分镜参考） ===
+    const detailTypes: ProfileImageType[] = ['front', 'side', 'back'];
+    const profileImages: Record<string, string> = { main: sheetLocalUrl };
+    const allImageUrls: string[] = [sheetLocalUrl];
 
-    // 下载细节图并更新 profileImages
-    for (const detail of detailResults) {
-      if (detail.images.length > 0) {
-        const url = await downloadWithRetry(detail.images[0].imageUrl, `char_${characterId}_${detail.type}`);
-        if (url) {
-          profileImages[detail.type] = url;
+    for (let i = 0; i < detailTypes.length; i++) {
+      const type = detailTypes[i];
+      const typeLabels: Record<string, string> = { front: '正面', side: '侧面', back: '背面' };
+      
+      broadcast('processing', { 
+        phase: 'detail', 
+        done: i + 2, 
+        total: 3, 
+        msg: `生成${typeLabels[type] || '细节'}图...` 
+      });
+
+      try {
+        const detailResults = await generateCharacterDetailImages(
+          character.newName,
+          character.description,
+          project.style,
+          authToken,
+          character.visualPrompt,
+          [type],
+        );
+
+        if (detailResults.length > 0 && detailResults[0].images.length > 0) {
+          const url = await downloadWithRetry(
+            detailResults[0].images[0].imageUrl, 
+            `char_${characterId}_${type}`
+          );
+          if (url) {
+            profileImages[type] = url;
+            allImageUrls.push(url);
+          }
         }
+      } catch (err) {
+        console.error(`[image-gen] ${typeLabels[type]}图生成失败: ${(err as Error).message}`);
+        // 继续生成其他角度
       }
     }
 
     // 最终更新：标记完成并确认
     updateCharacterFields(projectId, characterId, {
-      profileImages, profileStatus: 'done', confirmed: true,
+      imageUrls: allImageUrls,
+      profileImages,
+      profileStatus: 'done',
+      confirmed: true,
     });
 
-    // 检查是否所有主角/配角都已确认（需要读取最新数据）
+    // 检查是否所有主角/配角都已确认
     const freshProject = getProject(projectId);
     if (freshProject) {
       const mainChars = freshProject.novel.characters.filter((c: CharacterInfo) => c.role !== 'minor');
@@ -576,7 +643,7 @@ app.post('/api/drama/:id/generate-character-images', async (req, res) => {
       if (allConfirmed) updateProject(projectId, { status: 'scripting' });
     }
 
-    broadcast('done', { phase: 'done', done: 5, total: 5, imageUrls: sortedUrls, profileImages });
+    broadcast('done', { phase: 'done', done: 3, total: 3, imageUrls: allImageUrls, profileImages });
   })().catch((err: Error) => {
     updateCharacterFields(req.params.id, characterId, { profileStatus: 'idle' });
     wsManager.broadcast(taskId, {

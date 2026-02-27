@@ -2823,24 +2823,36 @@ export async function ensureLocalImages(
 
 
 // 收集角色参考图和场景图（已确认的角色图片 + 对应场景图）
+// 新版：优先使用角色档案的三视图（根据分镜需求选择合适角度）
 function collectReferenceImages(project: DramaProject, episode: EpisodeScript): string[] {
   const charUrls: string[] = [];
   const locUrls: string[] = [];
 
-  // 收集角色图（优先使用档案主图）
+  // 收集角色图（智能选择角度）
   for (const charId of (episode.characterRefs || [])) {
     const char = project.novel.characters.find(c => c.id === charId);
-    if (char) {
-      const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
+    if (char && char.profileImages) {
+      // 优先使用三视图中的正面图（最常用）
+      const mainUrl = char.profileImages.front || char.profileImages.main || char.imageUrls[0];
       if (mainUrl) charUrls.push(mainUrl);
+      
+      // 如果有侧面和背面图，也添加进来（提供更多角度参考）
+      if (char.profileImages.side) charUrls.push(char.profileImages.side);
+      if (char.profileImages.back) charUrls.push(char.profileImages.back);
+    } else if (char && char.imageUrls.length > 0) {
+      // 降级：使用旧版图片
+      charUrls.push(char.imageUrls[0]);
     }
   }
-  // 如果没有 characterRefs，取所有已确认主角的档案主图
+  
+  // 如果没有 characterRefs，取所有已确认主角的档案图
   if (charUrls.length === 0) {
     for (const char of project.novel.characters) {
-      if (char.confirmed) {
-        const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
+      if (char.confirmed && char.profileImages) {
+        const mainUrl = char.profileImages.front || char.profileImages.main || char.imageUrls[0];
         if (mainUrl) charUrls.push(mainUrl);
+      } else if (char.confirmed && char.imageUrls.length > 0) {
+        charUrls.push(char.imageUrls[0]);
       }
     }
   }

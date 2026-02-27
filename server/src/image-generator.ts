@@ -135,10 +135,16 @@ export async function generateImage(
     height?: number;
     count?: number;
     style?: string;
+    negativePrompt?: string;  // 新增：负面提示词支持
   } = {},
 ): Promise<ImageGenResult[]> {
-  const { width = 1024, height = 1024, style } = options;
-  const fullPrompt = style ? `${style}, ${prompt}` : prompt;
+  const { width = 1024, height = 1024, style, negativePrompt } = options;
+  
+  // 如果有负面提示词，附加到 prompt 中（即梦支持在 prompt 中添加 negative）
+  let fullPrompt = style ? `${style}, ${prompt}` : prompt;
+  if (negativePrompt) {
+    fullPrompt = `${fullPrompt}. Negative prompt: ${negativePrompt}`;
+  }
 
   console.log(`[image-gen] 生成图片: "${fullPrompt.substring(0, 80)}..."`);
 
@@ -241,10 +247,141 @@ export function validateImageQuality(imageUrl: string): { valid: boolean; reason
 // 角色档案图片类型标签
 export type ProfileImageType = 'main' | 'front' | 'side' | 'back' | 'costume' | 'props' | 'expressions';
 
+// 设定图元素类型
+export type SheetElementType = 'three-view' | 'expressions' | 'proportions' | 'poses';
+
 // 角色档案生成结果
 export interface CharacterProfileResult {
   mainCandidates: ImageGenResult[];  // 主图候选（4张）
   detailImages: Array<{ type: ProfileImageType; images: ImageGenResult[] }>;  // 多角度/细节图
+}
+
+// 构建角色设定图 Prompt（参考 moyin-creator 的专业策略）
+function buildCharacterSheetPrompt(
+  characterName: string,
+  description: string,
+  selectedElements: SheetElementType[],
+  stylePrompt: string,
+  isRealistic: boolean = false,
+): string {
+  // 基础提示词
+  const basePrompt = isRealistic
+    ? `professional character reference for "${characterName}", ${description}, real person`
+    : `professional character design sheet for "${characterName}", ${description}`;
+  
+  // 内容组合
+  const contentParts: string[] = [];
+  if (selectedElements.includes('three-view')) {
+    contentParts.push('three-view turnaround (front view, side view, back view)');
+  }
+  if (selectedElements.includes('expressions')) {
+    contentParts.push('expression sheet with multiple facial expressions (happy, sad, angry, surprised, neutral)');
+  }
+  if (selectedElements.includes('proportions')) {
+    contentParts.push('body proportion reference, height chart, head-to-body ratio guide');
+  }
+  if (selectedElements.includes('poses')) {
+    contentParts.push('pose sheet with various action poses (standing, sitting, running, jumping)');
+  }
+  
+  const contentPrompt = contentParts.join(', ');
+  
+  // 完整提示词
+  if (isRealistic) {
+    return `${basePrompt}, ${contentPrompt}, character reference sheet layout, white background, clean presentation, ${stylePrompt}, photorealistic, real human, NOT anime, NOT cartoon, NOT illustration, NOT drawing`;
+  } else {
+    return `${basePrompt}, ${contentPrompt}, character reference sheet layout, white background, clean presentation, ${stylePrompt}, detailed illustration, concept art, character model sheet`;
+  }
+}
+
+// 生成角色三视图设定图（新版：专业设定图生成）
+export async function generateCharacterSheetImage(
+  characterName: string,
+  description: string,
+  style: string,
+  sessionId: string,
+  visualPrompt?: string,
+  refImageUrl?: string,
+  elements: SheetElementType[] = ['three-view', 'expressions'],
+): Promise<ImageGenResult> {
+  const baseDesc = visualPrompt || `${characterName}, ${description}`;
+  const refHint = refImageUrl ? ', 保持与参考图中人物的外貌特征一致' : '';
+  
+  // 根据项目风格选择合适的 style tokens
+  // 这里简化处理，实际可以从 visual-styles.ts 导入
+  const styleMap: Record<string, { prompt: string; isRealistic: boolean }> = {
+    '都市言情': { 
+      prompt: 'best quality, masterpiece, 8k, cinematic photography, professional portrait, natural lighting', 
+      isRealistic: true 
+    },
+    '水墨武侠风格': { 
+      prompt: 'best quality, masterpiece, 8k, Chinese ink painting style, traditional brush strokes, wuxia aesthetic', 
+      isRealistic: false 
+    },
+    '三渲二': { 
+      prompt: 'best quality, masterpiece, 8k, Genshin Impact style, cel shaded 3D, anime style 3d rendering', 
+      isRealistic: false 
+    },
+    '怀旧胶片': { 
+      prompt: 'best quality, masterpiece, 8k, vintage film photography, retro aesthetic, film grain', 
+      isRealistic: true 
+    },
+    '女频漫画': { 
+      prompt: 'best quality, masterpiece, 8k, shoujo manga style, delicate lineart, soft pastel colors', 
+      isRealistic: false 
+    },
+    '复古素描': { 
+      prompt: 'best quality, masterpiece, 8k, vintage sketch style, pencil drawing, detailed linework', 
+      isRealistic: false 
+    },
+    '吉卜力': { 
+      prompt: 'best quality, masterpiece, 8k, Studio Ghibli style, hand-drawn animation, watercolor aesthetic', 
+      isRealistic: false 
+    },
+    '3D国创': { 
+      prompt: 'best quality, masterpiece, 8k, Chinese 3D animation, Unreal Engine style, cinematic lighting', 
+      isRealistic: false 
+    },
+    'JoJo': { 
+      prompt: 'best quality, masterpiece, 8k, JoJo bizarre adventure style, dramatic poses, bold lineart', 
+      isRealistic: false 
+    },
+  };
+  
+  const styleConfig = styleMap[style] || { 
+    prompt: 'best quality, masterpiece, 8k, anime style, professional quality', 
+    isRealistic: false 
+  };
+  
+  // 构建专业的设定图 prompt
+  const sheetPrompt = buildCharacterSheetPrompt(
+    characterName,
+    baseDesc + refHint,
+    elements,
+    styleConfig.prompt,
+    styleConfig.isRealistic,
+  );
+  
+  // 负面提示词
+  const negativePrompt = styleConfig.isRealistic
+    ? 'blurry, low quality, watermark, text, cropped, anime, cartoon, illustration'
+    : 'blurry, low quality, watermark, text, cropped, realistic photo';
+
+  console.log(`[image-gen] 生成角色设定图: "${characterName}"`);
+  console.log(`[image-gen] Prompt: ${sheetPrompt.substring(0, 150)}...`);
+  
+  const results = await generateImage(sheetPrompt, sessionId, { 
+    width: 1024, 
+    height: 1024, 
+    count: 1,
+    negativePrompt,
+  });
+  
+  if (results.length === 0) {
+    throw new Error('设定图生成失败');
+  }
+  
+  return results[0];
 }
 
 // 第一阶段：生成全身主图候选（1次API调用，返回4张）
