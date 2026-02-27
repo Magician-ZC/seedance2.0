@@ -238,7 +238,78 @@ export function validateImageQuality(imageUrl: string): { valid: boolean; reason
   return { valid: true };
 }
 
-// 为角色生成多角度参考图（3个角度并发）
+// 角色档案图片类型标签
+export type ProfileImageType = 'main' | 'front' | 'side' | 'back' | 'costume' | 'props' | 'expressions';
+
+// 角色档案生成结果
+export interface CharacterProfileResult {
+  mainCandidates: ImageGenResult[];  // 主图候选（4张）
+  detailImages: Array<{ type: ProfileImageType; images: ImageGenResult[] }>;  // 多角度/细节图
+}
+
+// 第一阶段：生成全身主图候选（1次API调用，返回4张）
+export async function generateCharacterMainImages(
+  characterName: string,
+  description: string,
+  style: string,
+  sessionId: string,
+  visualPrompt?: string,
+  refImageUrl?: string,
+): Promise<ImageGenResult[]> {
+  const baseDesc = visualPrompt || `${characterName}, ${description}`;
+  const refHint = refImageUrl ? ', 保持与参考图中人物的外貌特征一致' : '';
+  const prompt = `全身立绘, 白色简洁背景, 角色设定图, ${baseDesc}${refHint}, 高质量, 细节丰富, 全身可见`;
+
+  console.log(`[image-gen] 生成角色主图候选: "${characterName}"`);
+  return generateImage(prompt, sessionId, { width: 768, height: 1024, count: 4, style });
+}
+
+// 第二阶段：基于主图描述生成多角度/细节图
+export async function generateCharacterDetailImages(
+  characterName: string,
+  description: string,
+  style: string,
+  sessionId: string,
+  visualPrompt?: string,
+  detailTypes: ProfileImageType[] = ['front', 'side', 'back', 'costume'],
+  onProgress?: (done: number, total: number) => void,
+): Promise<Array<{ type: ProfileImageType; images: ImageGenResult[] }>> {
+  const baseDesc = visualPrompt || `${characterName}, ${description}`;
+  const total = detailTypes.length;
+  let done = 0;
+  onProgress?.(0, total);
+
+  // 各角度/细节的 prompt 模板
+  const promptMap: Record<ProfileImageType, string> = {
+    main: `全身立绘, 白色简洁背景, ${baseDesc}`,
+    front: `正面全身照, 白色简洁背景, 角色设定图, ${baseDesc}, 面朝镜头, 全身可见`,
+    side: `侧面全身照, 白色简洁背景, 角色设定图, ${baseDesc}, 左侧面, 全身可见`,
+    back: `背面全身照, 白色简洁背景, 角色设定图, ${baseDesc}, 背对镜头, 全身可见`,
+    costume: `服装细节特写, 白色简洁背景, ${baseDesc}, 服装设计细节, 面料质感, 配饰`,
+    props: `道具特写, 白色简洁背景, ${baseDesc}, 角色标志性道具, 细节展示`,
+    expressions: `表情特写, ${baseDesc}, 面部表情合集, 多种情绪, 喜怒哀乐`,
+  };
+
+  const results: Array<{ type: ProfileImageType; images: ImageGenResult[] }> = [];
+
+  // 串行生成（避免即梦 UI 并发冲突）
+  for (const type of detailTypes) {
+    try {
+      const prompt = promptMap[type];
+      const imgs = await generateImage(prompt, sessionId, { width: 768, height: 1024, count: 1, style });
+      results.push({ type, images: imgs });
+    } catch (err) {
+      console.error(`[image-gen] 角色细节图生成失败 (${characterName}/${type}): ${(err as Error).message}`);
+      results.push({ type, images: [] });
+    }
+    done++;
+    onProgress?.(done, total);
+  }
+
+  return results;
+}
+
+// 为角色生成多角度参考图（兼容旧版：3个角度并发）
 export async function generateCharacterImages(
   characterName: string,
   description: string,

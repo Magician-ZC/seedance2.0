@@ -3,6 +3,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeftIcon, ArrowRightIcon, BookIcon, CloseIcon, CheckIcon, UserIcon, SparkleIcon } from './Icons';
 import { loadSettings } from './SettingsModal';
+import { computeSpatialLayout } from '../utils/spatialLayout';
 
 type Step = 'drafts' | 'setup' | 'novel' | 'analyzing' | 'review' | 'copyright' | 'characters' | 'scripting' | 'ready';
 
@@ -27,6 +28,7 @@ interface DramaProject {
     summary: string;
     characters: CharacterInfo[];
     locations: LocationInfo[];
+    spatialMap?: { tree: string; relations: Array<{ from: string; to: string; direction: string; bidirectionalView: boolean }> };
     plotPoints: Array<{ chapter: number; summary: string; emotionalTone: string }>;
     themes: string[];
   };
@@ -45,7 +47,18 @@ interface CharacterInfo {
   description: string;
   imageUrls: string[];
   confirmed: boolean;
-  refImageUrl?: string; // 用户上传的参考图
+  refImageUrl?: string;
+  profileImages?: {
+    main?: string;
+    front?: string;
+    side?: string;
+    back?: string;
+    costume?: string;
+    props?: string;
+    expressions?: string;
+    custom?: Array<{ label: string; url: string }>;
+  };
+  profileStatus?: 'idle' | 'main_generating' | 'main_scoring' | 'detail_generating' | 'done';
 }
 
 interface LocationInfo {
@@ -53,7 +66,12 @@ interface LocationInfo {
   originalName: string;
   newName: string;
   description: string;
+  spatialRelation?: string;
+  parentId?: string;
+  adjacentLocations?: Array<{ id: string; direction: string; visibleFrom: boolean }>;
+  variants?: Array<{ label: string; description: string }>;
   imageUrl?: string;
+  imageUrls?: string[];
 }
 
 interface Shot {
@@ -61,6 +79,10 @@ interface Shot {
   startTime: number;
   endTime: number;
   prompt: string;
+  dialogue?: string;
+  action?: string;
+  cameraAngle?: string;
+  soundDesign?: string;
   characterRefs: string[];
   locationRefs: string[];
   transition?: string;
@@ -973,10 +995,134 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
     </div>
   );
 
+  // 计算每个场景出现在哪些集
+  const locationEpisodeMap = (() => {
+    if (!project?.episodes?.length || !project?.novel?.locations?.length) return new Map<string, number[]>();
+    const map = new Map<string, number[]>();
+    for (const ep of project.episodes) {
+      for (const shot of (ep.shots || [])) {
+        for (const locId of (shot.locationRefs || [])) {
+          if (!map.has(locId)) map.set(locId, []);
+          const arr = map.get(locId)!;
+          if (!arr.includes(ep.number)) arr.push(ep.number);
+        }
+      }
+    }
+    return map;
+  })();
+
+  // 空间地图可视化
+  const renderSpatialMap = () => {
+    if (!project?.novel?.locations?.length) return null;
+    const locations = project.novel.locations;
+    const relations = project.novel.spatialMap?.relations || [];
+
+    const layoutNodes = locations.map((l: LocationInfo) => ({
+      id: l.id, parentId: l.parentId, name: l.newName || l.originalName, variants: l.variants,
+    }));
+    const { positions, svgWidth, svgHeight, nodeWidth: NW, nodeHeight: NH } = computeSpatialLayout(layoutNodes, relations);
+
+    const locById = new Map(locations.map((l: LocationInfo) => [l.id, l]));
+    const depthColors = ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4'];
+
+    return (
+      <div className="bg-[#0d0d0d] rounded-xl border border-white/5 p-3 h-full flex flex-col">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-green-400">🗺️ 空间地图</span>
+          {project.episodes?.length > 0 && (
+            <span className="text-[10px] text-gray-600">（节点标注出现集数）</span>
+          )}
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar">
+          <svg width={svgWidth} height={svgHeight} className="min-w-full">
+            {/* 父子连线 */}
+            {locations.map((loc: LocationInfo) => {
+              if (!loc.parentId) return null;
+              const parent = positions.get(loc.parentId);
+              const child = positions.get(loc.id);
+              if (!parent || !child) return null;
+              return (
+                <line key={`p-${loc.id}`}
+                  x1={parent.x + NW / 2} y1={parent.y + NH}
+                  x2={child.x + NW / 2} y2={child.y}
+                  stroke="#333" strokeWidth={1.5} strokeDasharray="4,3" />
+              );
+            })}
+            {/* 相邻关系连线 */}
+            {relations.map((rel, i) => {
+              const from = positions.get(rel.from);
+              const to = positions.get(rel.to);
+              if (!from || !to) return null;
+              const fx = from.x + NW / 2, fy = from.y + NH / 2;
+              const tx = to.x + NW / 2, ty = to.y + NH / 2;
+              const midX = (fx + tx) / 2, midY = (fy + ty) / 2 - 10;
+              return (
+                <g key={`r-${i}`}>
+                  <path d={`M${fx},${fy} Q${midX},${midY} ${tx},${ty}`}
+                    fill="none" stroke={rel.bidirectionalView ? '#22c55e44' : '#ffffff15'}
+                    strokeWidth={1} strokeDasharray={rel.bidirectionalView ? '' : '3,3'} />
+                  {rel.direction && (
+                    <text x={midX} y={midY - 4} textAnchor="middle"
+                      className="text-[8px] fill-gray-600">{rel.direction}</text>
+                  )}
+                </g>
+              );
+            })}
+            {/* 节点 */}
+            {Array.from(positions.entries()).map(([id, pos]) => {
+              const loc = locById.get(id);
+              if (!loc) return null;
+              const eps = locationEpisodeMap.get(id) || [];
+              const color = depthColors[pos.depth % depthColors.length];
+              const name = loc.newName || loc.originalName || '';
+              const variants = loc.variants || [];
+              return (
+                <g key={id}>
+                  <rect x={pos.x} y={pos.y} width={NW} height={NH}
+                    rx={8} fill="#1a1a1a" stroke={color} strokeWidth={1.5} opacity={0.9} />
+                  <text x={pos.x + NW / 2} y={pos.y + 16} textAnchor="middle"
+                    className="text-[10px] font-medium" fill="#e5e5e5">
+                    {name.length > 8 ? name.slice(0, 8) + '…' : name}
+                  </text>
+                  {variants.length > 0 && (
+                    <text x={pos.x + NW / 2} y={pos.y + 28} textAnchor="middle"
+                      className="text-[8px]" fill="#666">
+                      🔄 {variants.length}变体
+                    </text>
+                  )}
+                  {eps.length > 0 && (
+                    <text x={pos.x + NW / 2} y={pos.y + NH - 6} textAnchor="middle"
+                      className="text-[8px]" fill={color}>
+                      {eps.length <= 5 ? eps.map((n: number) => `E${n}`).join(' ') : `E${eps[0]}…E${eps[eps.length - 1]} (${eps.length}集)`}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+        {/* 图例 */}
+        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-white/5 flex-wrap">
+          <span className="text-[9px] text-gray-600 flex items-center gap-1">
+            <span className="inline-block w-3 h-0 border-t border-dashed border-gray-500" /> 层级关系
+          </span>
+          <span className="text-[9px] text-gray-600 flex items-center gap-1">
+            <span className="inline-block w-3 h-0 border-t border-green-500/30" /> 双向可见
+          </span>
+          <span className="text-[9px] text-gray-600 flex items-center gap-1">
+            <span className="inline-block w-3 h-0 border-t border-dashed border-white/15" /> 相邻
+          </span>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-[#1a1a1a] border border-white/10 rounded-2xl p-6 max-w-3xl w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden">
+      <div className={`relative bg-[#1a1a1a] border border-white/10 rounded-2xl p-6 w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col overflow-hidden transition-all duration-300 ${
+        (step === 'review' || step === 'characters') && project?.novel?.spatialMap ? 'max-w-6xl' : 'max-w-3xl'
+      }`}>
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
@@ -1204,7 +1350,9 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
 
           {/* Step: review - 查看分析结果 */}
           {step === 'review' && project && (
-            <div className="space-y-3">
+            <div className="flex gap-4">
+              {/* 左侧：分析结果 */}
+              <div className={`space-y-3 ${project.novel.spatialMap ? 'flex-1 min-w-0' : 'w-full'}`}>
               <div className="bg-[#111] rounded-xl p-3 border border-white/5">
                 <h3 className="text-sm text-green-400 mb-2">{project.novel.title}</h3>
                 <p className="text-xs text-gray-400 mb-3">{project.novel.summary}</p>
@@ -1231,6 +1379,13 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                 className="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 text-white font-bold transition-all flex items-center justify-center gap-2">
                 <ArrowRightIcon className="w-4 h-4" />{loading ? t('common.loading') : t('drama.startCopyright')}
               </button>
+              </div>
+              {/* 右侧：空间地图 */}
+              {project.novel.spatialMap && (
+                <div className="min-w-[380px] max-w-[50%] flex-shrink-0">
+                  {renderSpatialMap()}
+                </div>
+              )}
             </div>
           )}
 
@@ -1239,7 +1394,8 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
 
           {/* Step: characters - 显示所有角色，按主次分组 */}
           {step === 'characters' && project && (
-            <div className="space-y-3">
+            <div className="flex gap-4">
+              <div className={`space-y-3 ${project.novel.spatialMap ? 'flex-1 min-w-0' : 'w-full'}`}>
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm text-gray-400">{t('drama.confirmCharHint')}</p>
                 <div className="flex gap-1.5 flex-shrink-0">
@@ -1359,8 +1515,69 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                       </div>
                     </div>
                   )}
-                  {/* 图片网格（可勾选+可预览） */}
-                  {char.imageUrls.length > 0 && (
+                  {/* 角色档案图片展示 */}
+                  {char.profileImages?.main ? (
+                    <div className="space-y-2">
+                      <div className="flex gap-2">
+                        {/* 主图（大图） */}
+                        <div className="relative group flex-shrink-0">
+                          <img src={char.profileImages.main} alt={`${char.newName} 主图`}
+                            loading="lazy"
+                            className="w-24 h-32 object-cover rounded-lg border-2 border-green-500/50 cursor-pointer"
+                            onClick={() => setPreviewImage(char.profileImages!.main!)} />
+                          <span className="absolute top-1 left-1 px-1 py-0.5 bg-green-600/80 rounded text-[8px] text-white">主图</span>
+                        </div>
+                        {/* 多角度/细节图 */}
+                        <div className="flex flex-wrap gap-1.5 flex-1">
+                          {(['front', 'side', 'back', 'costume', 'props', 'expressions'] as const).map(type => {
+                            const url = char.profileImages?.[type];
+                            const labels: Record<string, string> = { front: '正面', side: '侧面', back: '背面', costume: '服装', props: '道具', expressions: '表情' };
+                            if (!url) return null;
+                            return (
+                              <div key={type} className="relative group">
+                                <img src={url} alt={`${char.newName} ${labels[type]}`}
+                                  loading="lazy"
+                                  className="w-14 h-18 object-cover rounded border border-white/10 cursor-pointer hover:border-gray-500 transition-all"
+                                  onClick={() => setPreviewImage(url)} />
+                                <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[7px] text-gray-300 text-center py-0.5 rounded-b">{labels[type]}</span>
+                              </div>
+                            );
+                          })}
+                          {char.profileImages?.custom?.map((item, i) => (
+                            <div key={`custom-${i}`} className="relative group">
+                              <img src={item.url} alt={item.label}
+                                loading="lazy"
+                                className="w-14 h-18 object-cover rounded border border-white/10 cursor-pointer hover:border-gray-500 transition-all"
+                                onClick={() => setPreviewImage(item.url)} />
+                              <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[7px] text-gray-300 text-center py-0.5 rounded-b">{item.label}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      {/* 主图候选（折叠） */}
+                      {char.imageUrls.length > 1 && (
+                        <details className="border-t border-white/5 pt-1">
+                          <summary className="text-[9px] text-gray-600 cursor-pointer hover:text-gray-400">
+                            主图候选 ({char.imageUrls.length}张)
+                          </summary>
+                          <div className="flex gap-1.5 mt-1 flex-wrap">
+                            {char.imageUrls.map((url, i) => (
+                              <div key={i} className="relative group">
+                                <img src={url} alt={`候选 ${i + 1}`} loading="lazy"
+                                  className={`w-12 h-16 object-cover rounded border cursor-pointer transition-all ${url === char.profileImages?.main ? 'border-green-500' : 'border-white/10 hover:border-gray-500'}`}
+                                  onClick={() => setPreviewImage(url)} />
+                                {url === char.profileImages?.main && (
+                                  <div className="absolute top-0.5 right-0.5 w-3 h-3 bg-green-500 rounded-full flex items-center justify-center">
+                                    <CheckIcon className="w-2 h-2 text-white" />
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  ) : char.imageUrls.length > 0 ? (
                     <div>
                       {!char.confirmed && char.imageUrls.length > 0 && (
                         <p className="text-[10px] text-gray-600 mb-1">{t('drama.selectImages')}</p>
@@ -1376,13 +1593,11 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                                   isSelected ? 'border-green-500 ring-1 ring-green-500/50' : 'border-white/10 hover:border-gray-500'
                                 }`}
                                 onClick={() => !char.confirmed && toggleImageSelection(char.id, url)} />
-                              {/* 勾选标记 */}
                               {!char.confirmed && isSelected && (
                                 <div className="absolute top-1 right-1 w-4 h-4 bg-green-500 rounded-full flex items-center justify-center">
                                   <CheckIcon className="w-2.5 h-2.5 text-white" />
                                 </div>
                               )}
-                              {/* 预览按钮 */}
                               <button onClick={(e) => { e.stopPropagation(); setPreviewImage(url); }}
                                 className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/70 rounded text-[9px] text-gray-300 opacity-0 group-hover:opacity-100 transition-opacity">
                                 {t('drama.previewImage')}
@@ -1391,6 +1606,17 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                           );
                         })}
                       </div>
+                    </div>
+                  ) : null}
+                  {/* 档案生成状态 */}
+                  {char.profileStatus && char.profileStatus !== 'idle' && char.profileStatus !== 'done' && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="w-2.5 h-2.5 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+                      <span className="text-[10px] text-green-400">
+                        {char.profileStatus === 'main_generating' && '生成主图候选...'}
+                        {char.profileStatus === 'main_scoring' && 'AI评分选择最佳主图...'}
+                        {char.profileStatus === 'detail_generating' && '生成多角度细节图...'}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -1448,9 +1674,26 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                             <span className="text-gray-700 ml-1">← {loc.originalName}</span>
                           )}
                           <p className="text-gray-600 truncate">{loc.description}</p>
+                          {loc.spatialRelation && (
+                            <p className="text-gray-700 truncate text-[10px]">📍 {loc.spatialRelation}</p>
+                          )}
+                          {loc.variants && loc.variants.length > 0 && (
+                            <p className="text-gray-700 truncate text-[10px]">🔄 {loc.variants.map(v => v.label).join('、')}</p>
+                          )}
                         </div>
                       </div>
                     ))}
+                    {/* 空间结构树 */}
+                    {project.novel.spatialMap?.tree && (
+                      <details className="mt-2 border-t border-white/5 pt-2">
+                        <summary className="text-[10px] text-gray-500 cursor-pointer hover:text-gray-400">
+                          🗺️ 空间结构
+                        </summary>
+                        <pre className="text-[10px] text-gray-600 mt-1 whitespace-pre-wrap font-mono leading-relaxed">
+                          {project.novel.spatialMap.tree}
+                        </pre>
+                      </details>
+                    )}
                   </div>
                 </details>
               )}
@@ -1479,6 +1722,13 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                   className="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-600 to-green-500 text-white font-bold transition-all flex items-center justify-center gap-2">
                   <ArrowRightIcon className="w-4 h-4" />{loading ? t('common.loading') : t('drama.genScript')}
                 </button>
+              )}
+              </div>
+              {/* 右侧：空间地图 */}
+              {project.novel.spatialMap && (
+                <div className="min-w-[380px] max-w-[50%] flex-shrink-0">
+                  {renderSpatialMap()}
+                </div>
               )}
             </div>
           )}
@@ -1714,6 +1964,19 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                                         return <span key={lid} className="px-1 py-0.5 rounded bg-emerald-900/40 text-emerald-300 text-[9px]">{loc?.newName || lid}</span>;
                                       })}
                                     </div>
+                                  )}
+                                  {/* 结构化字段 */}
+                                  {shot.cameraAngle && (
+                                    <div className="text-[9px]"><span className="text-gray-500">🎥 镜头：</span><span className="text-cyan-400">{shot.cameraAngle}</span></div>
+                                  )}
+                                  {shot.action && (
+                                    <div className="text-[9px]"><span className="text-gray-500">🎬 动作：</span><span className="text-gray-300">{shot.action}</span></div>
+                                  )}
+                                  {shot.dialogue && (
+                                    <div className="text-[9px]"><span className="text-gray-500">💬 对白：</span><span className="text-yellow-300/80">{shot.dialogue}</span></div>
+                                  )}
+                                  {shot.soundDesign && (
+                                    <div className="text-[9px]"><span className="text-gray-500">🔊 声音：</span><span className="text-purple-400/70">{shot.soundDesign}</span></div>
                                   )}
                                   {/* 完整 prompt */}
                                   <pre className="text-gray-400 whitespace-pre-wrap text-[9px] leading-relaxed mt-1 max-h-[200px] overflow-y-auto">{shot.prompt}</pre>

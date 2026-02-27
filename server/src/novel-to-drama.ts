@@ -3,6 +3,7 @@
 // 后端直接调用 LLM，前端无需手动复制 prompt
 
 import { chatCompletionJSON, getLLMConfig, type LLMConfig } from './llm-service.js';
+import { EntityGraph } from './entity-graph.js';
 import {
   insertProject, getProjectById, updateProjectFields, listAllProjects, deleteProject,
   logLLMCall, getProjectLogs, type DramaProjectRow,
@@ -18,6 +19,7 @@ export interface NovelAnalysis {
   summary: string;
   characters: CharacterInfo[];
   locations: LocationInfo[];
+  spatialMap?: SpatialMap;
   plotPoints: PlotPoint[];
   themes: string[];
   totalChapters: number;
@@ -32,9 +34,21 @@ export interface CharacterInfo {
   personality: string;
   visualPrompt: string;
   costumeDesc?: string; // 默认服化道描述（服装、妆容、标志性道具）
-  imageUrls: string[];
+  imageUrls: string[];  // 旧版兼容：所有候选图
   confirmed: boolean;
   refImageUrl?: string; // 用户上传的参考图
+  // 角色档案图片系统
+  profileImages?: {
+    main?: string;       // 主图（AI评分最佳的全身照）
+    front?: string;      // 正面
+    side?: string;       // 侧面
+    back?: string;       // 背面
+    costume?: string;    // 服装细节
+    props?: string;      // 道具细节
+    expressions?: string; // 表情特写
+    custom?: Array<{ label: string; url: string }>; // 自定义角度/动作
+  };
+  profileStatus?: 'idle' | 'main_generating' | 'main_scoring' | 'detail_generating' | 'done'; // 档案生成状态
 }
 
 export interface LocationInfo {
@@ -43,8 +57,20 @@ export interface LocationInfo {
   newName: string;
   description: string;
   visualPrompt: string;
-  imageUrl?: string;       // 确认后的单张图
-  imageUrls?: string[];    // 候选图列表（即梦返回4张）
+  baseDescription?: string;    // 固定物理属性（空间布局、家具、建筑风格、光线方向等），不随镜头变化
+  baseVisualPrompt?: string;   // 基准生图 prompt（只描述空场景，不含人物和活动），用于保证跨集一致性
+  spatialRelation?: string;    // 空间关系描述（在哪栋楼、几楼、相邻什么）
+  parentId?: string;           // 父级场景 ID（如教室的 parentId 是教学楼）
+  adjacentLocations?: Array<{ id: string; direction: string; visibleFrom: boolean }>;  // 相邻场景及双向可见性
+  variants?: Array<{ label: string; description: string }>;  // 状态变体（如"日常课堂"、"考试状态"、"空教室"），共享同一基准图
+  imageUrl?: string;           // 确认后的单张图（基准图，所有变体共享）
+  imageUrls?: string[];        // 候选图列表（即梦返回4张）
+}
+
+// 空间结构地图（整体层面描述所有地点的层级和空间关系）
+export interface SpatialMap {
+  tree: string;                // 文本形式的空间层级树
+  relations: Array<{ from: string; to: string; direction: string; bidirectionalView: boolean }>;  // 双向可见关系
 }
 
 export interface PlotPoint {
@@ -59,7 +85,11 @@ export interface Shot {
   index: number;           // 分镜序号（从1开始）
   startTime: number;       // 起始秒数
   endTime: number;         // 结束秒数
-  prompt: string;          // 该分镜的视频生成 prompt
+  prompt: string;          // 该分镜的视频生成 prompt（完整版，含所有信息）
+  dialogue?: string;       // 对白/旁白文本（独立字段，方便字幕和配音）
+  action?: string;         // 动作描述（角色在做什么）
+  cameraAngle?: string;    // 景别+运镜（如"近景，推镜头"）
+  soundDesign?: string;    // 声音设计（配乐+音效）
   characterRefs: string[]; // 出场角色 ID
   locationRefs: string[];  // 场景 ID
   transition?: string;     // 与下一分镜的转场方式
@@ -97,6 +127,7 @@ export interface DramaProject {
   episodes: EpisodeScript[];
   createdAt: number;
   updatedAt?: number;
+  entityGraphData?: string; // EntityGraph 序列化数据（贯穿整个创作流程）
 }
 
 // ============================================================
@@ -104,9 +135,13 @@ export interface DramaProject {
 // ============================================================
 
 function rowToProject(row: DramaProjectRow): DramaProject {
+  const novelData = JSON.parse(row.novel_data || '{}');
+  // entityGraphData 可能存在 novel_data JSON 内部（避免改 DB schema）
+  const entityGraphData = novelData._entityGraphData;
+  if (entityGraphData) delete novelData._entityGraphData;
   return {
     id: row.id,
-    novel: JSON.parse(row.novel_data || '{}'),
+    novel: novelData,
     targetEpisodes: row.target_episodes,
     style: row.style,
     ratio: row.ratio,
@@ -115,10 +150,15 @@ function rowToProject(row: DramaProjectRow): DramaProject {
     episodes: JSON.parse(row.episodes_data || '[]'),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    entityGraphData,
   };
 }
 
 function projectToRow(p: DramaProject): DramaProjectRow {
+  // 将 entityGraphData 嵌入 novel_data JSON 中（避免改 DB schema）
+  const novelForStorage = p.entityGraphData
+    ? { ...p.novel, _entityGraphData: p.entityGraphData }
+    : p.novel;
   return {
     id: p.id,
     title: p.novel?.title || '',
@@ -127,7 +167,7 @@ function projectToRow(p: DramaProject): DramaProjectRow {
     style: p.style,
     ratio: p.ratio,
     episode_duration: p.episodeDuration,
-    novel_data: JSON.stringify(p.novel),
+    novel_data: JSON.stringify(novelForStorage),
     episodes_data: JSON.stringify(p.episodes),
     created_at: p.createdAt,
     updated_at: Date.now(),
@@ -297,6 +337,23 @@ function batchChapters(chapters: ParsedChapter[], maxCharsPerBatch: number): Par
   let currentSize = 0;
 
   for (const ch of chapters) {
+    // 如果单章超过上限，截断内容保留前后部分（中间省略）
+    if (ch.content.length > maxCharsPerBatch) {
+      // 先把当前积累的批次推出去
+      if (currentBatch.length > 0) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentSize = 0;
+      }
+      // 截断：保留前60%和后20%，中间用省略标记
+      const keepFront = Math.floor(maxCharsPerBatch * 0.6);
+      const keepBack = Math.floor(maxCharsPerBatch * 0.2);
+      const truncated = ch.content.substring(0, keepFront)
+        + '\n\n[...中间内容省略...]\n\n'
+        + ch.content.substring(ch.content.length - keepBack);
+      batches.push([{ ...ch, content: truncated }]);
+      continue;
+    }
     if (currentSize + ch.content.length > maxCharsPerBatch && currentBatch.length > 0) {
       batches.push(currentBatch);
       currentBatch = [];
@@ -320,6 +377,8 @@ const ANALYZE_SYSTEM_PROMPT = `你是一位专业的影视编剧，擅长将小�
 4. 按章节/段落提取情节要点，标注情感基调和关键事件
 5. 为每个角色生成中文生图提示词（用于 AI 生图工具生成角色参考图）
 6. 为每个场景生成中文生图提示词
+7. 为每个场景提供固定物理属性描述（baseDescription）和基准生图提示词（baseVisualPrompt），只描述空场景本身
+8. 标注场景间的空间关系、父级场景、相邻场景及双向可见性
 
 请以 JSON 格式返回：
 {
@@ -338,7 +397,14 @@ const ANALYZE_SYSTEM_PROMPT = `你是一位专业的影视编剧，擅长将小�
     {
       "name": "地点名",
       "description": "详细环境描述（建筑风格、氛围、光线、季节等）",
-      "visualPrompt": "中文生图提示词，如：老旧教学楼走廊，午后阳光斜照"
+      "baseDescription": "固定物理属性：空间布局、家具、建筑风格、光线方向等（不含人物和活动）",
+      "baseVisualPrompt": "基准生图提示词（只描述空场景），如：中国南方小城中学教室，6排木质课桌椅，前方绿色黑板，左侧大窗户，白色墙壁，水泥地面",
+      "visualPrompt": "中文生图提示词，如：老旧教学楼走廊，午后阳光斜照",
+      "spatialRelation": "空间位置描述，如：位于教学楼二楼东侧，窗户朝南面向操场",
+      "parentName": "父级场景名（如教室的父级是教学楼），无则留空",
+      "adjacentLocations": [
+        { "name": "相邻场景名", "direction": "方位", "visibleFrom": true }
+      ]
     }
   ],
   "plotPoints": [
@@ -375,15 +441,23 @@ function mergeAnalysisResults(
     }
   }
 
-  // 场景去重（按名字）
+  // 场景去重（按名字），保留空间结构字段
   const locMap = new Map<string, Record<string, string>>();
   for (const r of results) {
     for (const l of (r.locations || [])) {
       const name = l.name || '';
       if (!name) continue;
       const existing = locMap.get(name);
-      if (!existing || (l.description || '').length > (existing.description || '').length) {
+      if (!existing) {
         locMap.set(name, l);
+      } else {
+        // 保留更详细的版本
+        if ((l.description || '').length > (existing.description || '').length) existing.description = l.description;
+        if ((l.baseDescription || '').length > (existing.baseDescription || '').length) existing.baseDescription = l.baseDescription;
+        if ((l.baseVisualPrompt || '').length > (existing.baseVisualPrompt || '').length) existing.baseVisualPrompt = l.baseVisualPrompt;
+        if ((l.visualPrompt || '').length > (existing.visualPrompt || '').length) existing.visualPrompt = l.visualPrompt;
+        if ((l.spatialRelation || '').length > (existing.spatialRelation || '').length) existing.spatialRelation = l.spatialRelation;
+        if (!existing.parentName && l.parentName) existing.parentName = l.parentName;
       }
     }
   }
@@ -412,6 +486,203 @@ function mergeAnalysisResults(
   };
 }
 
+// 场景智能合并去重：将同一物理空间的不同状态合并为一个基础场景 + variants
+// 例如 "高二九班教室（日常课堂）" + "高二九班教室（考试状态）" → "高二九班教室" + variants: [{label:"日常课堂",...},{label:"考试状态",...}]
+async function mergeAndDeduplicateLocations(
+  projectId: string,
+  locations: LocationInfo[],
+  maxCount: number,
+  config: LLMConfig,
+  progress: AnalyzeProgressCallback,
+): Promise<LocationInfo[]> {
+  const locSummary = locations.map(l => `${l.id}: ${l.originalName} — ${l.description?.substring(0, 60) || ''}`).join('\n');
+
+  const mergePrompt = `你是一位专业的影视场景管理师。以下是从小说中提取的 ${locations.length} 个场景，但其中大量是同一物理空间的不同状态（如"教室（上课）"和"教室（考试）"本质是同一个教室）。
+
+请将它们合并为不超过 ${maxCount} 个独立的物理场景。
+
+## 合并规则
+1. 同一物理空间的不同状态/时间/活动合并为一个场景，差异部分记录为 variants
+2. 保留最具代表性的名称作为场景名
+3. 合并后的 description 描述该空间的固定物理属性（不含人物和活动）
+4. variants 记录该空间出现过的不同状态（如"日常课堂"、"考试状态"、"空教室"）
+5. 优先保留主要剧情发生的场景，次要/一次性场景可以合并到更大的区域
+6. 每个合并后的场景标注它包含了哪些原始场景 ID
+
+## 场景列表
+${locSummary}
+
+返回 JSON 数组：
+[
+  {
+    "name": "合并后的场景名",
+    "mergedIds": ["S01", "S05", "S12"],
+    "description": "该物理空间的固定属性描述",
+    "variants": [
+      { "label": "日常课堂", "description": "学生坐在座位上，老师在讲台授课" },
+      { "label": "考试状态", "description": "桌椅间距拉大，学生埋头答题" }
+    ]
+  }
+]`;
+
+  const startTime = Date.now();
+  const result = await chatCompletionJSON<Array<{
+    name: string;
+    mergedIds: string[];
+    description: string;
+    variants?: Array<{ label: string; description: string }>;
+  }>>(mergePrompt, '请根据上述规则合并场景');
+  logLLMCall({ projectId, step: 'location_merge', provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
+
+  if (!result.success || !result.data || !Array.isArray(result.data)) {
+    console.log(`[drama] 场景合并 LLM 调用失败: ${result.error}，保留原始场景`);
+    return locations;
+  }
+
+  // 构建 ID → 原始场景的映射
+  const idToLoc = new Map(locations.map(l => [l.id, l]));
+  const merged: LocationInfo[] = [];
+
+  for (let i = 0; i < result.data.length; i++) {
+    const group = result.data[i];
+    const newId = `S${String(i + 1).padStart(2, '0')}`;
+
+    // 从合并的原始场景中找到最详细的那个作为基础
+    const sourceLocs = (group.mergedIds || []).map(id => idToLoc.get(id)).filter(Boolean) as LocationInfo[];
+    const bestSource = sourceLocs.sort((a, b) =>
+      (b.baseDescription?.length || 0) + (b.baseVisualPrompt?.length || 0) -
+      (a.baseDescription?.length || 0) - (a.baseVisualPrompt?.length || 0)
+    )[0];
+
+    merged.push({
+      id: newId,
+      originalName: group.name || bestSource?.originalName || '',
+      newName: group.name || bestSource?.newName || '',
+      description: group.description || bestSource?.description || '',
+      visualPrompt: bestSource?.visualPrompt || '',
+      baseDescription: bestSource?.baseDescription || group.description || '',
+      baseVisualPrompt: bestSource?.baseVisualPrompt || bestSource?.visualPrompt || '',
+      spatialRelation: bestSource?.spatialRelation || '',
+      parentId: bestSource?.parentId || '',
+      adjacentLocations: bestSource?.adjacentLocations || [],
+      variants: group.variants || [],
+    });
+  }
+
+  // 处理未被合并的场景（LLM 可能遗漏了一些）
+  const mergedOrigIds = new Set(result.data.flatMap(g => g.mergedIds || []));
+  for (const loc of locations) {
+    if (!mergedOrigIds.has(loc.id)) {
+      const newId = `S${String(merged.length + 1).padStart(2, '0')}`;
+      merged.push({ ...loc, id: newId });
+    }
+  }
+
+  return merged;
+}
+
+// 根据 locations 的 parentId 和 adjacentLocations 构建空间结构地图
+function buildSpatialMap(locations: LocationInfo[]): SpatialMap {
+  // 构建层级树文本
+  const idToLoc = new Map(locations.map(l => [l.id, l]));
+  const roots: LocationInfo[] = [];
+  const children = new Map<string, LocationInfo[]>();
+
+  for (const loc of locations) {
+    if (loc.parentId && idToLoc.has(loc.parentId)) {
+      const list = children.get(loc.parentId) || [];
+      list.push(loc);
+      children.set(loc.parentId, list);
+    } else {
+      roots.push(loc);
+    }
+  }
+
+  // 递归构建树文本
+  const buildTreeText = (locs: LocationInfo[], indent: string): string => {
+    return locs.map((loc, i) => {
+      const isLast = i === locs.length - 1;
+      const prefix = indent + (isLast ? '└── ' : '├── ');
+      const childIndent = indent + (isLast ? '    ' : '│   ');
+      const kids = children.get(loc.id) || [];
+      const line = `${prefix}${loc.newName}(${loc.id})${loc.spatialRelation ? ` — ${loc.spatialRelation}` : ''}`;
+      if (kids.length > 0) {
+        return line + '\n' + buildTreeText(kids, childIndent);
+      }
+      return line;
+    }).join('\n');
+  };
+
+  const tree = buildTreeText(roots, '');
+
+  // 收集双向可见关系（去重）
+  const relSet = new Set<string>();
+  const relations: SpatialMap['relations'] = [];
+  for (const loc of locations) {
+    for (const adj of (loc.adjacentLocations || [])) {
+      if (!adj.id) continue;
+      const key = [loc.id, adj.id].sort().join('-');
+      if (relSet.has(key)) continue;
+      relSet.add(key);
+      relations.push({
+        from: loc.id,
+        to: adj.id,
+        direction: adj.direction,
+        bidirectionalView: adj.visibleFrom,
+      });
+    }
+  }
+
+  return { tree, relations };
+}
+
+// 根据场景 ID 获取完整的场景生图 prompt（baseVisualPrompt + 镜头变量）
+// 用于分镜生成时保证同一场景跨集一致
+function buildLocationPromptForShot(loc: LocationInfo, shotContext: string): string {
+  const base = loc.baseVisualPrompt || loc.visualPrompt || loc.description;
+  if (!shotContext) return base;
+  return `${base}，${shotContext}`;
+}
+
+// 构建场景空间上下文（用于脚本生成 prompt，让 LLM 了解场景间的空间关系）
+function buildSpatialContext(locations: LocationInfo[], spatialMap?: SpatialMap): string {
+  let ctx = locations.map(l => {
+    const parts = [`- ${l.newName}(${l.id}): ${l.description}`];
+    if (l.baseDescription) parts.push(`  固定布局: ${l.baseDescription}`);
+    if (l.spatialRelation) parts.push(`  空间位置: ${l.spatialRelation}`);
+    if (l.variants && l.variants.length > 0) {
+      parts.push(`  状态变体: ${l.variants.map(v => v.label).join('、')}（同一物理空间，共享基准图，用同一个场景ID引用）`);
+    }
+    if (l.adjacentLocations && l.adjacentLocations.length > 0) {
+      const adjNames = l.adjacentLocations.map(a => {
+        const adjLoc = locations.find(ll => ll.id === a.id);
+        return adjLoc ? `${adjLoc.newName}(${a.direction}${a.visibleFrom ? ',互相可见' : ''})` : '';
+      }).filter(Boolean);
+      if (adjNames.length > 0) parts.push(`  相邻: ${adjNames.join('、')}`);
+    }
+    return parts.join('\n');
+  }).join('\n');
+
+  if (spatialMap?.tree) {
+    ctx += `\n\n## 空间层级结构\n${spatialMap.tree}`;
+  }
+  if (spatialMap?.relations && spatialMap.relations.length > 0) {
+    const viewRules = spatialMap.relations
+      .filter(r => r.bidirectionalView)
+      .map(r => {
+        const fromLoc = locations.find(l => l.id === r.from);
+        const toLoc = locations.find(l => l.id === r.to);
+        return fromLoc && toLoc ? `${fromLoc.newName} ↔ ${toLoc.newName} (${r.direction}，双向可见)` : '';
+      })
+      .filter(Boolean);
+    if (viewRules.length > 0) {
+      ctx += `\n\n## 视角互见规则（从A看到B，则从B也能看到A所在区域）\n${viewRules.join('\n')}`;
+    }
+  }
+
+  return ctx;
+}
+
 // 第1步：小说分析 - 三层策略
 // 策略A（优先）：正则章节拆分 → 逐章/批次实体提取 → 跨章节增量合并
 // 策略B（降级）：短文本直接分析 / 中等文本分块分析 / 超长文本递归压缩
@@ -419,44 +690,46 @@ function mergeAnalysisResults(
 export type AnalyzeProgressCallback = (step: string, detail: string) => void;
 
 // 逐章实体提取的 system prompt（比全量分析更聚焦，提取质量更高）
-const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分析以下小说章节，提取所有实体信息。
+// 轻量版：只提取核心实体，不要求 visualPrompt 等长文本，大幅减少输出量避免超时
+const CHAPTER_EXTRACT_PROMPT = `你是一位专业的影视编剧助手。请分析以下小说章节，快速提取核心实体信息。
 
-## 提取要求
-1. 提取所有出现的角色（名字、别名、身份、外貌、性格）
-2. 提取所有场景/地点（名称、环境描述）
+## 提取要求（精简版，只提取关键信息）
+1. 提取所有出现的角色：名字、别名、身份、简短外貌描述、性格关键词
+2. 提取所有场景/地点：名称、别名、简短环境描述
 3. 提取本章核心情节（关键事件、情感基调）
-4. 为每个角色生成中文生图提示词（visualPrompt），描述外貌、服装、姿态、场景氛围
-5. 为每个场景生成中文生图提示词
-6. 重要：根据人名、地名、文化背景判断角色的民族/人种，在 visualPrompt 开头明确标注（如"中国人"、"东亚面孔"、"黄皮肤黑头发"等）
+4. 标注场景的父级场景和相邻关系
+
+注意：visualPrompt、baseDescription、baseVisualPrompt 等详细生图提示词不需要在此阶段生成，后续会单独精炼。
 
 请以 JSON 格式返回：
 {
   "characters": [
     {
       "name": "角色名",
-      "aliases": ["别名1", "绰号"],
+      "aliases": ["别名1"],
       "role": "protagonist/supporting/minor",
-      "description": "详细外貌描述（发型、服装、体型、年龄、标志性特征等）",
-      "personality": "性格特征和行为模式",
-      "visualPrompt": "中文生图提示词，开头写明人种，如：中国人，17岁高中男生，黑色短发，单眼皮，穿着蓝白校服，站在教室里"
+      "description": "简短外貌描述（50字以内：性别、年龄、关键外貌特征、标志性服装）",
+      "personality": "性格关键词（20字以内）"
     }
   ],
   "locations": [
     {
       "name": "地点名",
       "aliases": ["别名"],
-      "description": "详细环境描述（建筑风格、氛围、光线、季节等）",
-      "visualPrompt": "中文生图提示词，写明地域风格，如：中国南方小城，老旧教学楼走廊，午后阳光斜照，墙壁斑驳"
+      "description": "简短环境描述（50字以内）",
+      "spatialRelation": "空间位置关系（20字以内）",
+      "parentName": "父级场景名",
+      "adjacentLocations": [{ "name": "相邻场景", "direction": "方位", "visibleFrom": true }]
     }
   ],
   "plotPoints": [
     {
-      "summary": "情节概要",
+      "summary": "情节概要（30字以内）",
       "emotionalTone": "情感基调",
-      "keyEvents": ["关键事件1", "关键事件2"]
+      "keyEvents": ["关键事件"]
     }
   ],
-  "chapterSummary": "本章200字以内摘要"
+  "chapterSummary": "本章100字以内摘要"
 }`;
 
 // 跨章节增量合并实体（借鉴 novelvids 的 Asset 增量合并策略）
@@ -533,6 +806,28 @@ function mergeChapterEntities(
       if (((l.visualPrompt as string) || '').length > ((existing.visualPrompt as string) || '').length) {
         existing.visualPrompt = l.visualPrompt;
       }
+      // 合并空间结构字段：保留更详细的版本
+      if (((l.baseDescription as string) || '').length > ((existing.baseDescription as string) || '').length) {
+        existing.baseDescription = l.baseDescription;
+      }
+      if (((l.baseVisualPrompt as string) || '').length > ((existing.baseVisualPrompt as string) || '').length) {
+        existing.baseVisualPrompt = l.baseVisualPrompt;
+      }
+      if (((l.spatialRelation as string) || '').length > ((existing.spatialRelation as string) || '').length) {
+        existing.spatialRelation = l.spatialRelation;
+      }
+      if (!existing.parentName && l.parentName) {
+        existing.parentName = l.parentName;
+      }
+      // 合并相邻场景列表（去重）
+      const existingAdj = (existing.adjacentLocations as Array<Record<string, unknown>>) || [];
+      const newAdj = (l.adjacentLocations as Array<Record<string, unknown>>) || [];
+      const adjMap = new Map<string, Record<string, unknown>>();
+      for (const a of [...existingAdj, ...newAdj]) {
+        const adjName = (a.name as string) || '';
+        if (adjName && !adjMap.has(adjName)) adjMap.set(adjName, a);
+      }
+      existing.adjacentLocations = [...adjMap.values()];
     } else {
       accumulated.locations.set(name, { ...l });
     }
@@ -550,68 +845,50 @@ function mergeChapterEntities(
   }
 }
 
-// 策略A：章节拆分 → 逐批实体提取 → 增量合并
+// 策略A：章节拆分 → 逐批实体提取 → EntityGraph 增量合并 → 精炼
 async function analyzeByChapters(
   projectId: string,
   chapters: ParsedChapter[],
   maxCharsPerBatch: number,
   config: LLMConfig,
   progress: AnalyzeProgressCallback,
-): Promise<{ title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, string>>; plotPoints?: PlotPoint[]; themes?: string[] }> {
-  const batches = batchChapters(chapters, maxCharsPerBatch);
-  const CONCURRENCY = Math.min(4, batches.length); // 最大并发数
-  console.log(`[drama] 章节分析: ${chapters.length} 章, 分 ${batches.length} 批处理, 并发 ${CONCURRENCY}`);
+): Promise<{ title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, unknown>>; plotPoints?: PlotPoint[]; themes?: string[]; graph?: EntityGraph }> {
+  const extractBatchLimit = Math.min(maxCharsPerBatch, 6000);
+  const batches = batchChapters(chapters, extractBatchLimit);
+  const CONCURRENCY = Math.min(12, batches.length);
+  console.log(`[drama] 章节分析: ${chapters.length} 章, 分 ${batches.length} 批处理, 并发 ${CONCURRENCY}, 每批上限 ${extractBatchLimit} 字`);
   progress('章节分析', `识别到 ${chapters.length} 个章节，分 ${batches.length} 批提取实体（并发 ${CONCURRENCY}）...`);
 
-  const accumulated = {
-    characters: new Map<string, Record<string, unknown>>(),
-    locations: new Map<string, Record<string, unknown>>(),
-    plotPoints: [] as PlotPoint[],
-    summaries: [] as string[],
-    themes: [] as string[],
-  };
-
+  // 存储每批次的结果，保证按顺序合并到图
+  const batchResults: Array<{ success: boolean; data?: Record<string, unknown>; batchIndex: number }> = new Array(batches.length);
   let completedCount = 0;
 
-  // 单批次处理函数
   const processBatch = async (bi: number) => {
     const batch = batches[bi];
     const chapterRange = batch.length === 1
       ? `第${batch[0].number}章`
       : `第${batch[0].number}-${batch[batch.length - 1].number}章`;
-
-    // 拼接批次内所有章节内容
     const batchText = batch.map(ch => `=== ${ch.title} ===\n${ch.content}`).join('\n\n');
     const userPrompt = `以下是小说的 ${chapterRange}（共 ${chapters.length} 章中的第 ${bi + 1} 批）。请提取所有实体信息。\n\n${batchText}`;
 
-    // 带重试的 LLM 调用（最多重试 2 次）
     let result: { success: boolean; data?: Record<string, unknown>; error?: string } = { success: false };
     for (let retry = 0; retry < 3; retry++) {
       if (retry > 0) {
         console.log(`[drama] 批次 ${bi + 1}/${batches.length} 第 ${retry + 1} 次重试...`);
-        await new Promise(r => setTimeout(r, 3000 * retry));
+        await new Promise(r => setTimeout(r, 5000 * retry));
       }
       const startTime = Date.now();
-      result = await chatCompletionJSON<Record<string, unknown>>(CHAPTER_EXTRACT_PROMPT, userPrompt);
+      result = await chatCompletionJSON<Record<string, unknown>>(CHAPTER_EXTRACT_PROMPT, userPrompt, { timeoutMs: 120000 });
       logLLMCall({ projectId, step: `chapter_extract_${bi + 1}${retry > 0 ? `_retry${retry}` : ''}`, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
       if (result.success) break;
     }
-
-    if (result.success && result.data) {
-      for (const ch of batch) {
-        mergeChapterEntities(accumulated, result.data, ch.number);
-      }
-      completedCount++;
-      console.log(`[drama] 批次 ${bi + 1}/${batches.length} 完成: 累计 ${accumulated.characters.size} 角色, ${accumulated.locations.size} 场景`);
-      progress('章节分析', `批次 ${completedCount}/${batches.length} 完成 (${accumulated.characters.size} 角色, ${accumulated.locations.size} 场景)`);
-    } else {
-      completedCount++;
-      console.log(`[drama] 批次 ${bi + 1}/${batches.length} 失败: ${result.error}`);
-      progress('章节分析', `批次 ${completedCount}/${batches.length} 完成（${bi + 1} 失败）`);
-    }
+    batchResults[bi] = { success: result.success, data: result.data, batchIndex: bi };
+    completedCount++;
+    console.log(`[drama] 批次 ${bi + 1}/${batches.length} ${result.success ? '完成' : '失败: ' + result.error}`);
+    progress('章节分析', `${completedCount}/${batches.length} 批完成...`);
   };
 
-  // 并发执行，控制并发数
+  // 并发执行
   const queue = Array.from({ length: batches.length }, (_, i) => i);
   const running: Promise<void>[] = [];
   while (queue.length > 0 || running.length > 0) {
@@ -623,30 +900,33 @@ async function analyzeByChapters(
     if (running.length > 0) await Promise.race(running);
   }
 
-  // 最终精炼：分批处理避免输出截断
-  progress('整合精炼', `正在整合 ${chapters.length} 章的分析结果...`);
-  const allCharacters = [...accumulated.characters.values()].map(c => {
-    const { _chapters, ...rest } = c as Record<string, unknown>;
-    return rest;
-  });
-  const allLocations = [...accumulated.locations.values()];
+  // 按批次顺序 ingest 到 EntityGraph
+  const graph = new EntityGraph();
+  for (let bi = 0; bi < batches.length; bi++) {
+    const br = batchResults[bi];
+    if (br?.success && br.data) {
+      for (const ch of batches[bi]) {
+        graph.ingestChapter(ch.number, br.data);
+      }
+    }
+  }
+  const gStats = graph.stats();
+  console.log(`[drama] EntityGraph: ${gStats.characters} 角色, ${gStats.locations} 场景, ${gStats.edges} 关系边`);
 
-  // 分批精炼角色（每批最多 15 个）
+  // 精炼阶段
+  progress('整合精炼', `正在整合 ${chapters.length} 章的分析结果...`);
+  const allCharacters = graph.exportCharactersForRefine();
+  const allLocations = graph.exportLocationsForRefine();
+
+  // 分批精炼角色
   const REFINE_CHAR_BATCH = 15;
-  const refinedCharacters: Array<Record<string, string>> = [];
   const charRefinePrompt = `你是一位专业编剧兼AI绘画提示词专家。以下是从小说中提取的角色列表（可能有重复）。
 请精炼：
 1. 合并同一人的不同称呼/别名，但保留所有有名字的独立角色
 2. 确认每个角色的主次关系（protagonist/supporting/minor）
-3. 根据小说背景（人名、地名、文化背景）判断角色的民族/人种，例如中文名字的角色就是中国人/东亚面孔
-4. 为每个角色生成详细的中文 visualPrompt（用于AI生图），要求：
-   - 开头必须明确人种/民族，如"中国人"、"东亚面孔"、"黄皮肤黑头发"等
-   - 必须包含：性别、年龄段、身高体型、发型发色、五官特征
-   - 必须包含：标志性服装（具体款式和颜色）、配饰、道具
-   - 必须包含：气质和表情特征
-   - 如果是学生，明确写出"穿着XX校服"等具体服装描述
-   - visualPrompt 至少80字，越详细越好
-返回 JSON 数组：[{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "详细的中文生图提示词，至少80字，开头必须写明人种" }]`;
+3. 根据小说背景（人名、地名、文化背景）判断角色的民族/人种
+4. 为每个角色生成详细的中文 visualPrompt（用于AI生图），至少80字，开头必须写明人种
+返回 JSON 数组：[{ "name": "...", "role": "...", "description": "...", "personality": "...", "visualPrompt": "..." }]`;
 
   const charBatchTasks = [];
   for (let i = 0; i < allCharacters.length; i += REFINE_CHAR_BATCH) {
@@ -657,26 +937,21 @@ async function analyzeByChapters(
       const r = await chatCompletionJSON<Array<Record<string, string>>>(charRefinePrompt, JSON.stringify(batch));
       logLLMCall({ projectId, step: `refine_chars_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
       if (r.success && r.data) return Array.isArray(r.data) ? r.data : [];
-      return batch as Array<Record<string, string>>; // fallback 原始数据
+      return batch as Array<Record<string, string>>;
     })());
   }
 
-  // 分批精炼场景（每批最多 20 个）
+  // 分批精炼场景（不再要求输出空间关系，由图保证）
   const REFINE_LOC_BATCH = 20;
   const locRefinePrompt = `你是一位专业编剧兼AI绘画提示词专家。以下是从小说中提取的场景列表（可能有重复）。
 请精炼：
 1. 合并同一地点的不同描述
 2. 保留所有有独立功能的场景
-3. 根据小说背景判断场景所在的国家/地区文化风格（如中国城市、中式建筑等）
-4. 为每个场景生成详细的中文 visualPrompt（用于AI生图），要求：
-   - 开头必须明确地域文化风格，如"中国城市"、"中式校园"、"中国南方小城"等
-   - 必须包含：场景类型（室内/室外）、时间段（白天/夜晚/黄昏等）
-   - 必须包含：空间布局、主要物件和家具、建筑风格
-   - 必须包含：光线氛围（自然光/灯光/昏暗等）、色调
-   - 必须包含：环境细节（墙壁材质、地面、装饰物等）
-   - 如果是学校场景，写明具体是教室/操场/食堂等，包含桌椅黑板等细节
-   - visualPrompt 至少60字，越详细越好
-返回 JSON 数组：[{ "name": "...", "description": "...", "visualPrompt": "详细的中文生图提示词，至少60字" }]`;
+3. 根据小说背景判断场景所在的国家/地区文化风格
+4. 为每个场景生成详细的中文 visualPrompt（至少60字）
+5. 为每个场景生成 baseDescription（固定物理属性）
+6. 为每个场景生成 baseVisualPrompt（基准空场景生图提示词）
+返回 JSON 数组：[{ "name": "...", "description": "...", "visualPrompt": "...", "baseDescription": "...", "baseVisualPrompt": "..." }]`;
 
   const locBatchTasks = [];
   for (let i = 0; i < allLocations.length; i += REFINE_LOC_BATCH) {
@@ -687,67 +962,63 @@ async function analyzeByChapters(
       const r = await chatCompletionJSON<Array<Record<string, string>>>(locRefinePrompt, JSON.stringify(batch));
       logLLMCall({ projectId, step: `refine_locs_${i}`, provider: config.provider, model: config.model, durationMs: Date.now() - st, success: r.success, error: r.error });
       if (r.success && r.data) return Array.isArray(r.data) ? r.data : [];
-      return batch as Array<Record<string, string>>; // fallback
+      return batch as Array<Record<string, string>>;
     })());
   }
 
-  // 角色和场景并发精炼
   const [charResults, locResults] = await Promise.all([
     Promise.all(charBatchTasks),
     Promise.all(locBatchTasks),
   ]);
   const finalCharacters = charResults.flat();
-  const finalLocations = locResults.flat();
 
-  // 最后一次调用：只精炼摘要、情节、主题（数据量小，不会截断）
-  progress('整合精炼', '生成故事梗概和主题...');
-  const summaryRefinePrompt = `你是一位专业编剧。根据以下章节摘要和情节点，生成精炼结果。
-
-严格要求：
-- title：为故事起一个吸引人的标题（不超过10个字）
-- summary：用300字以内写出完整故事梗概，包含主要人物、核心冲突、发展脉络和结局走向
-- plotPoints：只保留最关键的情节转折点（最多20个），按章节排序
-- themes：提炼2-5个核心主题
-
-返回 JSON：
-{
-  "title": "故事标题",
-  "summary": "300字以内完整梗概",
-  "plotPoints": [{ "chapter": 1, "summary": "...", "emotionalTone": "...", "keyEvents": ["..."] }],
-  "themes": ["主题1", "主题2"]
-}`;
-  // 限制输入量：只取前15个摘要，前20个情节点，避免输入过大
-  const summaryInput = JSON.stringify({
-    summaries: accumulated.summaries.slice(0, 15),
-    plotPoints: accumulated.plotPoints.slice(0, 20),
-    themes: [...new Set(accumulated.themes)].slice(0, 10),
+  // 精炼后从图中补回空间关系
+  const rawFinalLocations = locResults.flat();
+  const graphLocByName = new Map(allLocations.map(gl => [gl.name as string, gl]));
+  const finalLocations: Array<Record<string, unknown>> = rawFinalLocations.map(refined => {
+    const name = (refined.name as string) || '';
+    const graphLoc = graphLocByName.get(name);
+    if (!graphLoc) return refined;
+    return {
+      ...refined,
+      spatialRelation: (graphLoc.spatialRelation as string) || '',
+      parentName: (graphLoc.parentName as string) || '',
+      adjacentLocations: graphLoc.adjacentLocations || [],
+    };
   });
 
-  // 带重试的 summary refine
+  // 精炼摘要
+  progress('整合精炼', '生成故事梗概和主题...');
+  const summaryRefinePrompt = `你是一位专业编剧。根据以下章节摘要和情节点，生成精炼结果。
+严格要求：
+- title：吸引人的标题（不超过10个字）
+- summary：300字以内完整故事梗概
+- plotPoints：最关键的情节转折点（最多20个），按章节排序
+- themes：2-5个核心主题
+返回 JSON：{ "title": "...", "summary": "...", "plotPoints": [...], "themes": [...] }`;
+
+  const summaryInput = JSON.stringify({
+    summaries: graph.summaries.slice(0, 15),
+    plotPoints: graph.plotPoints.slice(0, 20),
+  });
+
   let summaryResult: { success: boolean; data?: Record<string, unknown>; error?: string } = { success: false };
   for (let retry = 0; retry < 3; retry++) {
-    if (retry > 0) {
-      console.log(`[drama] summary refine 第 ${retry + 1} 次重试...`);
-      await new Promise(r => setTimeout(r, 2000));
-    }
+    if (retry > 0) await new Promise(r => setTimeout(r, 2000));
     const stSum = Date.now();
     summaryResult = await chatCompletionJSON<Record<string, unknown>>(summaryRefinePrompt, summaryInput);
     logLLMCall({ projectId, step: `refine_summary${retry > 0 ? `_retry${retry}` : ''}`, provider: config.provider, model: config.model, durationMs: Date.now() - stSum, success: summaryResult.success, error: summaryResult.error });
     if (summaryResult.success && summaryResult.data?.title && summaryResult.data?.summary) break;
   }
 
-  const finalTitle = (summaryResult.data?.title as string) || '未命名';
-  const finalSummary = (summaryResult.data?.summary as string) || accumulated.summaries.slice(0, 5).join(' ').substring(0, 500);
-  const finalPlotPoints = (summaryResult.data?.plotPoints as PlotPoint[]) || accumulated.plotPoints;
-  const finalThemes = (summaryResult.data?.themes as string[]) || [];
-
   return {
-    title: finalTitle,
-    summary: finalSummary,
+    title: (summaryResult.data?.title as string) || '未命名',
+    summary: (summaryResult.data?.summary as string) || graph.summaries.slice(0, 5).join(' ').substring(0, 500),
     characters: finalCharacters,
     locations: finalLocations,
-    plotPoints: finalPlotPoints,
-    themes: finalThemes,
+    plotPoints: (summaryResult.data?.plotPoints as PlotPoint[]) || graph.plotPoints,
+    themes: (summaryResult.data?.themes as string[]) || [],
+    graph,
   };
 }
 
@@ -770,7 +1041,7 @@ export async function analyzeNovel(
   console.log(`[drama] 小说长度: ${novelText.length} 字, 模型上下文: ${modelContextLimit}, 单块上限: ${maxCharsPerChunk} 字`);
   progress('准备', `小说 ${novelText.length} 字，计算分块策略...`);
 
-  let analysis: { title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, string>>; plotPoints?: PlotPoint[]; themes?: string[] };
+  let analysis: { title?: string; summary?: string; characters?: Array<Record<string, string>>; locations?: Array<Record<string, unknown>>; plotPoints?: PlotPoint[]; themes?: string[]; graph?: EntityGraph };
 
   // 策略A：尝试章节拆分（适用于有章节标记的长篇小说）
   const chapters = splitNovelIntoChapters(novelText);
@@ -822,18 +1093,107 @@ export async function analyzeNovel(
     })),
     locations: (analysis.locations || []).map((l, i) => ({
       id: `S${String(i + 1).padStart(2, '0')}`,
-      originalName: l.name || '',
-      newName: l.name || '',
-      description: l.description || '',
-      visualPrompt: l.visualPrompt || '',
+      originalName: (l.name as string) || '',
+      newName: (l.name as string) || '',
+      description: (l.description as string) || '',
+      visualPrompt: (l.visualPrompt as string) || '',
+      baseDescription: (l.baseDescription as string) || '',
+      baseVisualPrompt: (l.baseVisualPrompt as string) || '',
+      spatialRelation: (l.spatialRelation as string) || '',
+      parentId: '',  // 下面通过 parentName 解析
+      adjacentLocations: [],  // 下面通过 adjacentLocations name 解析
     })),
     plotPoints: analysis.plotPoints || [],
     themes: analysis.themes || [],
     totalChapters: chapters.length > 0 ? chapters.length : (analysis.plotPoints || []).length,
   };
 
+  // ====== 场景智能合并去重 ======
+  // 根据集数计算合理场景上限，合并同一物理空间的不同状态为 variants
+  const maxLocations = Math.min(Math.max(project.targetEpisodes * 2, 20), 50);
+  if (novel.locations.length > maxLocations) {
+    progress('场景合并', `${novel.locations.length} 个场景过多（目标 ${project.targetEpisodes} 集建议 ≤${maxLocations} 个），正在智能合并...`);
+    const mergedLocs = await mergeAndDeduplicateLocations(projectId, novel.locations, maxLocations, config, progress);
+    if (mergedLocs.length > 0 && mergedLocs.length < novel.locations.length) {
+      novel.locations = mergedLocs;
+      console.log(`[drama] 场景合并: ${analysis.locations?.length || 0} → ${novel.locations.length}`);
+      progress('场景合并', `合并完成: ${novel.locations.length} 个独立场景`);
+    }
+  }
+
+  // 构建空间结构：优先从 EntityGraph 获取关系，fallback 到 analysis.locations
+  const locNameToId = new Map<string, string>();
+  for (const loc of novel.locations) {
+    locNameToId.set(loc.originalName, loc.id);
+  }
+
+  if (analysis.graph) {
+    // 从 EntityGraph 的边关系直接构建空间结构
+    const graph = analysis.graph;
+    const graphLocByName = new Map(graph.getLocations().map(n => [n.name, n]));
+
+    for (const loc of novel.locations) {
+      const graphNode = graphLocByName.get(loc.originalName);
+      if (!graphNode) continue;
+
+      // 从 spatial_parent 边获取父级
+      const parentEdges = graph.getEdges(graphNode.id, 'spatial_parent');
+      for (const pe of parentEdges) {
+        const parentNodeId = pe.from === graphNode.id ? pe.to : pe.from;
+        const parentNode = graph.getLocations().find(n => n.id === parentNodeId);
+        if (parentNode) {
+          const parentLocId = locNameToId.get(parentNode.name);
+          if (parentLocId) loc.parentId = parentLocId;
+        }
+      }
+
+      // 从 spatial_adjacent 边获取相邻关系
+      const adjEdges = graph.getEdges(graphNode.id, 'spatial_adjacent');
+      loc.adjacentLocations = adjEdges.map(ae => {
+        const otherNodeId = ae.from === graphNode.id ? ae.to : ae.from;
+        const otherNode = graph.getLocations().find(n => n.id === otherNodeId);
+        if (!otherNode) return null;
+        const otherLocId = locNameToId.get(otherNode.name);
+        if (!otherLocId) return null;
+        return {
+          id: otherLocId,
+          direction: (ae.attrs.direction as string) || '',
+          visibleFrom: (ae.attrs.visibleFrom as boolean) ?? true,
+        };
+      }).filter(Boolean) as Array<{ id: string; direction: string; visibleFrom: boolean }>;
+    }
+  } else {
+    // Fallback：从 analysis.locations 按 name 匹配
+    const rawLocByName = new Map<string, Record<string, unknown>>();
+    for (const raw of (analysis.locations || [])) {
+      const name = (raw.name as string) || '';
+      if (name) rawLocByName.set(name, raw as Record<string, unknown>);
+    }
+    for (const loc of novel.locations) {
+      const raw = rawLocByName.get(loc.originalName);
+      if (!raw) continue;
+      const parentName = (raw.parentName as string) || '';
+      if (parentName) {
+        loc.parentId = locNameToId.get(parentName) || '';
+      }
+      const rawAdj = (raw.adjacentLocations as Array<Record<string, unknown>>) || [];
+      loc.adjacentLocations = rawAdj
+        .filter(a => (a.name as string))
+        .map(a => ({
+          id: locNameToId.get(a.name as string) || '',
+          direction: (a.direction as string) || '',
+          visibleFrom: (a.visibleFrom as boolean) ?? true,
+        }))
+        .filter(a => a.id);
+    }
+  }
+  // 构建 spatialMap
+  novel.spatialMap = buildSpatialMap(novel.locations);
+
   progress('完成', `分析完成: ${novel.characters.length} 角色, ${novel.locations.length} 场景, ${novel.plotPoints.length} 情节点`);
-  updateProject(projectId, { novel, status: 'copyright_check' });
+  // 保存 EntityGraph 到项目（贯穿整个创作流程）
+  const graphData = analysis.graph ? analysis.graph.serialize() : undefined;
+  updateProject(projectId, { novel, status: 'copyright_check', entityGraphData: graphData });
   return { success: true, project: getProject(projectId) };
 }
 
@@ -1150,7 +1510,13 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
       if (loc) {
         loc.newName = t.newName;
         if (t.adjustedDescription) loc.description = t.adjustedDescription;
-        if (t.visualPrompt) loc.visualPrompt = t.visualPrompt;
+        if (t.visualPrompt) {
+          loc.visualPrompt = t.visualPrompt;
+          // 同步更新 baseVisualPrompt（版权改造后需要重新生成基准 prompt）
+          if (loc.baseVisualPrompt) {
+            loc.baseVisualPrompt = t.visualPrompt;
+          }
+        }
       }
     }
     console.log(`[drama] 版权改造 ${batchLabel} 完成`);
@@ -1172,6 +1538,32 @@ export async function transformCopyright(projectId: string): Promise<{ success: 
 
   updateProject(projectId, { novel: project.novel, status: 'character_confirm' });
   console.log(`[drama] 版权改造完成: ${mainChars.length} 角色 (已跳过 ${project.novel.characters.length - mainChars.length} 个龙套), ${locs.length} 场景`);
+
+  // 更新 EntityGraph 中的名字映射（版权改造后同步）
+  if (project.entityGraphData) {
+    try {
+      const graph = EntityGraph.deserialize(project.entityGraphData);
+      const nameMapping: Array<{ originalName: string; newName: string; type: 'character' | 'location' }> = [];
+      for (const c of project.novel.characters) {
+        if (c.originalName !== c.newName) {
+          nameMapping.push({ originalName: c.originalName, newName: c.newName, type: 'character' });
+        }
+      }
+      for (const l of project.novel.locations) {
+        if (l.originalName !== l.newName) {
+          nameMapping.push({ originalName: l.originalName, newName: l.newName, type: 'location' });
+        }
+      }
+      if (nameMapping.length > 0) {
+        graph.renameNodes(nameMapping);
+        updateProject(projectId, { entityGraphData: graph.serialize() });
+        console.log(`[drama] EntityGraph 名字映射更新: ${nameMapping.length} 个实体`);
+      }
+    } catch (err) {
+      console.error('[drama] EntityGraph 名字映射更新失败:', err);
+    }
+  }
+
   return { success: true, project: getProject(projectId) };
 }
 
@@ -1272,6 +1664,8 @@ export async function refreshVisualPrompts(projectId: string): Promise<{ success
     const loc = project.novel.locations.find(l => l.id === item.id);
     if (loc && item.visualPrompt) {
       loc.visualPrompt = item.visualPrompt;
+      // 同步更新 baseVisualPrompt，保证基准 prompt 与最新 visualPrompt 一致
+      loc.baseVisualPrompt = item.visualPrompt;
       loc.imageUrl = undefined;
       loc.imageUrls = undefined;
       locUpdated++;
@@ -1330,21 +1724,36 @@ export async function generateScript(projectId: string, onProgress?: (msg: strin
   const total = project.targetEpisodes;
   const dur = project.episodeDuration;
 
-  // 构建角色和场景上下文（精简版，减少 token 消耗）
+  // 构建角色和场景上下文（含服化道和档案图引用）
   const mainChars = project.novel.characters.filter(c => c.role !== 'minor');
   const storyContext = `故事：${project.novel.summary}
 风格：${project.style}
 
-## 角色（全剧外貌统一，用ID引用）
-${mainChars.map(c => `- ${c.newName}(${c.id}): ${c.description}，${c.personality}${c.costumeDesc ? `｜服化道：${c.costumeDesc}` : ''}`).join('\n')}
+## 角色档案（全剧外貌/服化道/道具必须统一，用ID引用）
+${mainChars.map(c => {
+  const parts = [`- ${c.newName}(${c.id}): ${c.description}，${c.personality}`];
+  if (c.costumeDesc) parts.push(`  服化道：${c.costumeDesc}`);
+  if (c.profileImages?.main) parts.push(`  档案主图：@${c.id}_主图`);
+  if (c.profileImages?.front) parts.push(`  正面图：@${c.id}_正面`);
+  if (c.profileImages?.side) parts.push(`  侧面图：@${c.id}_侧面`);
+  if (c.profileImages?.back) parts.push(`  背面图：@${c.id}_背面`);
+  if (c.profileImages?.costume) parts.push(`  服装图：@${c.id}_服装`);
+  return parts.join('\n');
+}).join('\n')}
 
 ## 场景（同场景视觉统一，用ID引用）
-${project.novel.locations.map(l => `- ${l.newName}(${l.id}): ${l.description}`).join('\n')}
+${buildSpatialContext(project.novel.locations, project.novel.spatialMap)}
 
-## 一致性规则
-- 角色外貌/服化道每次出场必须一致，换装需说明原因
-- 同一场景的光线、色调、布局在不同集中保持统一
-- 用角色ID(C01)和场景ID(S01)引用
+${project.entityGraphData ? (() => { try { return EntityGraph.deserialize(project.entityGraphData).buildRelationContext(); } catch { return ''; } })() : ''}
+
+## 一致性铁律（不可违反）
+1. 角色外貌：每次出场必须完整描述外貌特征（发型、肤色、体型），不可省略
+2. 服化道锁定：角色默认服装/配饰/道具在全剧中固定不变，换装必须在对白或旁白中说明原因
+3. 道具连续性：角色的标志性道具（眼镜、手链、书包等）每次出场必须携带，不可遗漏
+4. 场景锁定：同一场景ID的空间布局、家具、色调在所有集中完全一致，只有人物和活动不同
+5. 场景变体：同一物理空间的不同状态（如"教室-上课"vs"教室-空教室"）使用同一场景ID
+6. 空间逻辑：从A看向B的视角必须与从B看向A一致（教室窗外是操场→操场能看到教学楼）
+7. 引用规范：用角色ID(C01)和场景ID(S01)引用，不可用自由文本替代
 
 情节：
 ${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${p.summary}｜${(p.keyEvents || []).join('、')}`).join('\n')}
@@ -1398,11 +1807,11 @@ ${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${
   console.log(`[drama] 脚本生成: ${total} 集, 每集 ${dur}s = ${shotsPerEp} 个分镜, 分 ${batches.length} 批 (每批约 ${epsPerBatch} 集)`);
   onProgress?.(`脚本生成: ${total} 集 (每集 ${shotsPerEp} 个分镜), 分 ${batches.length} 批`);
 
-  // 构建分镜示例（只展示首尾两个，减少 token）
-  const shotExampleFirst = `      { "index": 1, "startTime": 0, "endTime": ${Math.min(MAX_SHOT_DURATION, dur)}, "prompt": "${project.style}，${project.ratio}，[氛围]\\n${buildShotTimeTemplate(Math.min(MAX_SHOT_DURATION, dur))}\\n【声音】[配乐]+[音效]+[对白]\\n【参考】@图片1 [用途]", "characterRefs": ["C01"], "locationRefs": ["S01"], "transition": "转场方式" }`;
+  // 构建分镜示例（结构化输出，含对白/动作/镜头角度）
+  const shotExampleFirst = `      { "index": 1, "startTime": 0, "endTime": ${Math.min(MAX_SHOT_DURATION, dur)}, "prompt": "${project.style}，${project.ratio}，[氛围]\\n${buildShotTimeTemplate(Math.min(MAX_SHOT_DURATION, dur))}\\n【参考】@C01_主图 @S01", "dialogue": "角色对白或旁白文本（无则留空）", "action": "角色动作描述", "cameraAngle": "景别+运镜，如：近景，缓慢推镜头", "soundDesign": "配乐风格+音效描述", "characterRefs": ["C01"], "locationRefs": ["S01"], "transition": "转场方式" }`;
   const lastStart = (shotsPerEp - 1) * MAX_SHOT_DURATION;
   const shotExampleLast = shotsPerEp > 1
-    ? `,\n      { "index": ${shotsPerEp}, "startTime": ${lastStart}, "endTime": ${lastStart + lastShotDuration}, "prompt": "...(同格式)", "characterRefs": ["C02"], "locationRefs": ["S02"], "transition": "" }`
+    ? `,\n      { "index": ${shotsPerEp}, "startTime": ${lastStart}, "endTime": ${lastStart + lastShotDuration}, "prompt": "...(同格式)", "dialogue": "...", "action": "...", "cameraAngle": "...", "soundDesign": "...", "characterRefs": ["C02"], "locationRefs": ["S02"], "transition": "" }`
     : '';
   const shotExample = shotExampleFirst + (shotsPerEp > 2 ? ',\n      "... 中间分镜省略，共 ' + shotsPerEp + ' 个"' : '') + shotExampleLast;
 
@@ -1422,24 +1831,33 @@ ${project.novel.plotPoints.map(p => `第${p.chapter}章 [${p.emotionalTone}]: ${
 
 当前批次属于【${batchAct}】阶段。
 
-## 分镜 prompt 格式（每个 shot 的 prompt 必须独立完整）
-每个分镜的 prompt 格式：
+## 分镜 prompt 格式（每个 shot 的 prompt 必须独立完整，用于视频生成）
+每个分镜的 prompt 只包含画面描述，格式：
 
 ${project.style}，${project.ratio}，[该分镜的氛围]
 
-[时间轴画面描述，每3秒一段]
+[时间轴画面描述，每3秒一段，必须包含角色完整外貌和服化道]
 
-【声音】[配乐风格] + [音效] + [对白/旁白]
-【参考】@图片1 [角色/场景用途]
+【参考】@角色ID_主图 @场景ID [用途说明]
+
+对白、动作、镜头角度、声音设计分别放在独立字段中（见输出格式）。
+
+## 分镜结构化字段说明
+- prompt：纯画面描述（用于视频生成引擎），必须包含角色外貌和服化道
+- dialogue：该分镜的对白或旁白文本（用于字幕和配音），无对白则留空字符串
+- action：角色动作描述（如"转身离开"、"低头翻书"），简洁明确
+- cameraAngle：景别+运镜（如"近景，缓慢推镜头"），必须从运镜词库选取
+- soundDesign：配乐风格+音效（如"钢琴轻柔旋律，翻书声，远处铃声"）
 
 ## 分镜拆分原则
 1. 每个分镜是一个独立的视频片段，prompt 必须自包含（不依赖其他分镜的上下文）
 2. 每个分镜的画面描述中必须包含角色的完整外貌和服化道描述（因为每个分镜独立生成）
-3. 分镜之间通过 transition 字段指定转场方式（如：硬切、淡入淡出、遮挡擦镜、无缝渐变等）
+3. 分镜之间通过 transition 字段指定转场方式
 4. 同一场景内的连续分镜，后一个分镜开头要与前一个分镜结尾画面衔接
 5. 场景切换时，transition 要明确标注转场类型
+6. 每个分镜必须有明确的对白或旁白（dialogue 字段），推动剧情发展
 
-## 运镜关键词（必须从以下词库选取）
+## 运镜词库（cameraAngle 必须从以下选取组合）
 景别：大远景、远景、全景、中景、近景、特写、大特写
 运镜：推镜头、拉镜头、摇镜头、移镜头、跟拍、环绕拍摄、航拍、手持跟拍、希区柯克变焦
 角度：平视、俯拍、仰拍、低角度、鸟瞰视角、第一人称视角
@@ -1477,7 +1895,7 @@ ${shotExample}
   }
 ]
 
-注意：prompt 字段不再需要，用 shots 数组替代。每个 shot 的 prompt 是独立完整的视频生成提示词。`;
+重要：每个 shot 必须包含 dialogue、action、cameraAngle、soundDesign 四个结构化字段，不可省略。`;
     return prompt;
   };
 
@@ -1701,7 +2119,15 @@ export async function optimizeScripts(
     const prevEp = index > 0 ? project.episodes[index - 1] : null;
     const nextEp = index < project.episodes.length - 1 ? project.episodes[index + 1] : null;
 
-    let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
+    let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}`;
+    // 加入 EntityGraph 关系上下文
+    if (project.entityGraphData) {
+      try {
+        const graphCtx = EntityGraph.deserialize(project.entityGraphData).buildRelationContext();
+        if (graphCtx) userContent += `\n\n${graphCtx}`;
+      } catch { /* ignore */ }
+    }
+    userContent += `\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
     if (prevEp?.endingFrame) {
       userContent += `\n\n上一集(E${String(prevEp.number).padStart(2, '0')})结尾画面：${prevEp.endingFrame}`;
     }
@@ -1780,7 +2206,15 @@ export async function optimizeSingleEpisode(
   const prevEp = epIndex > 0 ? project.episodes[epIndex - 1] : null;
   const nextEp = epIndex < project.episodes.length - 1 ? project.episodes[epIndex + 1] : null;
 
-  let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
+  let userContent = `风格：${project.style}${buildCostumeContext(project.novel.characters)}`;
+  // 加入 EntityGraph 关系上下文
+  if (project.entityGraphData) {
+    try {
+      const graphCtx = EntityGraph.deserialize(project.entityGraphData).buildRelationContext();
+      if (graphCtx) userContent += `\n\n${graphCtx}`;
+    } catch { /* ignore */ }
+  }
+  userContent += `\n当前脚本：\n${JSON.stringify(ep, null, 2)}`;
   if (prevEp?.endingFrame) {
     userContent += `\n\n上一集(E${String(prevEp.number).padStart(2, '0')})结尾画面：${prevEp.endingFrame}`;
   }
@@ -1847,6 +2281,12 @@ export async function regenerateEpisodeShots(
   const nextEp = epIndex < project.episodes.length - 1 ? project.episodes[epIndex + 1] : null;
 
   // 构建角色/场景上下文（复用 generateScript 的格式）
+  let graphRelationCtx = '';
+  if (project.entityGraphData) {
+    try {
+      graphRelationCtx = EntityGraph.deserialize(project.entityGraphData).buildRelationContext();
+    } catch { /* ignore */ }
+  }
   const storyContext = `故事：${project.novel.summary}
 风格：${project.style}
 ${buildCostumeContext(project.novel.characters)}
@@ -1858,7 +2298,7 @@ ${project.novel.characters.filter(c => c.role !== 'minor').map(c =>
 
 场景：
 ${project.novel.locations.map(l => `- ${l.newName}(${l.id}): ${l.description}`).join('\n')}
-
+${graphRelationCtx ? `\n${graphRelationCtx}` : ''}
 本集信息：第 ${ep.number} 集「${ep.title}」(${ep.act}) 情感基调=${ep.emotionalTone}
 角色出场：${ep.characterRefs.join(', ')}
 场景使用：${ep.locationRefs.join(', ')}`;
@@ -1944,35 +2384,137 @@ export function confirmCharacter(projectId: string, characterId: string, imageUr
 
 // 更新角色图 URL
 export function updateCharacterImages(projectId: string, characterId: string, imageUrls: string[]): boolean {
-  const project = getProject(projectId);
-  if (!project) return false;
-  const char = project.novel.characters.find(c => c.id === characterId);
-  if (!char) return false;
-  char.imageUrls = imageUrls;
-  updateProject(projectId, { novel: project.novel });
-  return true;
+  return updateCharacterFields(projectId, characterId, { imageUrls });
 }
 
 // 更新角色参考图
 export function updateCharacterRefImage(projectId: string, characterId: string, refImageUrl: string | undefined): boolean {
-  const project = getProject(projectId);
-  if (!project) return false;
-  const char = project.novel.characters.find(c => c.id === characterId);
-  if (!char) return false;
-  char.refImageUrl = refImageUrl;
-  updateProject(projectId, { novel: project.novel });
-  return true;
+  return updateCharacterFields(projectId, characterId, { refImageUrl });
 }
 
 // 更新场景图 URL
 export function updateLocationImage(projectId: string, locationId: string, imageUrl: string): boolean {
+  return updateLocationFields(projectId, locationId, { imageUrl });
+}
+
+// 原子级角色字段更新：每次从 DB 读取最新数据，只修改目标角色的指定字段，避免并发覆盖
+export function updateCharacterFields(projectId: string, characterId: string, fields: Partial<CharacterInfo>): boolean {
+  const project = getProject(projectId);
+  if (!project) return false;
+  const char = project.novel.characters.find(c => c.id === characterId);
+  if (!char) return false;
+  Object.assign(char, fields);
+  updateProject(projectId, { novel: project.novel });
+  return true;
+}
+
+// 原子级场景字段更新：每次从 DB 读取最新数据，只修改目标场景的指定字段
+export function updateLocationFields(projectId: string, locationId: string, fields: Partial<LocationInfo>): boolean {
   const project = getProject(projectId);
   if (!project) return false;
   const loc = project.novel.locations.find(l => l.id === locationId);
   if (!loc) return false;
-  loc.imageUrl = imageUrl;
+  Object.assign(loc, fields);
   updateProject(projectId, { novel: project.novel });
   return true;
+}
+
+// 从磁盘扫描图片文件，恢复丢失的数据库关联（修复竞态条件导致的数据丢失）
+export function repairProjectImages(projectId: string): { repairedChars: string[]; repairedLocs: string[]; errors: string[] } {
+  const project = getProject(projectId);
+  if (!project) return { repairedChars: [], repairedLocs: [], errors: ['项目不存在'] };
+
+  const projectDir = safeDirName(project.novel.title || project.id);
+  const basePath = getLocalImagePath(projectDir);
+  const repairedChars: string[] = [];
+  const repairedLocs: string[] = [];
+  const errors: string[] = [];
+
+  // 修复角色图片
+  const charsDir = `${basePath}/characters`;
+  if (fs.existsSync(charsDir)) {
+    for (const char of project.novel.characters) {
+      const charDir = `${charsDir}/${safeDirName(char.newName)}`;
+      if (!fs.existsSync(charDir)) continue;
+
+      const files = fs.readdirSync(charDir).filter(f => f.endsWith('.jpg'));
+      if (files.length === 0) continue;
+
+      // 按文件名模式分类
+      const mainFiles = files.filter(f => f.includes('_main_'));
+      const frontFile = files.find(f => f.includes('_front_'));
+      const sideFile = files.find(f => f.includes('_side_'));
+      const backFile = files.find(f => f.includes('_back_'));
+      const costumeFile = files.find(f => f.includes('_costume_'));
+
+      const toUrl = (f: string) => `/api/images/${projectDir}/characters/${safeDirName(char.newName)}/${f}`;
+
+      // 恢复 imageUrls（主图候选）
+      const needRepair = char.imageUrls.length === 0 || !char.profileImages?.main;
+      if (!needRepair) continue;
+
+      const updates: Partial<CharacterInfo> = {};
+
+      if (mainFiles.length > 0 && char.imageUrls.length === 0) {
+        updates.imageUrls = mainFiles.map(toUrl);
+      }
+
+      // 恢复 profileImages
+      const profileImages: Record<string, string> = { ...(char.profileImages || {}) } as Record<string, string>;
+      let profileChanged = false;
+      if (mainFiles.length > 0 && !profileImages.main) { profileImages.main = toUrl(mainFiles[0]); profileChanged = true; }
+      if (frontFile && !profileImages.front) { profileImages.front = toUrl(frontFile); profileChanged = true; }
+      if (sideFile && !profileImages.side) { profileImages.side = toUrl(sideFile); profileChanged = true; }
+      if (backFile && !profileImages.back) { profileImages.back = toUrl(backFile); profileChanged = true; }
+      if (costumeFile && !profileImages.costume) { profileImages.costume = toUrl(costumeFile); profileChanged = true; }
+
+      if (profileChanged) updates.profileImages = profileImages;
+      if (profileImages.main) { updates.confirmed = true; updates.profileStatus = 'done'; }
+
+      if (Object.keys(updates).length > 0) {
+        updateCharacterFields(projectId, char.id, updates);
+        repairedChars.push(char.newName);
+        console.log(`[repair] 角色 ${char.newName} 图片已恢复: ${files.length} 张`);
+      }
+    }
+  }
+
+  // 修复场景图片
+  const locsDir = `${basePath}/locations`;
+  if (fs.existsSync(locsDir)) {
+    for (const loc of project.novel.locations) {
+      const locDir = `${locsDir}/${safeDirName(loc.newName)}`;
+      if (!fs.existsSync(locDir)) continue;
+
+      const files = fs.readdirSync(locDir).filter(f => f.endsWith('.jpg'));
+      if (files.length === 0) continue;
+
+      const needRepair = !loc.imageUrl && (!loc.imageUrls || loc.imageUrls.length === 0);
+      if (!needRepair) continue;
+
+      const toUrl = (f: string) => `/api/images/${projectDir}/locations/${safeDirName(loc.newName)}/${f}`;
+      const localUrls = files.map(toUrl);
+
+      updateLocationFields(projectId, loc.id, {
+        imageUrls: localUrls,
+        imageUrl: localUrls[0], // 默认选第一张
+      });
+      repairedLocs.push(loc.newName);
+      console.log(`[repair] 场景 ${loc.newName} 图片已恢复: ${files.length} 张`);
+    }
+  }
+
+  // 检查所有主角/配角是否都已确认，更新项目状态
+  const freshProject = getProject(projectId);
+  if (freshProject) {
+    const mainChars = freshProject.novel.characters.filter(c => c.role !== 'minor');
+    const allConfirmed = mainChars.every(c => c.confirmed);
+    if (allConfirmed && freshProject.status === 'character_confirm') {
+      updateProject(projectId, { status: 'scripting' });
+    }
+  }
+
+  return { repairedChars, repairedLocs, errors };
 }
 
 // 角色生图提示词
@@ -2115,10 +2657,11 @@ export async function generateEpisodeRefImages(
       }
     } catch (err) {
       console.error(`[ref-img] E${episode.number} @图片${mark.index} 生成失败: ${(err as Error).message}`);
-      // 生成失败时，如果能匹配到角色，用角色的通用图
+      // 生成失败时，如果能匹配到角色，用角色的档案主图或通用图
       const char = matchCharacterByName(project.novel.characters, mark.description);
-      if (char && char.imageUrls.length > 0) {
-        refUrls.push(char.imageUrls[0]);
+      if (char) {
+        const charUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
+        if (charUrl) refUrls.push(charUrl);
       }
     }
   }
@@ -2283,18 +2826,20 @@ export async function ensureLocalImages(
 function collectReferenceImages(project: DramaProject, episode: EpisodeScript): string[] {
   const urls: string[] = [];
 
-  // 收集角色图
+  // 收集角色图（优先使用档案主图）
   for (const charId of (episode.characterRefs || [])) {
     const char = project.novel.characters.find(c => c.id === charId);
-    if (char && char.imageUrls.length > 0) {
-      urls.push(char.imageUrls[0]);
+    if (char) {
+      const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
+      if (mainUrl) urls.push(mainUrl);
     }
   }
-  // 如果没有 characterRefs，取所有已确认主角的图
+  // 如果没有 characterRefs，取所有已确认主角的档案主图
   if (urls.length === 0) {
     for (const char of project.novel.characters) {
-      if (char.confirmed && char.imageUrls.length > 0) {
-        urls.push(char.imageUrls[0]);
+      if (char.confirmed) {
+        const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
+        if (mainUrl) urls.push(mainUrl);
       }
     }
   }
@@ -2383,15 +2928,40 @@ export async function batchGenerateVideos(
                 console.log(`[batch] ${shotLabel} 下载上集视频失败: ${(err as Error).message}`);
               }
             }
-            // 本集参考图
-            const imageUrls = (episode.refImageUrls && episode.refImageUrls.length > 0)
-              ? episode.refImageUrls
-              : collectReferenceImages(project, episode);
-            for (const url of imageUrls.slice(0, files.length > 0 ? 3 : 5)) {
-              try {
-                const file = await downloadAsMulterFile(url, 'ref.jpg', 'image/jpeg');
-                files.push(file);
-              } catch { /* skip */ }
+            // 优先传入当前分镜引用的场景基准图（保证场景一致性）
+            const shotLocRefs = shot.locationRefs || episode.locationRefs || [];
+            for (const locId of shotLocRefs.slice(0, 2)) {
+              const loc = project.novel.locations.find(l => l.id === locId);
+              if (loc?.imageUrl) {
+                try {
+                  const file = await downloadAsMulterFile(loc.imageUrl, 'loc.jpg', 'image/jpeg');
+                  files.push(file);
+                } catch { /* skip */ }
+              }
+            }
+            // 补充角色参考图（优先档案主图）
+            const shotCharRefs = shot.characterRefs || episode.characterRefs || [];
+            for (const charId of shotCharRefs.slice(0, 2)) {
+              const char = project.novel.characters.find(c => c.id === charId);
+              const charUrl = char?.profileImages?.main || char?.imageUrls?.[0];
+              if (charUrl) {
+                try {
+                  const file = await downloadAsMulterFile(charUrl, 'char.jpg', 'image/jpeg');
+                  files.push(file);
+                } catch { /* skip */ }
+              }
+            }
+            // 兜底：如果上面没收集到足够参考图，用 collectReferenceImages 补充
+            if (files.length < 2) {
+              const imageUrls = (episode.refImageUrls && episode.refImageUrls.length > 0)
+                ? episode.refImageUrls
+                : collectReferenceImages(project, episode);
+              for (const url of imageUrls.slice(0, 5 - files.length)) {
+                try {
+                  const file = await downloadAsMulterFile(url, 'ref.jpg', 'image/jpeg');
+                  files.push(file);
+                } catch { /* skip */ }
+              }
             }
           } else if (prevShotVideoUrl) {
             // 后续分镜：用前一个分镜的视频作为参考（分镜间衔接）
@@ -2401,14 +2971,15 @@ export async function batchGenerateVideos(
             } catch (err) {
               console.log(`[batch] ${shotLabel} 下载前分镜视频失败: ${(err as Error).message}`);
             }
-            // 补充本分镜的角色/场景参考图
+            // 补充本分镜的角色/场景参考图（优先档案主图）
             const shotCharRefs = shot.characterRefs || episode.characterRefs || [];
             const shotLocRefs = shot.locationRefs || episode.locationRefs || [];
             for (const charId of shotCharRefs.slice(0, 2)) {
               const char = project.novel.characters.find(c => c.id === charId);
-              if (char?.imageUrls?.[0]) {
+              const charUrl = char?.profileImages?.main || char?.imageUrls?.[0];
+              if (charUrl) {
                 try {
-                  const file = await downloadAsMulterFile(char.imageUrls[0], 'char.jpg', 'image/jpeg');
+                  const file = await downloadAsMulterFile(charUrl, 'char.jpg', 'image/jpeg');
                   files.push(file);
                 } catch { /* skip */ }
               }

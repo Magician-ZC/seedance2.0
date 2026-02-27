@@ -10,6 +10,17 @@ export interface CharacterInfo {
   imageUrls: string[];
   confirmed: boolean;
   refImageUrl?: string;
+  profileImages?: {
+    main?: string;
+    front?: string;
+    side?: string;
+    back?: string;
+    costume?: string;
+    props?: string;
+    expressions?: string;
+    custom?: Array<{ label: string; url: string }>;
+  };
+  profileStatus?: 'idle' | 'main_generating' | 'main_scoring' | 'detail_generating' | 'done';
 }
 
 export interface LocationInfo {
@@ -18,8 +29,19 @@ export interface LocationInfo {
   newName: string;
   description: string;
   visualPrompt?: string;
+  baseDescription?: string;    // 固定物理属性（不随镜头变化）
+  baseVisualPrompt?: string;   // 基准生图 prompt（空场景，保证跨集一致性）
+  spatialRelation?: string;    // 空间关系描述
+  parentId?: string;           // 父级场景 ID
+  adjacentLocations?: Array<{ id: string; direction: string; visibleFrom: boolean }>;
+  variants?: Array<{ label: string; description: string }>;  // 状态变体，共享同一基准图
   imageUrl?: string;
   imageUrls?: string[];
+}
+
+export interface SpatialMap {
+  tree: string;
+  relations: Array<{ from: string; to: string; direction: string; bidirectionalView: boolean }>;
 }
 
 export interface Shot {
@@ -27,6 +49,10 @@ export interface Shot {
   startTime: number;
   endTime: number;
   prompt: string;
+  dialogue?: string;
+  action?: string;
+  cameraAngle?: string;
+  soundDesign?: string;
   characterRefs: string[];
   locationRefs: string[];
   transition?: string;
@@ -57,6 +83,7 @@ export interface DramaProject {
     summary: string;
     characters: CharacterInfo[];
     locations: LocationInfo[];
+    spatialMap?: SpatialMap;
     plotPoints: Array<{ chapter: number; summary: string; emotionalTone: string }>;
     themes: string[];
   };

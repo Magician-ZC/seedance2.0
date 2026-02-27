@@ -46,7 +46,7 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const [showSessionId, setShowSessionId] = useState(false);
   const [maxConcurrentChars, setMaxConcurrentChars] = useState(() => loadSettings().maxConcurrentChars);
 
-  // LLM 配置
+  // 主 LLM 配置（解析小说 + 改造剧本）
   const [llmConfig, setLlmConfig] = useState<LLMConfig>({
     provider: 'deepseek', apiKey: '', apiUrl: 'https://api.deepseek.com',
     model: 'deepseek-chat', maxTokens: 8000, temperature: 0.7,
@@ -56,15 +56,35 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const [llmTestMsg, setLlmTestMsg] = useState('');
   const [llmSaving, setLlmSaving] = useState(false);
 
+  // Vision LLM 配置（AI 图片审查）
+  const [visionConfig, setVisionConfig] = useState<LLMConfig>({
+    provider: 'gemini', apiKey: '', apiUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    model: 'gemini-2.0-flash', maxTokens: 2000, temperature: 0.3,
+  });
+  const [showVisionApiKey, setShowVisionApiKey] = useState(false);
+  const [visionConfigured, setVisionConfigured] = useState(false);
+  const [visionSaving, setVisionSaving] = useState(false);
+  const [visionSaveMsg, setVisionSaveMsg] = useState('');
+
   useEffect(() => { setLocalSessionId(sessionId); }, [sessionId]);
 
   // 加载 LLM 配置
   const loadLLMConfig = useCallback(async () => {
     try {
-      const res = await fetch('/api/llm-config');
+      const [res, vRes] = await Promise.all([
+        fetch('/api/llm-config'),
+        fetch('/api/llm-config/vision'),
+      ]);
       if (res.ok) {
         const data = await res.json();
         setLlmConfig(prev => ({ ...prev, ...data, apiKey: data.apiKey === '***' ? prev.apiKey : (data.apiKey || '') }));
+      }
+      if (vRes.ok) {
+        const vData = await vRes.json();
+        setVisionConfigured(vData.configured || false);
+        if (vData.configured) {
+          setVisionConfig(prev => ({ ...prev, ...vData, apiKey: vData.apiKey === '***' ? prev.apiKey : (vData.apiKey || '') }));
+        }
       }
     } catch { /* ignore */ }
   }, []);
@@ -90,6 +110,15 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
     }));
   };
 
+  const handleVisionProviderChange = (provider: string) => {
+    const p = LLM_PROVIDERS.find(x => x.value === provider);
+    setVisionConfig(prev => ({
+      ...prev, provider,
+      apiUrl: p?.defaultUrl || prev.apiUrl,
+      model: p?.defaultModel || prev.model,
+    }));
+  };
+
   // 保存 LLM 配置
   const handleSaveLLM = async () => {
     setLlmSaving(true);
@@ -108,6 +137,26 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
       setLlmTestStatus('error');
     } finally {
       setLlmSaving(false);
+    }
+  };
+
+  // 保存 Vision LLM 配置
+  const handleSaveVision = async () => {
+    setVisionSaving(true);
+    try {
+      const res = await fetch('/api/llm-config/vision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(visionConfig),
+      });
+      if (!res.ok) throw new Error('保存失败');
+      setVisionConfigured(true);
+      setVisionSaveMsg(t('settings.llmSaved'));
+      setTimeout(() => setVisionSaveMsg(''), 2000);
+    } catch (err) {
+      setVisionSaveMsg((err as Error).message);
+    } finally {
+      setVisionSaving(false);
     }
   };
 
@@ -194,93 +243,159 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
 
           {/* LLM Tab */}
           {tab === 'llm' && (
-            <div className="space-y-4">
-              <p className="text-xs text-gray-500">{t('settings.llmHint')}</p>
+            <div className="space-y-5">
+              {/* ===== 区块1: 文本模型（解析小说 + 改造剧本） ===== */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
+                  <span className="text-sm text-gray-200 font-medium">{t('settings.llmTextTitle')}</span>
+                </div>
+                <p className="text-xs text-gray-500">{t('settings.llmTextHint')}</p>
 
-              {/* Provider */}
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">{t('settings.llmProvider')}</label>
-                <select value={llmConfig.provider} onChange={(e) => handleProviderChange(e.target.value)} className={inputClass}>
-                  {LLM_PROVIDERS.map(p => (
-                    <option key={p.value} value={p.value}>{p.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* API Key */}
-              {llmConfig.provider !== 'ollama' && (
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1">API Key</label>
-                  <div className="relative">
-                    <input type={showApiKey ? 'text' : 'password'} value={llmConfig.apiKey}
-                      onChange={(e) => setLlmConfig(prev => ({ ...prev, apiKey: e.target.value }))}
-                      placeholder="sk-..." className={`${inputClass} pr-10`} />
-                    <button onClick={() => setShowApiKey(!showApiKey)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
-                      {showApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
-                    </button>
+                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmProvider')}</label>
+                  <select value={llmConfig.provider} onChange={(e) => handleProviderChange(e.target.value)} className={inputClass}>
+                    {LLM_PROVIDERS.map(p => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {llmConfig.provider !== 'ollama' && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">API Key</label>
+                    <div className="relative">
+                      <input type={showApiKey ? 'text' : 'password'} value={llmConfig.apiKey}
+                        onChange={(e) => setLlmConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                        placeholder="sk-..." className={`${inputClass} pr-10`} />
+                      <button onClick={() => setShowApiKey(!showApiKey)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
+                        {showApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">API URL</label>
+                    <input type="text" value={llmConfig.apiUrl}
+                      onChange={(e) => setLlmConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
+                      placeholder="https://api.example.com" className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmModel')}</label>
+                    <input type="text" value={llmConfig.model}
+                      onChange={(e) => setLlmConfig(prev => ({ ...prev, model: e.target.value }))}
+                      placeholder="model-name" className={inputClass} />
                   </div>
                 </div>
-              )}
 
-              {/* API URL */}
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">API URL</label>
-                <input type="text" value={llmConfig.apiUrl}
-                  onChange={(e) => setLlmConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
-                  placeholder="https://api.example.com" className={inputClass} />
-              </div>
-
-              {/* Model */}
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">{t('settings.llmModel')}</label>
-                <input type="text" value={llmConfig.model}
-                  onChange={(e) => setLlmConfig(prev => ({ ...prev, model: e.target.value }))}
-                  placeholder="model-name" className={inputClass} />
-              </div>
-
-              {/* Advanced: maxTokens + temperature */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmMaxTokens')}</label>
-                  <input type="number" value={llmConfig.maxTokens}
-                    onChange={(e) => setLlmConfig(prev => ({ ...prev, maxTokens: Number(e.target.value) }))}
-                    min={1000} max={128000} className={inputClass} />
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmMaxTokens')}</label>
+                    <input type="number" value={llmConfig.maxTokens}
+                      onChange={(e) => setLlmConfig(prev => ({ ...prev, maxTokens: Number(e.target.value) }))}
+                      min={1000} max={128000} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmTemperature')}</label>
+                    <input type="number" value={llmConfig.temperature} step={0.1}
+                      onChange={(e) => setLlmConfig(prev => ({ ...prev, temperature: Number(e.target.value) }))}
+                      min={0} max={2} className={inputClass} />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmTemperature')}</label>
-                  <input type="number" value={llmConfig.temperature} step={0.1}
-                    onChange={(e) => setLlmConfig(prev => ({ ...prev, temperature: Number(e.target.value) }))}
-                    min={0} max={2} className={inputClass} />
+
+                {llmTestStatus !== 'idle' && (
+                  <div className={`px-3 py-2 rounded-lg text-xs ${
+                    llmTestStatus === 'testing' ? 'bg-blue-900/30 text-blue-400' :
+                    llmTestStatus === 'success' ? 'bg-green-900/30 text-green-400' :
+                    'bg-red-900/30 text-red-400'
+                  }`}>
+                    {llmTestStatus === 'testing' && <span className="animate-pulse">{t('settings.llmTesting')}</span>}
+                    {llmTestStatus !== 'testing' && (
+                      <span className="flex items-center gap-1">
+                        {llmTestStatus === 'success' && <CheckIcon className="w-3 h-3" />}
+                        {llmTestMsg}
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  <button onClick={handleSaveLLM} disabled={llmSaving}
+                    className="flex-1 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-sm font-bold transition-all">
+                    {llmSaving ? t('common.loading') : t('settings.llmSave')}
+                  </button>
+                  <button onClick={handleTestLLM} disabled={llmTestStatus === 'testing'}
+                    className="px-4 py-2 rounded-xl bg-[#161824] border border-gray-700 text-gray-300 text-sm hover:bg-[#1c2030] transition-colors">
+                    {t('settings.llmTest')}
+                  </button>
                 </div>
               </div>
 
-              {/* 测试状态 */}
-              {llmTestStatus !== 'idle' && (
-                <div className={`px-3 py-2 rounded-lg text-xs ${
-                  llmTestStatus === 'testing' ? 'bg-blue-900/30 text-blue-400' :
-                  llmTestStatus === 'success' ? 'bg-green-900/30 text-green-400' :
-                  'bg-red-900/30 text-red-400'
-                }`}>
-                  {llmTestStatus === 'testing' && <span className="animate-pulse">{t('settings.llmTesting')}</span>}
-                  {llmTestStatus !== 'testing' && (
-                    <span className="flex items-center gap-1">
-                      {llmTestStatus === 'success' && <CheckIcon className="w-3 h-3" />}
-                      {llmTestMsg}
-                    </span>
+              {/* 分隔线 */}
+              <div className="border-t border-gray-700/50" />
+
+              {/* ===== 区块2: 视觉模型（AI 图片审查） ===== */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
+                  <span className="text-sm text-gray-200 font-medium">{t('settings.llmVisionTitle')}</span>
+                  {!visionConfigured && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-400">{t('settings.llmVisionFallback')}</span>
                   )}
                 </div>
-              )}
+                <p className="text-xs text-gray-500">{t('settings.llmVisionHint')}</p>
 
-              {/* 保存 + 测试按钮 */}
-              <div className="flex gap-2">
-                <button onClick={handleSaveLLM} disabled={llmSaving}
-                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-sm font-bold transition-all">
-                  {llmSaving ? t('common.loading') : t('settings.llmSave')}
-                </button>
-                <button onClick={handleTestLLM} disabled={llmTestStatus === 'testing'}
-                  className="px-4 py-2.5 rounded-xl bg-[#161824] border border-gray-700 text-gray-300 text-sm hover:bg-[#1c2030] transition-colors">
-                  {t('settings.llmTest')}
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmProvider')}</label>
+                  <select value={visionConfig.provider} onChange={(e) => handleVisionProviderChange(e.target.value)} className={inputClass}>
+                    {LLM_PROVIDERS.map(p => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {visionConfig.provider !== 'ollama' && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">API Key</label>
+                    <div className="relative">
+                      <input type={showVisionApiKey ? 'text' : 'password'} value={visionConfig.apiKey}
+                        onChange={(e) => setVisionConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                        placeholder="sk-..." className={`${inputClass} pr-10`} />
+                      <button onClick={() => setShowVisionApiKey(!showVisionApiKey)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
+                        {showVisionApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">API URL</label>
+                    <input type="text" value={visionConfig.apiUrl}
+                      onChange={(e) => setVisionConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
+                      placeholder="https://api.example.com" className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmModel')}</label>
+                    <input type="text" value={visionConfig.model}
+                      onChange={(e) => setVisionConfig(prev => ({ ...prev, model: e.target.value }))}
+                      placeholder="gemini-2.0-flash" className={inputClass} />
+                  </div>
+                </div>
+
+                {visionSaveMsg && (
+                  <div className="px-3 py-2 rounded-lg text-xs bg-green-900/30 text-green-400">
+                    <span className="flex items-center gap-1"><CheckIcon className="w-3 h-3" />{visionSaveMsg}</span>
+                  </div>
+                )}
+
+                <button onClick={handleSaveVision} disabled={visionSaving}
+                  className="w-full py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-sm font-bold transition-all">
+                  {visionSaving ? t('common.loading') : t('settings.llmSave')}
                 </button>
               </div>
             </div>

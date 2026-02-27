@@ -81,8 +81,20 @@ export function updateLLMConfig(config: Partial<LLMConfig>): void {
   currentConfig = { ...currentConfig, ...config };
 }
 
+// Vision 模型配置（AI 图片审查，需要多模态能力）
+let visionConfig: LLMConfig | null = null;
+
+export function getVisionLLMConfig(): LLMConfig {
+  return visionConfig || currentConfig; // 未单独配置时 fallback 到主配置
+}
+export function updateVisionLLMConfig(config: Partial<LLMConfig>): void {
+  if (!visionConfig) visionConfig = { ...currentConfig };
+  visionConfig = { ...visionConfig, ...config };
+}
+export function hasVisionConfig(): boolean { return visionConfig !== null; }
+
 // 构建请求头
-function buildHeaders(config: LLMConfig): Record<string, string> {
+export function buildHeaders(config: LLMConfig): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (config.provider === 'anthropic') {
     headers['x-api-key'] = config.apiKey;
@@ -144,7 +156,7 @@ function buildBody(config: LLMConfig, systemPrompt: string, userContent: string,
 }
 
 // 获取 API endpoint
-function getEndpoint(config: LLMConfig): string {
+export function getEndpoint(config: LLMConfig): string {
   const base = config.apiUrl.replace(/\/+$/, '');
   if (config.provider === 'gemini') {
     return `${base}/models/${config.model}:generateContent?key=${config.apiKey}`;
@@ -154,7 +166,7 @@ function getEndpoint(config: LLMConfig): string {
 }
 
 // 解析响应
-function parseResponse(config: LLMConfig, data: Record<string, unknown>): string {
+export function parseResponse(config: LLMConfig, data: Record<string, unknown>): string {
   if (config.provider === 'gemini') {
     const candidates = data.candidates as Array<{ content: { parts: Array<{ text: string }> } }>;
     return candidates?.[0]?.content?.parts?.[0]?.text || '';

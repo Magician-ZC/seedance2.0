@@ -205,7 +205,7 @@ export function saveLLMConfig(config: Record<string, unknown>): void {
 export function loadLLMConfigFromDB(): Record<string, string> | null {
   const d = getDB();
   try {
-    const stmt = d.prepare('SELECT key, value FROM llm_config');
+    const stmt = d.prepare("SELECT key, value FROM llm_config WHERE key NOT LIKE 'vision_%'");
     const result: Record<string, string> = {};
     let hasData = false;
     while (stmt.step()) {
@@ -216,6 +216,38 @@ export function loadLLMConfigFromDB(): Record<string, string> | null {
     stmt.free();
     return hasData ? result : null;
   } catch {
-    return null; // 表不存在
+    return null;
+  }
+}
+
+// Vision LLM 配置（AI 图片审查用，带 vision_ 前缀存储）
+export function saveVisionLLMConfig(config: Record<string, unknown>): void {
+  const d = getDB();
+  d.run(`CREATE TABLE IF NOT EXISTS llm_config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )`);
+  for (const [key, val] of Object.entries(config)) {
+    if (val === undefined || val === null) continue;
+    d.run('INSERT OR REPLACE INTO llm_config (key, value) VALUES (?, ?)', [`vision_${key}`, String(val)]);
+  }
+  saveDB();
+}
+
+export function loadVisionLLMConfigFromDB(): Record<string, string> | null {
+  const d = getDB();
+  try {
+    const stmt = d.prepare("SELECT key, value FROM llm_config WHERE key LIKE 'vision_%'");
+    const result: Record<string, string> = {};
+    let hasData = false;
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { key: string; value: string };
+      result[row.key.replace('vision_', '')] = row.value;
+      hasData = true;
+    }
+    stmt.free();
+    return hasData ? result : null;
+  } catch {
+    return null;
   }
 }

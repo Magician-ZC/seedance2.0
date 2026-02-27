@@ -6,6 +6,7 @@ import { statusToDefaultTab } from '../types/drama';
 import { loadSettings } from './SettingsModal';
 import { ArrowLeftIcon, ArrowRightIcon, CheckIcon, CloseIcon, SparkleIcon, UserIcon } from './Icons';
 import { uploadMaterials } from '../services/uploadService';
+import { computeSpatialLayout } from '../utils/spatialLayout';
 
 // Tab 图标组件
 function TabIcon({ type, className }: { type: string; className?: string }) {
@@ -627,6 +628,105 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
     </div>
   );
 
+  // 计算场景→集数映射（复用于空间地图）
+  function getLocationEpisodeMap() {
+    if (!project?.episodes?.length || !project?.novel?.locations?.length) return new Map<string, number[]>();
+    const map = new Map<string, number[]>();
+    for (const ep of project.episodes) {
+      for (const shot of (ep.shots || [])) {
+        for (const locId of (shot.locationRefs || [])) {
+          if (!map.has(locId)) map.set(locId, []);
+          const arr = map.get(locId)!;
+          if (!arr.includes(ep.number)) arr.push(ep.number);
+        }
+      }
+    }
+    return map;
+  }
+
+  // 空间地图 SVG 可视化
+  function renderSpatialMapPanel() {
+    if (!project?.novel?.locations?.length || !project.novel.spatialMap) return null;
+    const locations = project.novel.locations;
+    const relations = project.novel.spatialMap.relations || [];
+    const locEpMap = getLocationEpisodeMap();
+
+    const layoutNodes = locations.map((l: Record<string, unknown>) => ({
+      id: l.id as string, parentId: l.parentId as string, name: (l.newName || l.originalName) as string, variants: l.variants as unknown[],
+    }));
+    const { positions, svgWidth, svgHeight, nodeWidth: NW, nodeHeight: NH } = computeSpatialLayout(layoutNodes, relations);
+
+    const locById = new Map(locations.map((l: Record<string, unknown>) => [l.id as string, l]));
+    const colors = ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4'];
+
+    return (
+      <div className="bg-[#111] rounded-2xl border border-white/5 p-4 sticky top-0">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm text-green-400 font-medium">🗺️ {isZh ? '空间地图' : 'Spatial Map'}</span>
+          {project.episodes?.length > 0 && (
+            <span className="text-[10px] text-gray-600">{isZh ? '（标注出现集数）' : '(episode markers)'}</span>
+          )}
+        </div>
+        <div className="overflow-auto custom-scrollbar max-h-[60vh]">
+          <svg width={svgWidth} height={svgHeight}>
+            {/* 父子连线 */}
+            {locations.map((loc: Record<string, unknown>) => {
+              if (!loc.parentId) return null;
+              const p = positions.get(loc.parentId as string), c = positions.get(loc.id as string);
+              if (!p || !c) return null;
+              return <line key={`p-${loc.id}`} x1={p.x + NW / 2} y1={p.y + NH} x2={c.x + NW / 2} y2={c.y} stroke="#333" strokeWidth={1.5} strokeDasharray="4,3" />;
+            })}
+            {/* 相邻关系 */}
+            {relations.map((rel: Record<string, unknown>, i: number) => {
+              const f = positions.get(rel.from as string), t = positions.get(rel.to as string);
+              if (!f || !t) return null;
+              const fx = f.x + NW / 2, fy = f.y + NH / 2, tx = t.x + NW / 2, ty = t.y + NH / 2;
+              const mx = (fx + tx) / 2, my = (fy + ty) / 2 - 10;
+              return (
+                <g key={`r-${i}`}>
+                  <path d={`M${fx},${fy} Q${mx},${my} ${tx},${ty}`} fill="none"
+                    stroke={(rel.bidirectionalView as boolean) ? '#22c55e44' : '#ffffff15'} strokeWidth={1}
+                    strokeDasharray={(rel.bidirectionalView as boolean) ? '' : '3,3'} />
+                  {rel.direction && <text x={mx} y={my - 4} textAnchor="middle" className="text-[8px] fill-gray-600">{rel.direction as string}</text>}
+                </g>
+              );
+            })}
+            {/* 节点 */}
+            {Array.from(positions.entries()).map(([id, pos]) => {
+              const loc = locById.get(id) as Record<string, unknown> | undefined;
+              if (!loc) return null;
+              const eps = locEpMap.get(id) || [];
+              const color = colors[pos.depth % colors.length];
+              const name = (loc.newName || loc.originalName || '') as string;
+              const variants = (loc.variants || []) as unknown[];
+              return (
+                <g key={id}>
+                  <rect x={pos.x} y={pos.y} width={NW} height={NH} rx={8} fill="#1a1a1a" stroke={color} strokeWidth={1.5} opacity={0.9} />
+                  <text x={pos.x + NW / 2} y={pos.y + 18} textAnchor="middle" className="text-[10px] font-medium" fill="#e5e5e5">
+                    {name.length > 8 ? name.slice(0, 8) + '…' : name}
+                  </text>
+                  {variants.length > 0 && (
+                    <text x={pos.x + NW / 2} y={pos.y + 30} textAnchor="middle" className="text-[8px]" fill="#666">🔄 {variants.length}{isZh ? '变体' : 'var'}</text>
+                  )}
+                  {eps.length > 0 && (
+                    <text x={pos.x + NW / 2} y={pos.y + NH - 6} textAnchor="middle" className="text-[8px]" fill={color}>
+                      {eps.length <= 5 ? eps.map((n: number) => `E${n}`).join(' ') : `E${eps[0]}…E${eps[eps.length - 1]} (${eps.length})`}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-white/5 flex-wrap">
+          <span className="text-[9px] text-gray-600 flex items-center gap-1"><span className="inline-block w-3 h-0 border-t border-dashed border-gray-500" /> {isZh ? '层级' : 'Hierarchy'}</span>
+          <span className="text-[9px] text-gray-600 flex items-center gap-1"><span className="inline-block w-3 h-0 border-t border-green-500/30" /> {isZh ? '双向可见' : 'Bidirectional'}</span>
+          <span className="text-[9px] text-gray-600 flex items-center gap-1"><span className="inline-block w-3 h-0 border-t border-dashed border-white/15" /> {isZh ? '相邻' : 'Adjacent'}</span>
+        </div>
+      </div>
+    );
+  }
+
   // ==== Tab: 大纲 ====
   function renderOutline() {
     if (!project) return null;
@@ -650,7 +750,8 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
 
     // 分析完成后的正常大纲展示
     return (
-      <div className="max-w-4xl space-y-8">
+      <div className="flex gap-6">
+        <div className={`space-y-8 ${project.novel.spatialMap ? 'flex-1 min-w-0' : 'max-w-4xl'}`}>
         {/* 分析结果概览 */}
         <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
           <div className="flex items-center justify-between mb-3">
@@ -730,6 +831,13 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
             </div>
           </div>
         )}
+        </div>
+        {/* 右侧：空间地图 */}
+        {project.novel.spatialMap && (
+          <div className="min-w-[400px] max-w-[50%] flex-shrink-0">
+            {renderSpatialMapPanel()}
+          </div>
+        )}
       </div>
     );
   }
@@ -759,6 +867,17 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
             <button onClick={async () => { const data = await apiCall(`/api/drama/${projectId}/refresh-prompts`, 'POST'); if (data?.project) setProject(data.project); }}
               disabled={loading} className="px-4 py-2.5 rounded-xl bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white text-sm transition-colors">
               {t('drama.refreshPrompts')}
+            </button>
+            <button onClick={async () => {
+              const data = await apiCall(`/api/drama/${projectId}/repair-images`, 'POST');
+              if (data) {
+                const msg = `修复完成: ${data.repairedChars?.length || 0} 个角色, ${data.repairedLocs?.length || 0} 个场景`;
+                console.log(msg, data);
+                alert(msg);
+                await refreshProject();
+              }
+            }} disabled={loading} className="px-4 py-2.5 rounded-xl bg-[#1a1a1a] border border-white/10 text-yellow-400 hover:text-yellow-300 text-sm transition-colors">
+              {isZh ? '修复图片' : 'Repair Images'}
             </button>
             {/* 下载所有角色图 */}
             {mainChars.some(c => c.imageUrls.length > 0) && (
@@ -825,8 +944,60 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
                     </div>
                   </div>
                 )}
-                {/* 图片网格 */}
-                {char.imageUrls.length > 0 && (
+                {/* 角色档案图片 */}
+                {char.profileImages?.main ? (
+                  <div className="space-y-3">
+                    <div className="flex gap-3">
+                      {/* 主图 */}
+                      <div className="relative group flex-shrink-0">
+                        <img src={char.profileImages.main} alt={`${char.newName} 主图`} loading="lazy"
+                          className="w-28 h-36 object-cover rounded-xl border-2 border-green-500/50 cursor-pointer"
+                          onClick={() => setPreviewImage(char.profileImages!.main!)} />
+                        <span className="absolute top-1.5 left-1.5 px-1.5 py-0.5 bg-green-600/80 rounded text-[9px] text-white font-medium">主图</span>
+                      </div>
+                      {/* 多角度/细节 */}
+                      <div className="flex flex-wrap gap-2 flex-1">
+                        {(['front', 'side', 'back', 'costume', 'props', 'expressions'] as const).map(type => {
+                          const url = char.profileImages?.[type];
+                          const labels: Record<string, string> = { front: '正面', side: '侧面', back: '背面', costume: '服装', props: '道具', expressions: '表情' };
+                          if (!url) return null;
+                          return (
+                            <div key={type} className="relative group">
+                              <img src={url} alt={`${char.newName} ${labels[type]}`} loading="lazy"
+                                className="w-16 h-20 object-cover rounded-lg border border-white/10 cursor-pointer hover:border-white/30 transition-all"
+                                onClick={() => setPreviewImage(url)} />
+                              <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[8px] text-gray-300 text-center py-0.5 rounded-b-lg">{labels[type]}</span>
+                            </div>
+                          );
+                        })}
+                        {char.profileImages?.custom?.map((item, i) => (
+                          <div key={`custom-${i}`} className="relative group">
+                            <img src={item.url} alt={item.label} loading="lazy"
+                              className="w-16 h-20 object-cover rounded-lg border border-white/10 cursor-pointer hover:border-white/30 transition-all"
+                              onClick={() => setPreviewImage(item.url)} />
+                            <span className="absolute bottom-0 left-0 right-0 bg-black/70 text-[8px] text-gray-300 text-center py-0.5 rounded-b-lg">{item.label}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {/* 主图候选折叠 */}
+                    {char.imageUrls.length > 1 && (
+                      <details className="border-t border-white/5 pt-2">
+                        <summary className="text-[10px] text-gray-600 cursor-pointer hover:text-gray-400">主图候选 ({char.imageUrls.length}张)</summary>
+                        <div className="flex gap-2 mt-1.5 flex-wrap">
+                          {char.imageUrls.map((url, i) => (
+                            <div key={i} className="relative group">
+                              <img src={url} alt={`候选 ${i + 1}`} loading="lazy"
+                                className={`w-14 h-18 object-cover rounded-lg border cursor-pointer ${url === char.profileImages?.main ? 'border-green-500' : 'border-white/10 hover:border-white/20'}`}
+                                onClick={() => setPreviewImage(url)} />
+                              {url === char.profileImages?.main && <div className="absolute top-0.5 right-0.5 w-3.5 h-3.5 bg-green-500 rounded-full flex items-center justify-center"><CheckIcon className="w-2 h-2 text-white" /></div>}
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                ) : char.imageUrls.length > 0 ? (
                   <div className="flex gap-3 flex-wrap">
                     {char.imageUrls.map((url, i) => {
                       const isSel = sel?.has(url);
@@ -840,6 +1011,17 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
                         </div>
                       );
                     })}
+                  </div>
+                ) : null}
+                {/* 档案生成状态 */}
+                {char.profileStatus && char.profileStatus !== 'idle' && char.profileStatus !== 'done' && (
+                  <div className="flex items-center gap-2 mt-2">
+                    <div className="w-3 h-3 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-xs text-green-400">
+                      {char.profileStatus === 'main_generating' && '生成主图候选...'}
+                      {char.profileStatus === 'main_scoring' && 'AI评分选择最佳主图...'}
+                      {char.profileStatus === 'detail_generating' && '生成多角度细节图...'}
+                    </span>
                   </div>
                 )}
               </div>
@@ -947,7 +1129,7 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
         {batchGenerating && <ProgressBar label={t('drama.batchInProgress')} detail={batchProgress} color="green" />}
 
         {/* 集列表 */}
-        <div className="space-y-3">
+        <div className="space-y-4">
           {project.episodes.map(ep => (
             <EpisodeCard key={ep.number} ep={ep} project={project}
               editingEpisodes={editingEpisodes} setEditingEpisodes={setEditingEpisodes}
@@ -1078,10 +1260,27 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
                       </div>
                     )}
                     <div className="mt-2 text-gray-300 truncate">{loc.newName}</div>
+                    {loc.spatialRelation && (
+                      <div className="text-[10px] text-gray-600 truncate">📍 {loc.spatialRelation}</div>
+                    )}
+                    {loc.variants && loc.variants.length > 0 && (
+                      <div className="text-[10px] text-gray-600 truncate">🔄 {loc.variants.map((v: { label: string }) => v.label).join('、')}</div>
+                    )}
                   </div>
                 );
               })}
             </div>
+            {/* 空间结构树 */}
+            {project.novel.spatialMap?.tree && (
+              <details className="mt-4 border-t border-white/5 pt-3">
+                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-400">
+                  🗺️ 空间结构
+                </summary>
+                <pre className="text-xs text-gray-600 mt-2 whitespace-pre-wrap font-mono leading-relaxed">
+                  {project.novel.spatialMap.tree}
+                </pre>
+              </details>
+            )}
           </div>
         )}
 
@@ -1166,118 +1365,246 @@ interface EpisodeCardProps {
 }
 
 function EpisodeCard({ ep, project, editingEpisodes, setEditingEpisodes, optimizingEp, regenRefEp, regenShotsEp, onOptimize, onRegenRef, onRegenShots, onSaveEpisode, onPreview, t }: EpisodeCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [expandedShot, setExpandedShot] = useState<number | null>(null);
+  const [showScript, setShowScript] = useState(false);
+
+  const statusBorder = ep.videoStatus === 'done' ? 'border-green-500/30' :
+    ep.videoStatus === 'generating' ? 'border-yellow-500/30' :
+    ep.videoStatus === 'error' ? 'border-red-500/30' : 'border-white/5';
+
+  const totalDuration = ep.shots?.length ? ep.shots[ep.shots.length - 1]?.endTime || 0 : 0;
+
   return (
-    <details className={`bg-[#111] rounded-lg border text-xs ${
-      ep.videoStatus === 'done' ? 'border-green-700/50' :
-      ep.videoStatus === 'generating' ? 'border-yellow-700/50' :
-      ep.videoStatus === 'error' ? 'border-red-700/50' : 'border-white/5'
-    }`}>
-      <summary className="p-2.5 flex items-center gap-2 cursor-pointer hover:bg-white/5 transition-colors">
-        <div className="flex-shrink-0 w-5 h-5 flex items-center justify-center">
+    <div className={`bg-[#161616] rounded-2xl border transition-all ${statusBorder}`}>
+      {/* 集头部 */}
+      <div className="flex items-center gap-3 px-5 py-4 cursor-pointer hover:bg-white/[0.02] transition-colors rounded-t-2xl"
+        onClick={() => setExpanded(!expanded)}>
+        {/* 状态指示 */}
+        <div className="flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center bg-[#0e0e0e]">
           {ep.videoStatus === 'done' && <CheckIcon className="w-4 h-4 text-green-400" />}
-          {ep.videoStatus === 'generating' && <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />}
-          {ep.videoStatus === 'error' && <span className="text-red-400">✗</span>}
-          {(!ep.videoStatus || ep.videoStatus === 'pending') && <span className="text-gray-600">○</span>}
+          {ep.videoStatus === 'generating' && <div className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />}
+          {ep.videoStatus === 'error' && <span className="text-red-400 text-sm">✗</span>}
+          {(!ep.videoStatus || ep.videoStatus === 'pending') && <span className="text-gray-600 text-sm">○</span>}
         </div>
-        <span className="text-green-400 flex-shrink-0">E{String(ep.number).padStart(2, '0')}</span>
-        <span className="text-gray-300 truncate flex-1">{ep.title}</span>
-        <span className="text-gray-600 flex-shrink-0">[{ep.act}]</span>
-        {ep.score != null && (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0 font-medium ${
-            ep.score >= 8 ? 'bg-green-900/50 text-green-400' :
-            ep.score >= 6 ? 'bg-yellow-900/50 text-yellow-400' :
-            'bg-red-900/50 text-red-400'
-          }`}>{ep.score}分</span>
-        )}
-        <button onClick={(e) => { e.stopPropagation(); onOptimize(); }} disabled={optimizingEp[ep.number]}
-          className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/50 hover:bg-green-500/50 text-green-300 flex-shrink-0 transition-colors disabled:opacity-50" title={t('drama.optimizeSingle')}>
-          {optimizingEp[ep.number] ? <div className="w-3 h-3 border border-green-400 border-t-transparent rounded-full animate-spin" /> : '✦'}
-        </button>
-        {ep.videoStatus === 'done' && ep.videoUrl && (
-          <a href={`/api/video-proxy?url=${encodeURIComponent(ep.videoUrl)}`} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-            className="text-green-400 hover:text-green-300 flex-shrink-0 underline">{t('drama.watchVideo')}</a>
-        )}
-        {ep.videoStatus === 'error' && ep.videoError && (
-          <span className="text-red-400 truncate max-w-[120px]" title={ep.videoError}>{ep.videoError.substring(0, 20)}...</span>
-        )}
-      </summary>
-      <div className="px-2.5 pb-2.5 border-t border-white/5">
-        {/* 参考图 */}
-        <div className="flex items-center gap-1.5 mt-2 mb-1.5 flex-wrap">
-          {ep.refImageUrls?.map((url, ri) => (
-            <img key={ri} src={url} alt={`ref ${ri + 1}`} loading="lazy"
-              className="w-16 h-10 object-cover rounded border border-white/10 cursor-pointer hover:border-cyan-500 transition-colors"
-              onClick={() => onPreview(url)} />
-          ))}
-          {ep.refImageUrls && ep.refImageUrls.length > 0 && <span className="text-[9px] text-cyan-600 self-center ml-1">{t('drama.refImages')}</span>}
-          <button onClick={() => onRegenRef()} disabled={regenRefEp[ep.number]}
-            className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-700/40 hover:bg-cyan-600/50 text-cyan-300 transition-colors disabled:opacity-50 ml-auto flex-shrink-0">
-            {regenRefEp[ep.number] ? <div className="w-3 h-3 border border-cyan-400 border-t-transparent rounded-full animate-spin inline-block" /> : '🔄 ' + t('drama.regenRefImages')}
+        {/* 集号+标题 */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-green-400 font-semibold text-sm">E{String(ep.number).padStart(2, '0')}</span>
+            <span className="text-white font-medium text-sm truncate">{ep.title}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs text-gray-600">{ep.act}</span>
+            {ep.shots?.length > 0 && (
+              <span className="text-xs text-gray-600">· {ep.shots.length} 个分镜 · {totalDuration}s</span>
+            )}
+          </div>
+        </div>
+        {/* 右侧操作 */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {ep.score != null && (
+            <span className={`text-xs px-2.5 py-1 rounded-lg font-medium ${
+              ep.score >= 8 ? 'bg-green-900/40 text-green-400' :
+              ep.score >= 6 ? 'bg-yellow-900/40 text-yellow-400' :
+              'bg-red-900/40 text-red-400'
+            }`}>{ep.score}分</span>
+          )}
+          <button onClick={(e) => { e.stopPropagation(); onOptimize(); }} disabled={optimizingEp[ep.number]}
+            className="px-3 py-1.5 rounded-lg bg-green-600/20 hover:bg-green-600/30 text-green-400 text-xs font-medium transition-colors disabled:opacity-50"
+            title={t('drama.optimizeSingle')}>
+            {optimizingEp[ep.number] ? <div className="w-3.5 h-3.5 border-2 border-green-400 border-t-transparent rounded-full animate-spin" /> : '✦ 优化'}
           </button>
+          {ep.videoStatus === 'done' && ep.videoUrl && (
+            <a href={`/api/video-proxy?url=${encodeURIComponent(ep.videoUrl)}`} target="_blank" rel="noopener noreferrer"
+              onClick={e => e.stopPropagation()}
+              className="px-3 py-1.5 rounded-lg bg-green-600/20 text-green-400 hover:bg-green-600/30 text-xs font-medium transition-colors">
+              ▶ {t('drama.watchVideo')}
+            </a>
+          )}
+          {ep.videoStatus === 'error' && ep.videoError && (
+            <span className="text-xs text-red-400 truncate max-w-[150px]" title={ep.videoError}>{ep.videoError.substring(0, 30)}...</span>
+          )}
+          <svg className={`w-4 h-4 text-gray-500 transition-transform ${expanded ? 'rotate-180' : ''}`}
+            viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M6 9l6 6 6-6" /></svg>
         </div>
-        {/* 分镜列表 */}
-        {ep.shots?.length > 0 && (
-          <div className="mt-2 space-y-1">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="text-[9px] text-gray-500">🎬 {ep.shots.length} 个分镜 · 共 {ep.shots[ep.shots.length - 1]?.endTime || 0}s</div>
-              <button onClick={() => onRegenShots()} disabled={regenShotsEp[ep.number]}
-                className="text-[9px] px-1.5 py-0.5 rounded bg-green-700/40 hover:bg-green-600/50 text-green-300 transition-colors disabled:opacity-50 ml-auto">
-                {regenShotsEp[ep.number] ? <div className="w-3 h-3 border border-green-400 border-t-transparent rounded-full animate-spin inline-block" /> : '🔄 ' + t('drama.regenShots')}
+      </div>
+
+      {/* 展开内容 */}
+      {expanded && (
+        <div className="px-5 pb-5 space-y-4 border-t border-white/5">
+          {/* 参考图区域 */}
+          {(ep.refImageUrls?.length || 0) > 0 && (
+            <div className="pt-4">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs text-cyan-400 font-medium">参考图</span>
+                <button onClick={() => onRegenRef()} disabled={regenRefEp[ep.number]}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/25 text-cyan-400 transition-colors disabled:opacity-50">
+                  {regenRefEp[ep.number] ? <div className="w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin inline-block" /> : '🔄 重新生成'}
+                </button>
+              </div>
+              <div className="flex gap-2.5 flex-wrap">
+                {ep.refImageUrls?.map((url, ri) => (
+                  <img key={ri} src={url} alt={`ref ${ri + 1}`} loading="lazy"
+                    className="w-24 h-16 object-cover rounded-xl border border-white/10 cursor-pointer hover:border-cyan-500/50 hover:scale-105 transition-all"
+                    onClick={() => onPreview(url)} />
+                ))}
+              </div>
+            </div>
+          )}
+          {!ep.refImageUrls?.length && (
+            <div className="pt-4 flex items-center justify-between">
+              <span className="text-xs text-gray-600">暂无参考图</span>
+              <button onClick={() => onRegenRef()} disabled={regenRefEp[ep.number]}
+                className="text-xs px-3 py-1.5 rounded-lg bg-cyan-600/15 hover:bg-cyan-600/25 text-cyan-400 transition-colors disabled:opacity-50">
+                {regenRefEp[ep.number] ? <div className="w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin inline-block" /> : '✦ 生成参考图'}
               </button>
             </div>
-            {ep.shots.map(shot => (
-              <details key={shot.index} className={`bg-[#0a0a0a] rounded border text-[10px] ${
-                shot.videoStatus === 'done' ? 'border-green-800/50' :
-                shot.videoStatus === 'generating' ? 'border-yellow-800/50' :
-                shot.videoStatus === 'error' ? 'border-red-800/50' : 'border-white/5'
-              }`}>
-                <summary className="flex items-center gap-1.5 p-1.5 cursor-pointer select-none hover:bg-white/5">
-                  <span className="text-green-400 font-mono">S{String(shot.index).padStart(2, '0')}</span>
-                  <span className="text-gray-500">{shot.startTime}-{shot.endTime}s</span>
-                  {shot.transition && <span className="text-yellow-600 text-[9px]">→ {shot.transition}</span>}
-                  {shot.videoStatus === 'done' && <span className="text-green-400 text-[9px]">✓</span>}
-                  {shot.videoStatus === 'generating' && <div className="w-2 h-2 border border-yellow-400 border-t-transparent rounded-full animate-spin" />}
-                  {shot.videoStatus === 'error' && <span className="text-red-400 text-[9px]">✗</span>}
-                  <span className="text-gray-500 ml-auto truncate max-w-[120px]">{shot.prompt.split('\n')[0]}</span>
-                </summary>
-                <div className="px-2 pb-2 space-y-1">
-                  {shot.characterRefs?.length > 0 && (
-                    <div className="flex items-center gap-1 flex-wrap">
-                      <span className="text-gray-500">{t('drama.shotCharacters')}:</span>
-                      {shot.characterRefs.map(cid => {
-                        const char = project.novel?.characters?.find(c => c.id === cid);
-                        return <span key={cid} className="px-1 py-0.5 rounded bg-blue-900/40 text-blue-300 text-[9px]">{char?.newName || cid}</span>;
-                      })}
-                    </div>
-                  )}
-                  {shot.locationRefs?.length > 0 && (
-                    <div className="flex items-center gap-1 flex-wrap">
-                      <span className="text-gray-500">{t('drama.shotLocations')}:</span>
-                      {shot.locationRefs.map(lid => {
-                        const loc = project.novel?.locations?.find(l => l.id === lid);
-                        return <span key={lid} className="px-1 py-0.5 rounded bg-emerald-900/40 text-emerald-300 text-[9px]">{loc?.newName || lid}</span>;
-                      })}
-                    </div>
-                  )}
-                  <pre className="text-gray-400 whitespace-pre-wrap text-[9px] leading-relaxed mt-1 max-h-[200px] overflow-y-auto">{shot.prompt}</pre>
+          )}
+
+          {/* 分镜时间轴 */}
+          {ep.shots?.length > 0 && (
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-green-400 font-medium">🎬 分镜</span>
+                  <span className="text-[11px] text-gray-600">{ep.shots.length} 个 · {totalDuration}s</span>
                 </div>
-              </details>
-            ))}
+                <button onClick={() => onRegenShots()} disabled={regenShotsEp[ep.number]}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-green-600/15 hover:bg-green-600/25 text-green-400 transition-colors disabled:opacity-50">
+                  {regenShotsEp[ep.number] ? <div className="w-3.5 h-3.5 border-2 border-green-400 border-t-transparent rounded-full animate-spin inline-block" /> : '🔄 重新生成'}
+                </button>
+              </div>
+              {/* 时间轴分镜列表 */}
+              <div className="relative">
+                <div className="absolute left-[15px] top-0 bottom-0 w-px bg-white/[0.06]" />
+                <div className="space-y-2.5">
+                  {ep.shots.map((shot) => {
+                    const isExpanded = expandedShot === shot.index;
+                    const shotStatusColor = shot.videoStatus === 'done' ? 'bg-green-500' :
+                      shot.videoStatus === 'generating' ? 'bg-yellow-500' :
+                      shot.videoStatus === 'error' ? 'bg-red-500' : 'bg-gray-600';
+                    return (
+                      <div key={shot.index} className="relative pl-9">
+                        <div className={`absolute left-[11px] top-3.5 w-[9px] h-[9px] rounded-full border-2 border-[#161616] ${shotStatusColor} z-10`} />
+                        <div className={`bg-[#111] rounded-xl border transition-all ${
+                          isExpanded ? 'border-white/10' : 'border-white/[0.04] hover:border-white/10'
+                        }`}>
+                          {/* 分镜摘要行 */}
+                          <div className="flex items-center gap-2.5 px-3.5 py-2.5 cursor-pointer select-none"
+                            onClick={() => setExpandedShot(isExpanded ? null : shot.index)}>
+                            <span className="text-green-400 font-mono text-xs font-semibold flex-shrink-0">
+                              S{String(shot.index).padStart(2, '0')}
+                            </span>
+                            <span className="text-[11px] text-gray-500 flex-shrink-0 tabular-nums">
+                              {shot.startTime}s – {shot.endTime}s
+                            </span>
+                            {shot.transition && (
+                              <span className="text-[11px] px-2 py-0.5 rounded-md bg-yellow-900/20 text-yellow-500/80 flex-shrink-0">
+                                → {shot.transition}
+                              </span>
+                            )}
+                            {shot.videoStatus === 'done' && <span className="text-green-400 text-xs">✓</span>}
+                            {shot.videoStatus === 'generating' && <div className="w-3 h-3 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
+                            {shot.videoStatus === 'error' && <span className="text-red-400 text-xs">✗</span>}
+                            <span className="text-[11px] text-gray-600 ml-auto truncate max-w-[200px]">
+                              {shot.prompt.split('\n')[0]}
+                            </span>
+                            <svg className={`w-3.5 h-3.5 text-gray-600 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
+                              viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M6 9l6 6 6-6" /></svg>
+                          </div>
+                          {/* 分镜详情 */}
+                          {isExpanded && (
+                            <div className="px-3.5 pb-3.5 border-t border-white/5 space-y-3 pt-3">
+                              {/* 标签行：角色+场景 */}
+                              <div className="flex flex-wrap gap-1.5">
+                                {shot.characterRefs?.map(cid => {
+                                  const char = project.novel?.characters?.find(c => c.id === cid);
+                                  return (
+                                    <span key={cid} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-blue-900/25 text-blue-300 text-[11px]">
+                                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+                                      {char?.newName || cid}
+                                    </span>
+                                  );
+                                })}
+                                {shot.locationRefs?.map(lid => {
+                                  const loc = project.novel?.locations?.find(l => l.id === lid);
+                                  return (
+                                    <span key={lid} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-900/25 text-emerald-300 text-[11px]">
+                                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" /><circle cx="12" cy="10" r="3" /></svg>
+                                      {loc?.newName || lid}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                              {/* 结构化信息网格 */}
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {shot.cameraAngle && (
+                                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-[#0e0e0e]">
+                                    <span className="text-cyan-500 text-[11px] flex-shrink-0">🎥 镜头</span>
+                                    <span className="text-[11px] text-gray-300">{shot.cameraAngle}</span>
+                                  </div>
+                                )}
+                                {shot.action && (
+                                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-[#0e0e0e]">
+                                    <span className="text-gray-500 text-[11px] flex-shrink-0">🎬 动作</span>
+                                    <span className="text-[11px] text-gray-300">{shot.action}</span>
+                                  </div>
+                                )}
+                                {shot.dialogue && (
+                                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-[#0e0e0e]">
+                                    <span className="text-yellow-500 text-[11px] flex-shrink-0">💬 对白</span>
+                                    <span className="text-[11px] text-yellow-200/70">{shot.dialogue}</span>
+                                  </div>
+                                )}
+                                {shot.soundDesign && (
+                                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-[#0e0e0e]">
+                                    <span className="text-purple-400 text-[11px] flex-shrink-0">🔊 声音</span>
+                                    <span className="text-[11px] text-purple-300/70">{shot.soundDesign}</span>
+                                  </div>
+                                )}
+                              </div>
+                              {/* 完整提示词 */}
+                              <div className="bg-[#0e0e0e] rounded-lg p-3">
+                                <div className="text-[10px] text-gray-600 mb-1.5">完整提示词</div>
+                                <pre className="text-[11px] text-gray-400 whitespace-pre-wrap leading-relaxed max-h-[200px] overflow-y-auto custom-scrollbar">{shot.prompt}</pre>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 脚本编辑折叠 */}
+          <div>
+            <button onClick={() => setShowScript(!showScript)}
+              className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-300 transition-colors py-1">
+              <svg className={`w-3.5 h-3.5 transition-transform ${showScript ? 'rotate-180' : ''}`}
+                viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M6 9l6 6 6-6" /></svg>
+              {showScript ? '收起脚本' : '编辑脚本'}
+            </button>
+            {showScript && (
+              <div className="mt-2">
+                <textarea value={editingEpisodes[ep.number] ?? ep.prompt}
+                  onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
+                  className="w-full bg-[#0e0e0e] border border-white/10 rounded-xl px-4 py-3 text-xs text-gray-300 outline-none focus:border-green-500/30 min-h-[150px] resize-y font-mono leading-relaxed transition-colors" />
+                {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
+                  <div className="flex gap-2.5 mt-2.5">
+                    <button onClick={() => onSaveEpisode(ep.number, editingEpisodes[ep.number])}
+                      className="px-4 py-2 rounded-xl bg-green-600 hover:bg-green-500 text-white text-xs font-medium transition-colors">{t('common.save')}</button>
+                    <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
+                      className="px-4 py-2 rounded-xl bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white text-xs transition-colors">{t('common.cancel')}</button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        )}
-        {/* 脚本编辑 */}
-        <textarea value={editingEpisodes[ep.number] ?? ep.prompt}
-          onChange={(e) => setEditingEpisodes(prev => ({ ...prev, [ep.number]: e.target.value }))}
-          className="w-full bg-[#0a0a0a] border border-white/10 rounded-lg px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-green-500/50 mt-2 min-h-[120px] resize-y font-mono leading-relaxed" />
-        {editingEpisodes[ep.number] !== undefined && editingEpisodes[ep.number] !== ep.prompt && (
-          <div className="flex gap-2 mt-1.5">
-            <button onClick={() => onSaveEpisode(ep.number, editingEpisodes[ep.number])}
-              className="text-[10px] px-2 py-1 rounded bg-green-600 hover:bg-green-500 text-white transition-colors">{t('common.save')}</button>
-            <button onClick={() => setEditingEpisodes(prev => { const n = { ...prev }; delete n[ep.number]; return n; })}
-              className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300 transition-colors">{t('common.cancel')}</button>
-          </div>
-        )}
-      </div>
-    </details>
+        </div>
+      )}
+    </div>
   );
 }

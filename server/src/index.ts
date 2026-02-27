@@ -17,14 +17,16 @@ import { loadWords, checkText, sanitizeText, addManualWords, removeWord, getWord
 import {
   createProject, getProject, updateProject, listProjects, removeProject,
   analyzeNovel, transformCopyright, generateScript, confirmCharacter,
-  updateCharacterImages, updateLocationImage, getProjectLogs, batchGenerateVideos, optimizeScripts,
+  getProjectLogs, batchGenerateVideos, optimizeScripts,
   batchGenerateRefImages, refreshVisualPrompts, refreshTitleAndSummary, updateCharacterRefImage, optimizeSingleEpisode,
-  generateEpisodeRefImages, regenerateEpisodeShots, getProjectImageSubDir,
+  generateEpisodeRefImages, regenerateEpisodeShots, getProjectImageSubDir, updateCharacterFields, updateLocationFields,
+  repairProjectImages,
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
-import { generateImage, generateCharacterImages, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, getLocalImagePath, httpsDownload } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB } from './db-service.js';
-import { getLLMConfig, updateLLMConfig } from './llm-service.js';
+import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB } from './db-service.js';
+import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig } from './llm-service.js';
+import { autoSelectBestImage } from './vision-validator.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -327,6 +329,19 @@ app.post('/api/llm-config', (req, res) => {
   res.json({ success: true });
 });
 
+// Vision LLM 配置（AI 图片审查）
+app.get('/api/llm-config/vision', (_req, res) => {
+  const config = getVisionLLMConfig();
+  res.json({ ...config, apiKey: config.apiKey ? '***' : '', configured: hasVisionConfig() });
+});
+
+app.post('/api/llm-config/vision', (req, res) => {
+  const { provider, apiKey, apiUrl, model, maxTokens, temperature } = req.body;
+  updateVisionLLMConfig({ provider, apiKey, apiUrl, model, maxTokens, temperature });
+  saveVisionConfigToDB({ provider, apiKey, apiUrl, model, maxTokens, temperature });
+  res.json({ success: true });
+});
+
 // POST /api/llm-test - 测试 LLM 连接
 app.post('/api/llm-test', async (_req, res) => {
   const { chatCompletion } = await import('./llm-service.js');
@@ -446,7 +461,7 @@ app.post('/api/drama/:id/refresh-summary', async (req, res) => {
   res.json({ success: true, project });
 });
 
-// POST /api/drama/:id/generate-character-images - 生成角色图（异步+WebSocket进度）
+// POST /api/drama/:id/generate-character-images - 角色档案图生成（两阶段：主图候选→AI评分→多角度细节）
 app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: '项目不存在' });
@@ -460,48 +475,114 @@ app.post('/api/drama/:id/generate-character-images', async (req, res) => {
   const taskId = `charimg_${req.params.id}_${characterId}`;
   res.json({ taskId, characterId });
 
-  // 后台异步生成，通过 WebSocket 推送进度
-  generateCharacterImages(character.newName, character.description, project.style, authToken, character.visualPrompt,
-    (done, total) => {
-      const progressTask: TaskInfo = {
-        id: taskId, status: 'processing', startTime: Date.now(), result: null, error: null,
-        progress: JSON.stringify({ done, total, characterId }),
-      };
-      wsManager.broadcast(taskId, progressTask);
-    },
-    character.refImageUrl,
-  ).then(async (images) => {
-    // 下载图片到本地，存本地路径
-    const localUrls: string[] = [];
-    for (const img of images) {
+  // 辅助：下载图片到本地（带重试）
+  const downloadWithRetry = async (imageUrl: string, prefix: string): Promise<string | null> => {
+    const subDir = getProjectImageSubDir(project, 'characters', character.newName);
+    try {
+      const filename = await downloadImageToLocal(imageUrl, authToken, prefix, subDir);
+      return `/api/images/${filename}`;
+    } catch (err) {
+      console.log(`[image-gen] 下载失败: ${(err as Error).message}，重试...`);
       try {
-        const filename = await downloadImageToLocal(img.imageUrl, authToken, `char_${characterId}`, getProjectImageSubDir(project, 'characters', character.newName));
-        localUrls.push(`/api/images/${filename}`);
-      } catch (err) {
-        console.log(`[image-gen] 下载角色图到本地失败: ${(err as Error).message}，重试一次...`);
-        // 重试一次
-        try {
-          await new Promise(r => setTimeout(r, 2000));
-          const filename = await downloadImageToLocal(img.imageUrl, authToken, `char_${characterId}`, getProjectImageSubDir(project, 'characters', character.newName));
-          localUrls.push(`/api/images/${filename}`);
-        } catch (err2) {
-          console.log(`[image-gen] 重试仍失败: ${(err2 as Error).message}`);
+        await new Promise(r => setTimeout(r, 2000));
+        const filename = await downloadImageToLocal(imageUrl, authToken, prefix, subDir);
+        return `/api/images/${filename}`;
+      } catch { return null; }
+    }
+  };
+
+  // 辅助：广播进度
+  const broadcast = (status: string, progress: Record<string, unknown>) => {
+    wsManager.broadcast(taskId, {
+      id: taskId, status, startTime: Date.now(), result: null, error: null,
+      progress: JSON.stringify({ characterId, ...progress }),
+    } as TaskInfo);
+  };
+
+  (async () => {
+    const projectId = req.params.id;
+    // === 阶段1：生成全身主图候选（1次调用，即梦返回4张） ===
+    broadcast('processing', { phase: 'main', done: 0, total: 5, msg: '生成主图候选...' });
+    updateCharacterFields(projectId, characterId, { profileStatus: 'main_generating' });
+
+    const mainImages = await generateCharacterMainImages(
+      character.newName, character.description, project.style, authToken,
+      character.visualPrompt, character.refImageUrl,
+    );
+
+    // 下载主图候选到本地
+    const mainLocalUrls: string[] = [];
+    for (const img of mainImages) {
+      const url = await downloadWithRetry(img.imageUrl, `char_${characterId}_main`);
+      if (url) mainLocalUrls.push(url);
+    }
+    if (mainLocalUrls.length === 0) throw new Error('主图候选全部下载失败');
+
+    // 更新候选图到 imageUrls（兼容旧版展示）
+    updateCharacterFields(projectId, characterId, { imageUrls: mainLocalUrls });
+    broadcast('processing', { phase: 'scoring', done: 1, total: 5, msg: 'AI评分选择最佳主图...' });
+
+    // === AI评分选最佳主图 ===
+    updateCharacterFields(projectId, characterId, { profileStatus: 'main_scoring' });
+
+    let bestMainUrl = mainLocalUrls[0]; // 默认第一张
+    try {
+      const { bestUrl, scores } = await autoSelectBestImage(
+        'character', character.newName, character.description, character.visualPrompt || '', mainLocalUrls,
+      );
+      bestMainUrl = bestUrl;
+      console.log(`[vision] 主图评分完成: ${bestUrl} (${scores[0]?.score || 'N/A'}分)`);
+    } catch (err) {
+      console.log(`[vision] 主图评分失败，使用第一张: ${(err as Error).message}`);
+    }
+
+    // 设置主图到 profileImages，将最佳主图排到第一位
+    const profileImages: Record<string, string> = { main: bestMainUrl };
+    const sortedUrls = [bestMainUrl, ...mainLocalUrls.filter(u => u !== bestMainUrl)];
+    updateCharacterFields(projectId, characterId, { imageUrls: sortedUrls, profileImages });
+
+    // === 阶段2：基于主图描述生成多角度/细节图 ===
+    updateCharacterFields(projectId, characterId, { profileStatus: 'detail_generating' });
+
+    const detailTypes: ProfileImageType[] = ['front', 'side', 'back', 'costume'];
+    const detailResults = await generateCharacterDetailImages(
+      character.newName, character.description, project.style, authToken,
+      character.visualPrompt, detailTypes,
+      (done, total) => {
+        broadcast('processing', { phase: 'detail', done: done + 2, total: total + 2, msg: `生成${['正面', '侧面', '背面', '服装'][done - 1] || '细节'}图...` });
+      },
+    );
+
+    // 下载细节图并更新 profileImages
+    for (const detail of detailResults) {
+      if (detail.images.length > 0) {
+        const url = await downloadWithRetry(detail.images[0].imageUrl, `char_${characterId}_${detail.type}`);
+        if (url) {
+          profileImages[detail.type] = url;
         }
       }
     }
-    if (localUrls.length === 0) throw new Error('所有角色图下载到本地失败');
-    updateCharacterImages(req.params.id, characterId, localUrls);
-    const doneTask: TaskInfo = {
-      id: taskId, status: 'done', startTime: Date.now(), result: null, error: null,
-      progress: JSON.stringify({ done: 3, total: 3, characterId, imageUrls: localUrls }),
-    };
-    wsManager.broadcast(taskId, doneTask);
-  }).catch((err: Error) => {
-    const errTask: TaskInfo = {
+
+    // 最终更新：标记完成并确认
+    updateCharacterFields(projectId, characterId, {
+      profileImages, profileStatus: 'done', confirmed: true,
+    });
+
+    // 检查是否所有主角/配角都已确认（需要读取最新数据）
+    const freshProject = getProject(projectId);
+    if (freshProject) {
+      const mainChars = freshProject.novel.characters.filter((c: CharacterInfo) => c.role !== 'minor');
+      const allConfirmed = mainChars.every((c: CharacterInfo) => c.confirmed);
+      if (allConfirmed) updateProject(projectId, { status: 'scripting' });
+    }
+
+    broadcast('done', { phase: 'done', done: 5, total: 5, imageUrls: sortedUrls, profileImages });
+  })().catch((err: Error) => {
+    updateCharacterFields(req.params.id, characterId, { profileStatus: 'idle' });
+    wsManager.broadcast(taskId, {
       id: taskId, status: 'error', startTime: Date.now(), result: null, error: err.message,
       progress: JSON.stringify({ characterId }),
-    };
-    wsManager.broadcast(taskId, errTask);
+    } as TaskInfo);
   });
 });
 
@@ -539,9 +620,7 @@ app.post('/api/drama/:id/confirm-location-image', (req, res) => {
   if (!loc) return res.status(404).json({ error: '场景不存在' });
 
   const allUrls = loc.imageUrls || [];
-  loc.imageUrl = selectedImageUrl;
-  loc.imageUrls = undefined;
-  updateProject(req.params.id, { novel: project.novel });
+  updateLocationFields(req.params.id, locationId, { imageUrl: selectedImageUrl, imageUrls: undefined });
 
   // 删除未选中的本地图片
   for (const url of allUrls) {
@@ -551,6 +630,12 @@ app.post('/api/drama/:id/confirm-location-image', (req, res) => {
   }
 
   res.json({ success: true, locationId });
+});
+
+// POST /api/drama/:id/repair-images - 从磁盘扫描恢复丢失的图片关联
+app.post('/api/drama/:id/repair-images', (req, res) => {
+  const result = repairProjectImages(req.params.id);
+  res.json(result);
 });
 
 // POST /api/drama/:id/upload-char-ref-image - 上传角色参考图
@@ -615,11 +700,12 @@ app.post('/api/drama/:id/generate-location-image', async (req, res) => {
   const taskId = `locimg_${req.params.id}_${locationId}`;
   res.json({ taskId, locationId });
 
-  // 后台异步生成
-  const prompt = location.visualPrompt || `${project.style}, ${location.description}`;
+  // 后台异步生成（优先使用 baseVisualPrompt 保证场景一致性）
+  const prompt = location.baseVisualPrompt || location.visualPrompt || `${project.style}, ${location.description}`;
   generateImage(prompt, authToken, { width: 1280, height: 720, count: 4, style: project.style })
     .then(async (images) => {
       if (images.length > 0) {
+        const projectId = req.params.id;
         // 下载所有图片到本地
         const localUrls: string[] = [];
         for (let idx = 0; idx < images.length; idx++) {
@@ -638,19 +724,39 @@ app.post('/api/drama/:id/generate-location-image', async (req, res) => {
           }
         }
         if (localUrls.length === 0) throw new Error('所有场景图下载失败');
-        // 删除旧的本地图片
-        if (location.imageUrl && isLocalImageUrl(location.imageUrl)) {
-          deleteLocalImage(localUrlToFilename(location.imageUrl));
+
+        // 从 DB 读取最新数据来删除旧图片（避免用旧快照）
+        const freshProject = getProject(projectId);
+        const freshLoc = freshProject?.novel.locations.find((l: LocationInfo) => l.id === locationId);
+        if (freshLoc?.imageUrl && isLocalImageUrl(freshLoc.imageUrl)) {
+          deleteLocalImage(localUrlToFilename(freshLoc.imageUrl));
         }
-        if (location.imageUrls) {
-          for (const oldUrl of location.imageUrls) {
+        if (freshLoc?.imageUrls) {
+          for (const oldUrl of freshLoc.imageUrls) {
             if (isLocalImageUrl(oldUrl)) deleteLocalImage(localUrlToFilename(oldUrl));
           }
         }
-        // 保存候选图列表，不自动确认
-        location.imageUrls = localUrls;
-        location.imageUrl = undefined;
-        updateProject(req.params.id, { novel: project.novel });
+
+        // 自动评分选择最佳场景图
+        let bestUrl: string | undefined;
+        try {
+          console.log(`[vision] 开始自动评分场景 "${location.newName}" 的 ${localUrls.length} 张图片...`);
+          const result = await autoSelectBestImage(
+            'location', location.newName, location.description,
+            location.baseVisualPrompt || location.visualPrompt || '', localUrls,
+          );
+          bestUrl = result.bestUrl;
+          console.log(`[vision] 场景 "${location.newName}" 自动确认: ${bestUrl} (${result.scores[0]?.score || 'N/A'}分, ${result.scores[0]?.reason || ''})`);
+        } catch (err) {
+          console.log(`[vision] 场景自动评分失败，保留手动选择: ${(err as Error).message}`);
+        }
+
+        // 原子更新场景字段
+        updateLocationFields(projectId, locationId, {
+          imageUrls: localUrls,
+          imageUrl: bestUrl,
+        });
+
         const doneTask: TaskInfo = {
           id: taskId, status: 'done', startTime: Date.now(), result: null, error: null,
           progress: JSON.stringify({ locationId, imageUrls: localUrls }),
@@ -1032,6 +1138,20 @@ initDB().then(() => {
       temperature: savedLLM.temperature ? parseFloat(savedLLM.temperature) : undefined,
     });
     console.log(`[llm] 已从数据库恢复 LLM 配置: ${savedLLM.provider}/${savedLLM.model}`);
+  }
+
+  // 从 DB 恢复 Vision LLM 配置
+  const savedVision = loadVisionLLMConfigFromDB();
+  if (savedVision && savedVision.provider) {
+    updateVisionLLMConfig({
+      provider: savedVision.provider as 'deepseek' | 'openai' | 'gemini' | 'anthropic' | 'ollama' | 'custom',
+      apiKey: savedVision.apiKey,
+      apiUrl: savedVision.apiUrl,
+      model: savedVision.model,
+      maxTokens: savedVision.maxTokens ? parseInt(savedVision.maxTokens) : undefined,
+      temperature: savedVision.temperature ? parseFloat(savedVision.temperature) : undefined,
+    });
+    console.log(`[llm] 已从数据库恢复 Vision LLM 配置: ${savedVision.provider}/${savedVision.model}`);
   }
 
   server.listen(PORT, () => {
