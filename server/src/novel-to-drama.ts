@@ -2824,22 +2824,23 @@ export async function ensureLocalImages(
 
 // 收集角色参考图和场景图（已确认的角色图片 + 对应场景图）
 function collectReferenceImages(project: DramaProject, episode: EpisodeScript): string[] {
-  const urls: string[] = [];
+  const charUrls: string[] = [];
+  const locUrls: string[] = [];
 
   // 收集角色图（优先使用档案主图）
   for (const charId of (episode.characterRefs || [])) {
     const char = project.novel.characters.find(c => c.id === charId);
     if (char) {
       const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
-      if (mainUrl) urls.push(mainUrl);
+      if (mainUrl) charUrls.push(mainUrl);
     }
   }
   // 如果没有 characterRefs，取所有已确认主角的档案主图
-  if (urls.length === 0) {
+  if (charUrls.length === 0) {
     for (const char of project.novel.characters) {
       if (char.confirmed) {
         const mainUrl = char.profileImages?.main || (char.imageUrls.length > 0 ? char.imageUrls[0] : null);
-        if (mainUrl) urls.push(mainUrl);
+        if (mainUrl) charUrls.push(mainUrl);
       }
     }
   }
@@ -2847,13 +2848,23 @@ function collectReferenceImages(project: DramaProject, episode: EpisodeScript): 
   // 收集场景图
   for (const locId of (episode.locationRefs || [])) {
     const loc = project.novel.locations.find(l => l.id === locId);
-    if (loc?.imageUrl) urls.push(loc.imageUrl);
+    if (loc?.imageUrl) locUrls.push(loc.imageUrl);
   }
   // 如果没有 locationRefs，取所有有图的场景
   if (!(episode.locationRefs?.length)) {
     for (const loc of project.novel.locations) {
-      if (loc.imageUrl) urls.push(loc.imageUrl);
+      if (loc.imageUrl) locUrls.push(loc.imageUrl);
     }
+  }
+
+  // 优先保证场景图至少有1张，然后再添加角色图
+  // 策略：1张场景图 + 最多4张角色图，或者如果没有场景图则全部用角色图
+  const urls: string[] = [];
+  if (locUrls.length > 0) {
+    urls.push(locUrls[0]); // 至少1张场景图
+    urls.push(...charUrls.slice(0, 4)); // 最多4张角色图
+  } else {
+    urls.push(...charUrls.slice(0, 5)); // 没有场景图时，全部用角色图
   }
 
   return urls.slice(0, 5); // 最多5张
@@ -2909,6 +2920,13 @@ export async function batchGenerateVideos(
         const shot = shots[si];
         const shotLabel = `E${String(epNum).padStart(2, '0')}-S${String(shot.index).padStart(2, '0')}`;
         const shotDuration = shot.endTime - shot.startTime;
+
+        // 断点续传：跳过已完成的分镜
+        if (shot.videoStatus === 'done' && shot.videoUrl) {
+          console.log(`[batch] ${shotLabel} 已完成，跳过`);
+          prevShotVideoUrl = shot.videoUrl;
+          continue;
+        }
 
         shot.videoStatus = 'generating';
         updateProject(projectId, { episodes: project.episodes });

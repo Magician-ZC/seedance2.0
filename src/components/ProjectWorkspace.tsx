@@ -651,12 +651,12 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
     const relations = project.novel.spatialMap.relations || [];
     const locEpMap = getLocationEpisodeMap();
 
-    const layoutNodes = locations.map((l: Record<string, unknown>) => ({
-      id: l.id as string, parentId: l.parentId as string, name: (l.newName || l.originalName) as string, variants: l.variants as unknown[],
+    const layoutNodes = locations.map((l) => ({
+      id: l.id, parentId: l.parentId || '', name: l.newName || l.originalName, variants: l.variants || [],
     }));
     const { positions, svgWidth, svgHeight, nodeWidth: NW, nodeHeight: NH } = computeSpatialLayout(layoutNodes, relations);
 
-    const locById = new Map(locations.map((l: Record<string, unknown>) => [l.id as string, l]));
+    const locById = new Map(locations.map((l) => [l.id, l]));
     const colors = ['#22c55e', '#3b82f6', '#a855f7', '#f59e0b', '#ef4444', '#06b6d4'];
 
     return (
@@ -670,24 +670,24 @@ export default function ProjectWorkspace({ projectId, sessionId, onBack }: Proje
         <div className="overflow-auto custom-scrollbar max-h-[60vh]">
           <svg width={svgWidth} height={svgHeight}>
             {/* 父子连线 */}
-            {locations.map((loc: Record<string, unknown>) => {
+            {locations.map((loc) => {
               if (!loc.parentId) return null;
-              const p = positions.get(loc.parentId as string), c = positions.get(loc.id as string);
+              const p = positions.get(loc.parentId), c = positions.get(loc.id);
               if (!p || !c) return null;
               return <line key={`p-${loc.id}`} x1={p.x + NW / 2} y1={p.y + NH} x2={c.x + NW / 2} y2={c.y} stroke="#333" strokeWidth={1.5} strokeDasharray="4,3" />;
             })}
             {/* 相邻关系 */}
-            {relations.map((rel: Record<string, unknown>, i: number) => {
-              const f = positions.get(rel.from as string), t = positions.get(rel.to as string);
+            {relations.map((rel, i: number) => {
+              const f = positions.get(rel.from), t = positions.get(rel.to);
               if (!f || !t) return null;
               const fx = f.x + NW / 2, fy = f.y + NH / 2, tx = t.x + NW / 2, ty = t.y + NH / 2;
               const mx = (fx + tx) / 2, my = (fy + ty) / 2 - 10;
               return (
                 <g key={`r-${i}`}>
                   <path d={`M${fx},${fy} Q${mx},${my} ${tx},${ty}`} fill="none"
-                    stroke={(rel.bidirectionalView as boolean) ? '#22c55e44' : '#ffffff15'} strokeWidth={1}
-                    strokeDasharray={(rel.bidirectionalView as boolean) ? '' : '3,3'} />
-                  {rel.direction && <text x={mx} y={my - 4} textAnchor="middle" className="text-[8px] fill-gray-600">{rel.direction as string}</text>}
+                    stroke={rel.bidirectionalView ? '#22c55e44' : '#ffffff15'} strokeWidth={1}
+                    strokeDasharray={rel.bidirectionalView ? '' : '3,3'} />
+                  {rel.direction && <text x={mx} y={my - 4} textAnchor="middle" className="text-[8px] fill-gray-600">{rel.direction}</text>}
                 </g>
               );
             })}
