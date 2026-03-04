@@ -84,6 +84,10 @@ export default {
     llmTestOk: '连接成功',
     llmTestFail: '连接失败',
     llmSaved: '配置已保存',
+    llmExtraTitle: '并发配置池',
+    llmExtraHint: '配置多个 API Key，批量生成和创作工厂并发时自动轮询使用',
+    llmExtraAdd: '添加配置',
+    llmExtraEmpty: '未配置额外 API Key，并发请求将使用上方的主配置',
   },
   share: {
     title: '分享视频',

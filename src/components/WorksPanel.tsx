@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { getHistory, removeHistory, clearHistory, type HistoryRecord } from '../services/historyService';
 import VideoThumbnail from './VideoThumbnail';
 import Banner from './Banner';
-import { PlusIcon, CloseIcon, DownloadIcon, BookIcon, SparkleIcon, FilmIcon, TrashIcon } from './Icons';
+import { PlusIcon, DownloadIcon, BookIcon, SparkleIcon, FilmIcon, TrashIcon } from './Icons';
 
 interface WorksPanelProps {
   onNewProject: () => void;

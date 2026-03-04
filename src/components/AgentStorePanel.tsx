@@ -1,7 +1,7 @@
 // Agent仓库面板 - 展示从创作工厂导出的写作Agent
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, CheckIcon, UserIcon, SparkleIcon, TrashIcon } from './Icons';
+import { UserIcon, SparkleIcon, TrashIcon } from './Icons';
 
 interface AgentItem {
   id: string;
@@ -18,6 +18,7 @@ interface AgentItem {
 interface AgentDetail extends AgentItem {
   systemPrompt: string;
   styleDirective: string;
+  techniqueWeights: Record<string, number>;
   scoreHistory: number[];
   mutationLog: string[];
 }
@@ -143,6 +144,33 @@ export default function AgentStorePanel() {
                             </div>
                           )}
                         </div>
+
+                        {/* 风格指令 & 技巧参数 */}
+                        {detail.styleDirective && (
+                          <div>
+                            <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '风格指令' : 'Style Directive'}</p>
+                            <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5 text-xs text-gray-400 leading-relaxed whitespace-pre-wrap">
+                              {detail.styleDirective}
+                            </div>
+                          </div>
+                        )}
+
+                        {detail.techniqueWeights && Object.keys(detail.techniqueWeights).length > 0 && (
+                          <div>
+                            <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '技巧参数' : 'Technique Weights'}</p>
+                            <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5 grid grid-cols-2 gap-3">
+                              {Object.entries(detail.techniqueWeights).map(([key, val]) => (
+                                <div key={key} className="flex items-center gap-2">
+                                  <span className="text-[11px] text-gray-500 w-28 truncate font-mono">{key}</span>
+                                  <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                                    <div className="h-full bg-purple-500/60 rounded-full transition-all" style={{ width: `${(val as number) * 100}%` }} />
+                                  </div>
+                                  <span className="text-[11px] text-gray-400 font-mono w-8 text-right">{(val as number).toFixed(2)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         <div>
                           <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>

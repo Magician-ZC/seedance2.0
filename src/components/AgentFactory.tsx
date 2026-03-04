@@ -1,7 +1,7 @@
 // 创作工厂 - 进化式Agent选择系统 UI
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, SparkleIcon, UploadIcon, CheckIcon } from './Icons';
+import { CloseIcon, UploadIcon, CheckIcon } from './Icons';
 
 interface NovelDNA {
   title: string; genre: string; tone: string;
@@ -298,11 +298,37 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [existingProjects, setExistingProjects] = useState<Array<{ id: string; status: string; title: string; genre: string; chapters: number; agentCount: number; bestScore: number; updatedAt: number }>>([]);
 
-  // 组件挂载时检查未完成项目
+  // 模型选择 & NSFW
+  const [availableModels, setAvailableModels] = useState<Array<{ label: string; config: { provider: string; apiKey: string; apiUrl: string; model: string } }>>([]);
+  const [selectedModelIdx, setSelectedModelIdx] = useState<number>(-1);
+  const [globalNsfwEnabled, setGlobalNsfwEnabled] = useState(false);
+  const [projectNsfw, setProjectNsfw] = useState(false);
+
+  // 组件挂载时检查未完成项目 & 加载模型列表
   useEffect(() => {
     fetch('/api/factory/list').then(r => r.json()).then(data => {
       if (data?.projects?.length > 0) setExistingProjects(data.projects);
     }).catch(() => {});
+    // 加载可用模型 & NSFW 状态
+    Promise.all([fetch('/api/llm-config'), fetch('/api/llm-config/extra'), fetch('/api/nsfw')])
+      .then(async ([mainRes, extraRes, nsfwRes]) => {
+        const models: typeof availableModels = [];
+        if (mainRes.ok) {
+          const m = await mainRes.json();
+          if (m?.model) models.push({ label: `${m.provider}/${m.model} (主)`, config: { provider: m.provider, apiKey: '', apiUrl: m.apiUrl, model: m.model } });
+        }
+        if (extraRes.ok) {
+          const e = await extraRes.json();
+          (e?.configs || []).forEach((c: any, i: number) => {
+            if (c?.model) models.push({ label: `${c.provider}/${c.model} (${i + 1})`, config: { provider: c.provider, apiKey: '', apiUrl: c.apiUrl, model: c.model } });
+          });
+        }
+        setAvailableModels(models);
+        if (nsfwRes.ok) {
+          const n = await nsfwRes.json();
+          setGlobalNsfwEnabled(n?.enabled || false);
+        }
+      }).catch(() => {});
   }, []);
 
   const resumeProject = async (id: string) => {
@@ -384,7 +410,7 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
     if (novelText.trim().length < 500) { setError(isZh ? '小说内容至少500字' : 'Min 500 chars'); return; }
     const data = await apiCall('/api/factory/create', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ novelText, concurrency, agentsPerGeneration: agentsPerGen, topK }),
+      body: JSON.stringify({ novelText, concurrency, agentsPerGeneration: agentsPerGen, topK, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
     });
     if (data?.project) {
       setProject({ ...data.project, chapters: [], topAgents: [], evolutionHistory: [], totalAgents: 0 } as FactoryProject);
@@ -548,6 +574,42 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
                     </div>
                   ))}
                 </div>
+
+                {/* 模型选择 */}
+                {availableModels.length > 0 && (
+                  <div className="pt-4 border-t border-white/5">
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">{isZh ? '指定模型' : 'Fixed Model'}</label>
+                    <select value={selectedModelIdx} onChange={e => setSelectedModelIdx(Number(e.target.value))}
+                      className="w-full bg-[#0a0a0a] border border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-green-500/50 transition-all">
+                      <option value={-1}>{isZh ? '智能路由 (不同阶段自动选模型)' : 'Smart Routing (auto)'}</option>
+                      {availableModels.map((m, i) => (
+                        <option key={i} value={i}>{m.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-[10px] text-gray-600 mt-1.5">{isZh ? '不选则按生成/评估/优化阶段自动分配' : 'Auto-assign by task type if not set'}</p>
+                  </div>
+                )}
+
+                {/* 项目级 NSFW 开关 */}
+                {globalNsfwEnabled && (
+                  <div className="pt-4 border-t border-white/5">
+                    <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/20">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold text-red-400 uppercase tracking-wider">NSFW</span>
+                          <p className="text-[10px] text-gray-500 mt-1">{isZh ? '开启后生成的 Agent 将具备成人内容创作能力' : 'Agent will generate adult content'}</p>
+                        </div>
+                        <button onClick={() => setProjectNsfw(!projectNsfw)}
+                          className={`relative w-10 h-5 rounded-full transition-colors ${projectNsfw ? 'bg-red-500' : 'bg-white/10'}`}>
+                          <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${projectNsfw ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                      </div>
+                      {projectNsfw && (
+                        <p className="text-[10px] text-red-400/80 mt-2">⚠️ {isZh ? '已开启，Agent 将学习成人内容写作风格' : 'Enabled, agent will learn adult writing style'}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <button onClick={handleCreate} disabled={loading || novelText.length < 500}

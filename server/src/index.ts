@@ -25,8 +25,8 @@ import {
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, type AgentStoreRow } from './db-service.js';
-import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig } from './llm-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, type AgentStoreRow } from './db-service.js';
+import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
   createScreenplay, getScreenplay, updateScreenplay, listScreenplays, removeScreenplay,
@@ -413,6 +413,31 @@ app.post('/api/llm-config/vision', (req, res) => {
   updateVisionLLMConfig({ provider, apiKey, apiUrl, model, maxTokens, temperature });
   saveVisionConfigToDB({ provider, apiKey, apiUrl, model, maxTokens, temperature });
   res.json({ success: true });
+});
+
+// 额外 LLM 配置池（多 API Key 并发）
+app.get('/api/llm-config/extra', (_req, res) => {
+  const configs = getExtraConfigs().map(c => ({ ...c, apiKey: c.apiKey ? '***' : '' }));
+  res.json({ configs });
+});
+
+app.post('/api/llm-config/extra', (req, res) => {
+  const { configs } = req.body as { configs: LLMConfig[] };
+  if (!Array.isArray(configs)) return res.status(400).json({ error: '无效配置' });
+  setExtraConfigs(configs);
+  saveExtraConfigsToDB(configs.map(c => ({ ...c })));
+  res.json({ success: true });
+});
+
+// NSFW 模式开关
+app.get('/api/nsfw', (_req, res) => {
+  res.json({ enabled: isNSFWEnabled() });
+});
+
+app.post('/api/nsfw', (req, res) => {
+  const { enabled } = req.body;
+  setNSFWEnabled(!!enabled);
+  res.json({ success: true, enabled: isNSFWEnabled() });
 });
 
 // POST /api/llm-test - 测试 LLM 连接
@@ -1195,15 +1220,18 @@ app.get('/api/screenplay/genres', (_req, res) => {
 
 // POST /api/screenplay/create - 创建剧本项目
 app.post('/api/screenplay/create', (req, res) => {
-  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel } = req.body;
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw } = req.body;
   if (!genres?.length || !audience || !tone || !totalEpisodes) {
     return res.status(400).json({ error: '缺少必要参数' });
   }
+  // nsfw 由项目级配置控制，全局开关在设置中管理
   const result = createScreenplay({
     genres, audience, tone, endingType: endingType || 'HE',
     totalEpisodes, language: language || 'zh-CN', mode: mode || 'domestic', customPrompt,
     agentId: agentId || undefined,
     referenceNovel: referenceNovel || undefined,
+    fixedModel: fixedModel || undefined,
+    nsfw: nsfw || false,
   });
   if ('error' in result) return res.status(400).json({ error: result.error });
   res.json({ project: result });
@@ -1431,12 +1459,18 @@ app.post('/api/factory/create', upload.single('novel'), (req, res) => {
   if (!novelText || novelText.trim().length < 500) {
     return res.status(400).json({ error: '小说内容过短（至少500字）' });
   }
-  const { concurrency, agentsPerGeneration, topK } = req.body || {};
+  const { concurrency, agentsPerGeneration, topK, fixedModel, nsfw } = req.body || {};
   const project = createFactory(novelText, {
     concurrency: concurrency ? parseInt(concurrency) : undefined,
     agentsPerGeneration: agentsPerGeneration ? parseInt(agentsPerGeneration) : undefined,
     topK: topK ? parseInt(topK) : undefined,
   });
+  // 项目级锁定模型
+  if (fixedModel?.apiKey) {
+    project.fixedModel = fixedModel;
+  }
+  // 项目级 NSFW
+  if (nsfw) project.nsfw = true;
   res.json({ project: { id: project.id, status: project.status, createdAt: project.createdAt } });
 });
 
@@ -1634,7 +1668,9 @@ app.get('/api/agents/:id', (req, res) => {
   res.json({
     id: agent.id, name: agent.name, genre: agent.genre, tone: agent.tone,
     description: agent.description, systemPrompt: agent.system_prompt,
-    styleDirective: agent.style_directive, score: agent.score,
+    styleDirective: agent.style_directive,
+    techniqueWeights: JSON.parse(agent.technique_weights || '{}'),
+    score: agent.score,
     generation: agent.generation, sourceNovel: agent.source_novel,
     scoreHistory: JSON.parse(agent.score_history || '[]'),
     mutationLog: JSON.parse(agent.mutation_log || '[]'),
@@ -1709,6 +1745,20 @@ initDB().then(() => {
       temperature: savedVision.temperature ? parseFloat(savedVision.temperature) : undefined,
     });
     console.log(`[llm] 已从数据库恢复 Vision LLM 配置: ${savedVision.provider}/${savedVision.model}`);
+  }
+
+  // 从 DB 恢复额外 LLM 配置池
+  const savedExtra = loadExtraLLMConfigsFromDB();
+  if (savedExtra.length > 0) {
+    setExtraConfigs(savedExtra.map(c => ({
+      provider: (c.provider || 'custom') as LLMConfig['provider'],
+      apiKey: c.apiKey || '',
+      apiUrl: c.apiUrl || '',
+      model: c.model || '',
+      maxTokens: c.maxTokens ? parseInt(c.maxTokens) : 8000,
+      temperature: c.temperature ? parseFloat(c.temperature) : 0.7,
+    })));
+    console.log(`[llm] 已从数据库恢复 ${savedExtra.length} 个额外 LLM 配置`);
   }
 
   // 从 DB 恢复创作工厂项目

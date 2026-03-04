@@ -93,6 +93,108 @@ export function updateVisionLLMConfig(config: Partial<LLMConfig>): void {
 }
 export function hasVisionConfig(): boolean { return visionConfig !== null; }
 
+// 额外 LLM 配置池（用于并发时轮询不同 API Key）
+let extraConfigs: LLMConfig[] = [];
+let _roundRobinIndex = 0;
+
+export function getExtraConfigs(): LLMConfig[] { return extraConfigs; }
+export function setExtraConfigs(configs: LLMConfig[]): void { extraConfigs = configs; _roundRobinIndex = 0; }
+
+/** 轮询获取下一个可用配置（主配置 + 额外配置池） */
+export function getNextConfig(): LLMConfig {
+  const pool = [currentConfig, ...extraConfigs.filter(c => c.apiKey)];
+  if (pool.length <= 1) return currentConfig;
+  const config = pool[_roundRobinIndex % pool.length];
+  _roundRobinIndex++;
+  return config;
+}
+
+// ============================================================
+// 智能模型路由 - 按任务类型选择不同模型，迭代中优先高分模型
+// ============================================================
+
+export type TaskType = 'generate' | 'evaluate' | 'optimize' | 'parse';
+
+// 模型评分记录：key = "provider/model", value = 累计平均分
+const modelScores = new Map<string, { total: number; count: number }>();
+
+function configKey(c: LLMConfig): string { return `${c.provider}/${c.model}`; }
+
+/** 记录模型在某次任务中的表现分数 */
+export function recordModelScore(config: LLMConfig, score: number): void {
+  const key = configKey(config);
+  const prev = modelScores.get(key) || { total: 0, count: 0 };
+  modelScores.set(key, { total: prev.total + score, count: prev.count + 1 });
+}
+
+/** 获取模型平均分 */
+export function getModelAvgScore(config: LLMConfig): number {
+  const rec = modelScores.get(configKey(config));
+  return rec && rec.count > 0 ? rec.total / rec.count : 0;
+}
+
+// NSFW 模式
+let _nsfwEnabled = false;
+export function isNSFWEnabled(): boolean { return _nsfwEnabled; }
+export function setNSFWEnabled(enabled: boolean): void { _nsfwEnabled = enabled; }
+
+// NSFW 提示词增强
+const NSFW_SKILL_PROMPT = `## 成人内容创作指令
+你现在处于成人创作模式。在此模式下：
+- 可以包含露骨的性描写、情色场景和成人内容
+- 描写要细腻、有文学性，避免粗俗低级的表达
+- 注重情感铺垫和氛围营造，不要突兀地插入色情内容
+- 角色的欲望和情感要合理，符合人物性格和剧情发展
+- 善用暗示、隐喻和感官描写，营造张力
+- 性场景要服务于剧情和角色关系的推进
+- 保持叙事节奏，色情内容与剧情内容比例适当`;
+
+/** 获取 NSFW 增强后的系统提示词（需全局+项目级双重开启） */
+export function enhancePromptForNSFW(systemPrompt: string, projectNsfw?: boolean): string {
+  if (!_nsfwEnabled || !projectNsfw) return systemPrompt;
+  return `${NSFW_SKILL_PROMPT}\n\n${systemPrompt}`;
+}
+
+/**
+ * 智能选择模型配置
+ * - 如果提供了 fixedConfig，始终使用它（项目级锁定）
+ * - NSFW 模式下（全局+项目级双开）优先使用 grok 配置
+ * - evaluate 任务优先使用评分最高的模型
+ * - generate/optimize 按轮询分配
+ */
+export function selectConfig(taskType: TaskType, fixedConfig?: LLMConfig | null, projectNsfw?: boolean): LLMConfig {
+  // 项目级锁定模型
+  if (fixedConfig?.apiKey) return fixedConfig;
+
+  const pool = [currentConfig, ...extraConfigs.filter(c => c.apiKey)];
+
+  // NSFW 模式：全局+项目级双开时优先找 grok 配置
+  if (_nsfwEnabled && projectNsfw) {
+    const grokConfig = pool.find(c =>
+      c.model.toLowerCase().includes('grok') ||
+      c.apiUrl.toLowerCase().includes('x.ai') ||
+      c.apiUrl.toLowerCase().includes('grok'),
+    );
+    if (grokConfig) return grokConfig;
+  }
+
+  if (pool.length <= 1) return currentConfig;
+
+  // evaluate 任务：优先使用历史评分最高的模型
+  if (taskType === 'evaluate') {
+    const scored = pool
+      .map(c => ({ config: c, avg: getModelAvgScore(c) }))
+      .filter(x => x.avg > 0)
+      .sort((a, b) => b.avg - a.avg);
+    if (scored.length > 0) return scored[0].config;
+  }
+
+  // generate / optimize / parse：轮询
+  const config = pool[_roundRobinIndex % pool.length];
+  _roundRobinIndex++;
+  return config;
+}
+
 // 构建请求头
 export function buildHeaders(config: LLMConfig): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };

@@ -1,7 +1,7 @@
 // 剧本创建服务 - 基于 short-drama 方法论的完整剧本创作管道
 // 流程: 选题定位 → 创作方案 → 角色开发 → 分集目录 → 分集剧本 → 自检 → 导出
 import crypto from 'crypto';
-import { chatCompletionJSON, chatCompletion, getLLMConfig } from './llm-service.js';
+import { chatCompletionJSON, chatCompletion, getLLMConfig, getNextConfig, selectConfig, enhancePromptForNSFW, type LLMConfig, type TaskType } from './llm-service.js';
 import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProjectById, listScreenplayProjects as dbListScreenplayProjects, deleteScreenplayProject as dbDeleteScreenplayProject } from './db-service.js';
 
 // ============================================================
@@ -19,6 +19,8 @@ export interface ScreenplayConfig {
   customPrompt?: string;       // 用户自定义创作要求
   agentId?: string;            // 可选：使用Agent仓库中的写作Agent
   referenceNovel?: string;     // 可选：参考小说内容（用于二创）
+  fixedModel?: LLMConfig | null; // 项目级锁定模型
+  nsfw?: boolean;              // NSFW 模式
 }
 
 export interface CreativePlan {
@@ -209,10 +211,23 @@ export function removeScreenplay(id: string): void {
 // LLM 调用辅助
 // ============================================================
 
-async function llmJSON<T>(projectId: string, step: string, system: string, user: string): Promise<{ success: boolean; data?: T; error?: string }> {
-  const config = getLLMConfig();
+/** 获取项目的固定模型配置 */
+function getProjectFixedModel(projectId: string): LLMConfig | null | undefined {
+  const p = screenplayProjects.get(projectId);
+  return p?.config?.fixedModel;
+}
+
+/** 获取项目的 NSFW 开关 */
+function getProjectNsfw(projectId: string): boolean {
+  return screenplayProjects.get(projectId)?.config?.nsfw || false;
+}
+
+async function llmJSON<T>(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; data?: T; error?: string }> {
+  const nsfw = getProjectNsfw(projectId);
+  const config = selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
+  const finalSystem = enhancePromptForNSFW(system, nsfw);
   const startTime = Date.now();
-  const result = await chatCompletionJSON<T>(system, user, { timeoutMs: 600000 });
+  const result = await chatCompletionJSON<T>(finalSystem, user, { config, timeoutMs: 600000 });
   logLLMCall({
     projectId, step, provider: config.provider, model: config.model,
     durationMs: Date.now() - startTime, success: result.success, error: result.error,
@@ -220,10 +235,12 @@ async function llmJSON<T>(projectId: string, step: string, system: string, user:
   return result;
 }
 
-async function llmText(projectId: string, step: string, system: string, user: string): Promise<{ success: boolean; content?: string; error?: string }> {
-  const config = getLLMConfig();
+async function llmText(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; content?: string; error?: string }> {
+  const nsfw = getProjectNsfw(projectId);
+  const config = selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
+  const finalSystem = enhancePromptForNSFW(system, nsfw);
   const startTime = Date.now();
-  const result = await chatCompletion(system, user, { timeoutMs: 600000 });
+  const result = await chatCompletion(finalSystem, user, { config, timeoutMs: 600000 });
   logLLMCall({
     projectId, step, provider: config.provider, model: config.model,
     durationMs: Date.now() - startTime, success: result.success, error: result.error,
@@ -749,7 +766,7 @@ ${episodeJSON}
 - 每集的评分应该有明显差异，反映各集的实际质量差距
 - issues 中至少包含2条具体可操作的改进建议`;
 
-  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, reviewUserPrompt);
+  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, reviewUserPrompt, 'evaluate');
   if (!reviewResult.success || !reviewResult.data) return { success: false, error: reviewResult.error || '自检失败' };
 
   const review = reviewResult.data;
@@ -812,7 +829,7 @@ ${issuesList}
   "mark": "${episode.mark || ''}"
 }`;
 
-  const rewriteResult = await llmJSON<EpisodeScript>(projectId, `rewrite_${episodeNumber}`, rewriteSystemPrompt, rewriteUserPrompt);
+  const rewriteResult = await llmJSON<EpisodeScript>(projectId, `rewrite_${episodeNumber}`, rewriteSystemPrompt, rewriteUserPrompt, 'optimize');
   if (rewriteResult.success && rewriteResult.data) {
     const rewritten = rewriteResult.data;
     rewritten.number = episodeNumber;
@@ -822,7 +839,7 @@ ${issuesList}
 
     // 对改写后的剧本重新评分
     const reReviewResult = await llmJSON<ReviewScore>(projectId, `re_review_${episodeNumber}`, reviewSystemPrompt,
-      reviewUserPrompt.replace(episodeJSON, JSON.stringify(rewritten, null, 2)));
+      reviewUserPrompt.replace(episodeJSON, JSON.stringify(rewritten, null, 2)), 'evaluate');
 
     if (reReviewResult.success && reReviewResult.data) {
       const newReview = reReviewResult.data;
@@ -837,7 +854,7 @@ ${issuesList}
         // 分数下降 → 再尝试一次改写
         console.log(`[screenplay] 第${episodeNumber}集优化: ${review.total} → ${newReview.total} ↓ 分数下降，重试...`);
         const retryResult = await llmJSON<EpisodeScript>(projectId, `rewrite_retry_${episodeNumber}`, rewriteSystemPrompt,
-          rewriteUserPrompt + `\n\n⚠️ 上一次改写后评分从 ${review.total} 降到了 ${newReview.total}，请更谨慎地修改，只改必须改的问题，保留原剧本的优点。`);
+          rewriteUserPrompt + `\n\n⚠️ 上一次改写后评分从 ${review.total} 降到了 ${newReview.total}，请更谨慎地修改，只改必须改的问题，保留原剧本的优点。`, 'optimize');
         if (retryResult.success && retryResult.data) {
           const retryEp = retryResult.data;
           retryEp.number = episodeNumber;
@@ -846,7 +863,7 @@ ${issuesList}
           retryEp.mark = episode.mark;
           // 重试版本再评分
           const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
-            reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)));
+            reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)), 'evaluate');
           if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
             const episodes = project.episodes.map(e => e.number === episodeNumber ? retryEp : e);
             const reviews = { ...project.reviews, [episodeNumber]: retryReview.data };

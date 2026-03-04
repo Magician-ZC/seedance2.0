@@ -84,6 +84,10 @@ export default {
     llmTestOk: 'Connection successful',
     llmTestFail: 'Connection failed',
     llmSaved: 'Config saved',
+    llmExtraTitle: 'Concurrent Config Pool',
+    llmExtraHint: 'Add multiple API keys for round-robin usage during batch generation and factory evolution',
+    llmExtraAdd: 'Add Config',
+    llmExtraEmpty: 'No extra API keys configured. Concurrent requests will use the primary config above.',
   },
   share: {
     title: 'Share Video',

@@ -17,8 +17,7 @@ import AgentStorePanel from './components/AgentStorePanel';
 import './i18n';
 
 export default function App() {
-  const { i18n } = useTranslation();
-  const isZh = i18n.language?.startsWith('zh');
+  useTranslation(); // 初始化 i18n
 
   const [activeTab, setActiveTab] = useState<NavTab>('works');
   const [sessionId, setSessionId] = useState('');

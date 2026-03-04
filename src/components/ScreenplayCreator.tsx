@@ -1,7 +1,7 @@
 // 剧本创建向导组件 - 基于 short-drama 方法论的多步骤创作流程
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, ArrowLeftIcon, SparkleIcon, CheckIcon, DownloadIcon, BookIcon, UserIcon, FilmIcon } from './Icons';
+import { CloseIcon, ArrowLeftIcon, SparkleIcon, CheckIcon, DownloadIcon, BookIcon, FilmIcon } from './Icons';
 
 // ============================================================
 // 类型定义（与后端对齐）
@@ -123,7 +123,6 @@ const ENDINGS = [
   { value: 'OE', label: '开放式 (OE)' },
   { value: '反转式', label: '反转式' },
 ];
-const EPISODE_PRESETS = [50, 60, 80, 100];
 
 // ============================================================
 // WebSocket 进度监听 Hook
@@ -211,28 +210,34 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   const [audience, setAudience] = useState<'男频' | '女频' | '全年龄'>('女频');
   const [tone, setTone] = useState('爽燃');
   const [endingType, setEndingType] = useState('HE');
-  const [totalEpisodes, setTotalEpisodes] = useState(60);
+  const [totalEpisodes, _setTotalEpisodes] = useState(60);
   const [customPrompt, setCustomPrompt] = useState('');
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [agents, setAgents] = useState<Array<{ id: string; name: string; genre: string; tone: string; score: number; sourceNovel: string }>>([]);
   const [referenceNovel, setReferenceNovel] = useState('');
   const novelFileRef = useRef<HTMLInputElement>(null);
 
+  // 模型选择 & NSFW
+  const [availableModels, setAvailableModels] = useState<Array<{ label: string; config: { provider: string; apiKey: string; apiUrl: string; model: string } }>>([]);
+  const [selectedModelIdx, setSelectedModelIdx] = useState<number>(-1); // -1 = 智能路由
+  const [globalNsfwEnabled, setGlobalNsfwEnabled] = useState(false); // 全局总开关（设置里开启）
+  const [projectNsfw, setProjectNsfw] = useState(false); // 项目级开关（需二次确认）
+
   // 分集撰写
   const [writingRange, setWritingRange] = useState({ start: 1, end: 5 });
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
-  const [reviewingEp, setReviewingEp] = useState<number | null>(null);
+  const [_reviewingEp, setReviewingEp] = useState<number | null>(null);
   const [exportContent, setExportContent] = useState('');
   const [existingProjects, setExistingProjects] = useState<ScreenplayProject[]>([]);
   // 一键优化
   const [reviewAllTaskId, setReviewAllTaskId] = useState<string | null>(null);
-  const [reviewAllCurrentEp, setReviewAllCurrentEp] = useState<number[]>([]);
+  const [_reviewAllCurrentEp, setReviewAllCurrentEp] = useState<number[]>([]);
   const [reviewAllProgress, setReviewAllProgress] = useState('');
-  const [reviewAllError, setReviewAllError] = useState('');
+  const [_reviewAllError, setReviewAllError] = useState('');
   const [reviewAllDone, setReviewAllDone] = useState(0);
   const [reviewAllTotal, setReviewAllTotal] = useState(0);
   // 记录优化前的旧分数 { [epNumber]: oldScore }
-  const [preReviewScores, setPreReviewScores] = useState<Record<number, number>>({});
+  const [_preReviewScores, setPreReviewScores] = useState<Record<number, number>>({});
   // 审核详情弹窗
   const [reviewDetailEp, setReviewDetailEp] = useState<number | null>(null);
 
@@ -270,6 +275,26 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     fetch('/api/screenplay/list').then(r => r.json()).then(d => {
       if (d?.projects?.length > 0) setExistingProjects(d.projects.filter((p: ScreenplayProject) => p.status !== 'exported'));
     }).catch(() => {});
+    // 加载可用模型列表 & NSFW 状态
+    Promise.all([fetch('/api/llm-config'), fetch('/api/llm-config/extra'), fetch('/api/nsfw')])
+      .then(async ([mainRes, extraRes, nsfwRes]) => {
+        const models: typeof availableModels = [];
+        if (mainRes.ok) {
+          const m = await mainRes.json();
+          if (m?.model) models.push({ label: `${m.provider}/${m.model} (主)`, config: { provider: m.provider, apiKey: '', apiUrl: m.apiUrl, model: m.model } });
+        }
+        if (extraRes.ok) {
+          const e = await extraRes.json();
+          (e?.configs || []).forEach((c: any, i: number) => {
+            if (c?.model) models.push({ label: `${c.provider}/${c.model} (${i + 1})`, config: { provider: c.provider, apiKey: '', apiUrl: c.apiUrl, model: c.model } });
+          });
+        }
+        setAvailableModels(models);
+        if (nsfwRes.ok) {
+          const n = await nsfwRes.json();
+          setGlobalNsfwEnabled(n?.enabled || false);
+        }
+      }).catch(() => {});
     // 如果有指定恢复的项目ID，直接加载
     if (resumeProjectId) {
       fetch(`/api/screenplay/${resumeProjectId}`).then(r => r.json()).then(d => {
@@ -342,7 +367,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     try {
       const res = await fetch('/api/screenplay/create', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined }),
+        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
       });
       const data = await res.json();
       if (data?.project) { setProject(normalizeProject(data.project)); setStep('plan'); }
@@ -740,6 +765,21 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                           </select>
                         </div>
                       )}
+
+                      {/* 模型选择 */}
+                      {availableModels.length > 0 && (
+                        <div>
+                          <span className="text-xs text-gray-500 block mb-2">{isZh ? '指定模型' : 'Fixed Model'}</span>
+                          <select value={selectedModelIdx} onChange={e => setSelectedModelIdx(Number(e.target.value))}
+                            className="w-full px-3 py-2.5 rounded-xl bg-[#0a0a0a] border border-white/10 text-gray-300 text-xs outline-none focus:border-green-500/50">
+                            <option value={-1}>{isZh ? '智能路由 (不同阶段自动选模型)' : 'Smart Routing (auto)'}</option>
+                            {availableModels.map((m, i) => (
+                              <option key={i} value={i}>{m.label}</option>
+                            ))}
+                          </select>
+                          <p className="text-[10px] text-gray-600 mt-1">{isZh ? '不选则按生成/评估/优化阶段自动分配' : 'Auto-assign by task type if not set'}</p>
+                        </div>
+                      )}
                     </div>
                   </section>
 
@@ -749,6 +789,25 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                       placeholder={isZh ? '例如：主角是一个退伍军人，故事发生在深圳...' : 'e.g. The protagonist is a veteran...'}
                       className="w-full h-32 px-4 py-3 rounded-2xl bg-[#161616] border border-white/5 text-gray-300 text-sm resize-none placeholder-gray-600 focus:border-green-500/30 focus:ring-1 focus:ring-green-500/10 outline-none transition-all" />
                   </section>
+
+                  {/* 项目级 NSFW 开关 - 仅全局开启时显示 */}
+                  {globalNsfwEnabled && (
+                    <section className="p-4 rounded-2xl bg-red-500/5 border border-red-500/20">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-bold text-red-400 uppercase tracking-wider">NSFW</span>
+                          <p className="text-[10px] text-gray-500 mt-1">{isZh ? '开启后本剧本将生成成人内容' : 'Enable adult content for this project'}</p>
+                        </div>
+                        <button onClick={() => setProjectNsfw(!projectNsfw)}
+                          className={`relative w-10 h-5 rounded-full transition-colors ${projectNsfw ? 'bg-red-500' : 'bg-white/10'}`}>
+                          <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${projectNsfw ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                        </button>
+                      </div>
+                      {projectNsfw && (
+                        <p className="text-[10px] text-red-400/80 mt-2">⚠️ {isZh ? '已开启，创作内容将包含成人描写' : 'Enabled, content will include adult material'}</p>
+                      )}
+                    </section>
+                  )}
                 </div>
               </div>
 

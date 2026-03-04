@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, EyeIcon, EyeOffIcon, CheckIcon, GearIcon, SparkleIcon } from './Icons';
+import { CloseIcon, EyeIcon, EyeOffIcon, CheckIcon, GearIcon, SparkleIcon, PlusIcon, TrashIcon } from './Icons';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -46,6 +46,9 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const [showSessionId, setShowSessionId] = useState(false);
   const [maxConcurrentChars, setMaxConcurrentChars] = useState(() => loadSettings().maxConcurrentChars);
 
+  // NSFW 模式
+  const [nsfwEnabled, setNsfwEnabled] = useState(false);
+
   // 主 LLM 配置（解析小说 + 改造剧本）
   const [llmConfig, setLlmConfig] = useState<LLMConfig>({
     provider: 'deepseek', apiKey: '', apiUrl: 'https://api.deepseek.com',
@@ -66,14 +69,21 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const [visionSaving, setVisionSaving] = useState(false);
   const [visionSaveMsg, setVisionSaveMsg] = useState('');
 
+  // 额外 LLM 配置池（多 API Key 并发）
+  const [extraConfigs, setExtraConfigs] = useState<LLMConfig[]>([]);
+  const [extraSaving, setExtraSaving] = useState(false);
+  const [extraSaveMsg, setExtraSaveMsg] = useState('');
+
   useEffect(() => { setLocalSessionId(sessionId); }, [sessionId]);
 
   // 加载 LLM 配置
   const loadLLMConfig = useCallback(async () => {
     try {
-      const [res, vRes] = await Promise.all([
+      const [res, vRes, eRes, nRes] = await Promise.all([
         fetch('/api/llm-config'),
         fetch('/api/llm-config/vision'),
+        fetch('/api/llm-config/extra'),
+        fetch('/api/nsfw'),
       ]);
       if (res.ok) {
         const data = await res.json();
@@ -85,6 +95,16 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
         if (vData.configured) {
           setVisionConfig(prev => ({ ...prev, ...vData, apiKey: vData.apiKey === '***' ? prev.apiKey : (vData.apiKey || '') }));
         }
+      }
+      if (eRes.ok) {
+        const eData = await eRes.json();
+        if (eData.configs?.length > 0) {
+          setExtraConfigs(eData.configs.map((c: LLMConfig) => ({ ...c, apiKey: c.apiKey === '***' ? '' : (c.apiKey || '') })));
+        }
+      }
+      if (nRes.ok) {
+        const nData = await nRes.json();
+        setNsfwEnabled(nData.enabled || false);
       }
     } catch { /* ignore */ }
   }, []);
@@ -192,6 +212,42 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
   const inputClass = 'w-full bg-[#111] border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-all';
   const labelClass = 'block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2';
 
+  // 额外配置池操作
+  const addExtraConfig = () => {
+    setExtraConfigs(prev => [...prev, {
+      provider: 'custom', apiKey: '', apiUrl: '', model: '', maxTokens: 8000, temperature: 0.7,
+    }]);
+  };
+  const removeExtraConfig = (idx: number) => {
+    setExtraConfigs(prev => prev.filter((_, i) => i !== idx));
+  };
+  const updateExtraConfig = (idx: number, field: string, value: string | number) => {
+    setExtraConfigs(prev => prev.map((c, i) => i === idx ? { ...c, [field]: value } : c));
+  };
+  const handleExtraProviderChange = (idx: number, provider: string) => {
+    const p = LLM_PROVIDERS.find(x => x.value === provider);
+    setExtraConfigs(prev => prev.map((c, i) => i === idx ? {
+      ...c, provider, apiUrl: p?.defaultUrl || c.apiUrl, model: p?.defaultModel || c.model,
+    } : c));
+  };
+  const handleSaveExtra = async () => {
+    setExtraSaving(true);
+    try {
+      const res = await fetch('/api/llm-config/extra', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configs: extraConfigs }),
+      });
+      if (!res.ok) throw new Error('保存失败');
+      setExtraSaveMsg(t('settings.llmSaved'));
+      setTimeout(() => setExtraSaveMsg(''), 2000);
+    } catch (err) {
+      setExtraSaveMsg((err as Error).message);
+    } finally {
+      setExtraSaving(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
       <div className="absolute inset-0 bg-black/80 backdrop-blur-sm transition-opacity" onClick={onClose} />
@@ -251,6 +307,29 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
                     min={1} max={5} className={inputClass} />
                   <p className="text-xs text-gray-500 mt-2">{t('drama.maxConcurrentCharsHint')}</p>
                 </div>
+              </div>
+
+              {/* NSFW 模式 */}
+              <div className="bg-[#111]/50 rounded-2xl p-5 border border-white/5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className={labelClass}>NSFW 模式</label>
+                    <p className="text-xs text-gray-500 mt-1">开启后优先使用 Grok 模型，提示词增加成人内容创作指令</p>
+                  </div>
+                  <button onClick={async () => {
+                    const next = !nsfwEnabled;
+                    setNsfwEnabled(next);
+                    await fetch('/api/nsfw', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: next }) });
+                  }}
+                    className={`relative w-12 h-6 rounded-full transition-colors ${nsfwEnabled ? 'bg-red-500' : 'bg-white/10'}`}>
+                    <div className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${nsfwEnabled ? 'translate-x-6' : 'translate-x-0.5'}`} />
+                  </button>
+                </div>
+                {nsfwEnabled && (
+                  <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-400">
+                    ⚠️ 已开启成人内容模式，生成内容可能包含露骨描写
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -415,6 +494,87 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
                     className="w-full py-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-bold transition-all shadow-lg shadow-cyan-900/20 disabled:opacity-50 disabled:shadow-none">
                     {visionSaving ? t('common.loading') : t('settings.llmSave')}
                   </button>
+                </div>
+              </section>
+
+              {/* Extra Config Pool Section */}
+              <section className="bg-[#111]/30 rounded-2xl border border-white/5 overflow-hidden">
+                <div className="px-5 py-4 border-b border-white/5 bg-[#111]/50 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-green-500/20 flex items-center justify-center">
+                      <PlusIcon className="w-4 h-4 text-green-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white">{t('settings.llmExtraTitle')}</h3>
+                      <p className="text-xs text-gray-500">{t('settings.llmExtraHint')}</p>
+                    </div>
+                  </div>
+                  {extraConfigs.length > 0 && (
+                    <span className="text-xs bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full border border-green-500/20">{extraConfigs.length}</span>
+                  )}
+                </div>
+
+                <div className="p-5 space-y-4">
+                  {extraConfigs.length === 0 && (
+                    <p className="text-xs text-gray-600 text-center py-3">{t('settings.llmExtraEmpty')}</p>
+                  )}
+
+                  {extraConfigs.map((ec, idx) => (
+                    <div key={idx} className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5 space-y-3 relative group">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-bold text-gray-400">#{idx + 1}</span>
+                        <button onClick={() => removeExtraConfig(idx)}
+                          className="p-1 rounded-lg text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+                          <TrashIcon className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className={labelClass}>{t('settings.llmProvider')}</label>
+                          <select value={ec.provider} onChange={(e) => handleExtraProviderChange(idx, e.target.value)} className={inputClass}>
+                            {LLM_PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <label className={labelClass}>API Key</label>
+                          <input type="password" value={ec.apiKey}
+                            onChange={(e) => updateExtraConfig(idx, 'apiKey', e.target.value)}
+                            placeholder="sk-..." className={`${inputClass} font-mono`} />
+                        </div>
+                        <div>
+                          <label className={labelClass}>API URL</label>
+                          <input type="text" value={ec.apiUrl}
+                            onChange={(e) => updateExtraConfig(idx, 'apiUrl', e.target.value)}
+                            placeholder="https://api.example.com" className={inputClass} />
+                        </div>
+                        <div>
+                          <label className={labelClass}>{t('settings.llmModel')}</label>
+                          <input type="text" value={ec.model}
+                            onChange={(e) => updateExtraConfig(idx, 'model', e.target.value)}
+                            placeholder="model-name" className={inputClass} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div className="flex gap-3 pt-1">
+                    <button onClick={addExtraConfig}
+                      className="flex-1 py-2.5 rounded-xl border border-dashed border-white/10 text-gray-500 hover:text-green-400 hover:border-green-500/30 text-xs font-medium transition-all flex items-center justify-center gap-1.5">
+                      <PlusIcon className="w-3.5 h-3.5" /> {t('settings.llmExtraAdd')}
+                    </button>
+                    {extraConfigs.length > 0 && (
+                      <button onClick={handleSaveExtra} disabled={extraSaving}
+                        className="px-6 py-2.5 rounded-xl bg-green-600 hover:bg-green-500 text-white text-xs font-bold transition-all disabled:opacity-50">
+                        {extraSaving ? t('common.loading') : t('settings.llmSave')}
+                      </button>
+                    )}
+                  </div>
+
+                  {extraSaveMsg && (
+                    <div className="px-4 py-2 rounded-xl text-xs bg-green-500/10 text-green-400 border border-green-500/20 flex items-center gap-2">
+                      <CheckIcon className="w-3.5 h-3.5" />{extraSaveMsg}
+                    </div>
+                  )}
                 </div>
               </section>
             </div>

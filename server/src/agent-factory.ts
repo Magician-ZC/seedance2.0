@@ -1,7 +1,7 @@
 // 创作工厂 - 进化式Agent选择系统
 // 复用 novel-to-drama 的小说解析 + screenplay-creator 的知识库
 import crypto from 'crypto';
-import { chatCompletionJSON, chatCompletion, getLLMConfig } from './llm-service.js';
+import { chatCompletionJSON, chatCompletion, getLLMConfig, getNextConfig, selectConfig, recordModelScore, enhancePromptForNSFW, type LLMConfig, type TaskType } from './llm-service.js';
 import { logLLMCall, insertFactoryProject, getFactoryProjectById, listFactoryProjects, deleteFactoryProject, type FactoryProjectRow } from './db-service.js';
 import { splitNovelIntoChapters, splitTextIntoChunks, type ParsedChapter } from './novel-to-drama.js';
 
@@ -109,6 +109,8 @@ export interface FactoryProject {
   concurrency: number;
   agentsPerGeneration: number;
   topK: number;
+  fixedModel?: LLMConfig | null; // 项目级锁定模型（不设则智能路由）
+  nsfw?: boolean; // 项目级 NSFW 开关（需全局也开启才生效）
   createdAt: number;
   updatedAt: number;
   error?: string;
@@ -238,22 +240,26 @@ function emitProgress(onProgress: ((msg: string) => void) | undefined, msg: stri
   onProgress?.(msg);
 }
 
-async function llmJSON<T>(projectId: string, step: string, system: string, user: string): Promise<{ success: boolean; data?: T; error?: string }> {
-  const config = getLLMConfig();
+async function llmJSON<T>(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; data?: T; error?: string }> {
+  const project = getFactory(projectId);
+  const config = selectConfig(taskType, project?.fixedModel, project?.nsfw);
+  const finalSystem = enhancePromptForNSFW(system, project?.nsfw);
   const startTime = Date.now();
-  console.log(`${LOG_PREFIX} [LLM-JSON] ${step} 开始调用 ${config.provider}/${config.model}`);
-  const result = await chatCompletionJSON<T>(system, user, { timeoutMs: 600000 });
+  console.log(`${LOG_PREFIX} [LLM-JSON] ${step} 开始调用 ${config.provider}/${config.model} (${taskType})`);
+  const result = await chatCompletionJSON<T>(finalSystem, user, { config, timeoutMs: 600000 });
   const dur = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`${LOG_PREFIX} [LLM-JSON] ${step} ${result.success ? '✅' : '❌'} (${dur}s)`);
   logLLMCall({ projectId, step, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
   return result;
 }
 
-async function llmText(projectId: string, step: string, system: string, user: string): Promise<{ success: boolean; content?: string; error?: string }> {
-  const config = getLLMConfig();
+async function llmText(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; content?: string; error?: string }> {
+  const project = getFactory(projectId);
+  const config = selectConfig(taskType, project?.fixedModel, project?.nsfw);
+  const finalSystem = enhancePromptForNSFW(system, project?.nsfw);
   const startTime = Date.now();
-  console.log(`${LOG_PREFIX} [LLM-Text] ${step} 开始调用 ${config.provider}/${config.model}`);
-  const result = await chatCompletion(system, user, { timeoutMs: 600000 });
+  console.log(`${LOG_PREFIX} [LLM-Text] ${step} 开始调用 ${config.provider}/${config.model} (${taskType})`);
+  const result = await chatCompletion(finalSystem, user, { config, timeoutMs: 600000 });
   const dur = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`${LOG_PREFIX} [LLM-Text] ${step} ${result.success ? '✅' : '❌'} (${dur}s, ${result.content?.length || 0} chars)`);
   logLLMCall({ projectId, step, provider: config.provider, model: config.model, durationMs: Date.now() - startTime, success: result.success, error: result.error });
@@ -367,7 +373,7 @@ export async function parseNovelDNA(
       }
 
       const result = await llmText(projectId, `parse_batch_${b}${retry > 0 ? `_retry${retry}` : ''}`, batchAnalysisSystem,
-        `以下是小说的第${b + 1}批采样（全书共${chapters.length}章）：\n\n${sampleText}\n\n请分析这些章节的写作特征，输出JSON。`);
+        `以下是小说的第${b + 1}批采样（全书共${chapters.length}章）：\n\n${sampleText}\n\n请分析这些章节的写作特征，输出JSON。`, 'parse');
 
       if (result.success && result.content) {
         batchResults.push(result.content);
@@ -421,7 +427,7 @@ ${batchResults.map((r, i) => `=== 第${i + 1}批（${batchIndices[i]?.map(idx =>
   "uniqueTraits": ["独特写作特征1", "独特写作特征2", ...]
 }`;
 
-  const finalResult = await llmJSON<NovelDNA>(projectId, 'parse_dna_merge', mergeSystem, mergeUser);
+  const finalResult = await llmJSON<NovelDNA>(projectId, 'parse_dna_merge', mergeSystem, mergeUser, 'parse');
   if (!finalResult.success || !finalResult.data) {
     emitProgress(onProgress, `❌ DNA汇总失败: ${finalResult.error || '未知错误'}`);
     updateFactory(projectId, { status: 'error', error: finalResult.error || 'DNA汇总失败' });
@@ -503,7 +509,7 @@ export async function runEvolutionRound(
   const writeResults = await runWithConcurrency(
     activeAgents.map((agent) => async () => {
       const userPrompt = buildStageWritingPrompt(project.novelDNA!, stage);
-      const result = await llmText(projectId, `evolve_s${stage.index}_${agent.id}`, agent.systemPrompt, userPrompt);
+      const result = await llmText(projectId, `evolve_s${stage.index}_${agent.id}`, agent.systemPrompt, userPrompt, 'generate');
       writeCompleted++;
       if (writeCompleted % 5 === 0 || writeCompleted === activeAgents.length) {
         emitProgress(onProgress, `✍️ 创作进度: ${writeCompleted}/${activeAgents.length}（${((Date.now() - writeStartTime) / 1000).toFixed(0)}s）`);
@@ -530,6 +536,13 @@ export async function runEvolutionRound(
   const evalStartTime = Date.now();
   const evalResults = await evaluateAgentsByStage(projectId, stage, activeAgents, project.novelDNA!, onProgress, project.concurrency);
   emitProgress(onProgress, `🏅 评分完成（${((Date.now() - evalStartTime) / 1000).toFixed(1)}s）`);
+
+  // 记录评分模型的表现（用平均分作为模型质量指标）
+  if (evalResults.length > 0) {
+    const avgTotal = evalResults.reduce((s, e) => s + e.total, 0) / evalResults.length;
+    const evalConfig = selectConfig('evaluate', project.fixedModel, project.nsfw);
+    recordModelScore(evalConfig, avgTotal);
+  }
 
   // 3. 排名 & 淘汰低分Agent
   evalResults.sort((a, b) => b.total - a.total);
@@ -1045,7 +1058,7 @@ JSON格式：
 }
 注意：total = 所有分数之和（满分60）`;
 
-      const result = await llmJSON<{ evaluations: EvalResult[] }>(projectId, `eval_s${stage.index}_b${batchIdx}`, evalSystemPrompt, userPrompt);
+      const result = await llmJSON<{ evaluations: EvalResult[] }>(projectId, `eval_s${stage.index}_b${batchIdx}`, evalSystemPrompt, userPrompt, 'evaluate');
       completedBatches++;
       onProgress?.(`🏅 评分进度: ${completedBatches}/${totalBatches} 批（并发${concurrency}${result.success ? '' : ' ⚠️失败'}）`);
 
@@ -1071,6 +1084,7 @@ async function analyzeElites(projectId: string, elites: WritingAgent[], dna: Nov
   const result = await llmText(projectId, 'analyze_elites',
     '你是AI训练专家，请分析高分Agent的共同特征和可优化方向。',
     `目标: ${dna.genre}/${dna.tone}/${dna.narrativeStyle}\n\n精英:\n${eliteInfo}\n\n请简要分析（200字内）`,
+    'optimize',
   );
   return result.content || '精英分析不可用';
 }

@@ -10,7 +10,7 @@ import { addHistory } from '../services/historyService';
 import VideoPlayer from './VideoPlayer';
 import PresetSelector from './PresetSelector';
 import ShareModal from './ShareModal';
-import { CloseIcon, PlusIcon, SparkleIcon, UploadIcon } from './Icons';
+import { CloseIcon, PlusIcon, SparkleIcon, CheckIcon } from './Icons';
 
 let nextId = 0;
 

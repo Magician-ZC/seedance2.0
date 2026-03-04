@@ -287,6 +287,43 @@ export function saveVisionLLMConfig(config: Record<string, unknown>): void {
   }
   saveDB();
 }
+// 额外 LLM 配置池（多 API Key 并发）
+export function saveExtraLLMConfigs(configs: Array<Record<string, unknown>>): void {
+  const d = getDB();
+  d.run(`CREATE TABLE IF NOT EXISTS llm_config (key TEXT PRIMARY KEY, value TEXT)`);
+  // 清除旧的 extra_ 配置
+  d.run("DELETE FROM llm_config WHERE key LIKE 'extra_%'");
+  for (let i = 0; i < configs.length; i++) {
+    for (const [key, val] of Object.entries(configs[i])) {
+      if (val === undefined || val === null) continue;
+      d.run('INSERT OR REPLACE INTO llm_config (key, value) VALUES (?, ?)', [`extra_${i}_${key}`, String(val)]);
+    }
+  }
+  saveDB();
+}
+
+export function loadExtraLLMConfigsFromDB(): Array<Record<string, string>> {
+  const d = getDB();
+  try {
+    const stmt = d.prepare("SELECT key, value FROM llm_config WHERE key LIKE 'extra_%'");
+    const map = new Map<number, Record<string, string>>();
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { key: string; value: string };
+      // key format: extra_0_provider, extra_1_apiKey, etc.
+      const parts = row.key.split('_');
+      const idx = parseInt(parts[1]);
+      const field = parts.slice(2).join('_');
+      if (!map.has(idx)) map.set(idx, {});
+      map.get(idx)![field] = row.value;
+    }
+    stmt.free();
+    return Array.from(map.entries()).sort((a, b) => a[0] - b[0]).map(([, v]) => v);
+  } catch {
+    return [];
+  }
+}
+
+
 
 export function loadVisionLLMConfigFromDB(): Record<string, string> | null {
   const d = getDB();

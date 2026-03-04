@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, PlusIcon, CheckIcon, ShieldIcon, TrashIcon } from './Icons';
+import { CloseIcon, PlusIcon, CheckIcon, ShieldIcon } from './Icons';
 
 interface WordsDetail {
   manual: string[];

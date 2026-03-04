@@ -16,7 +16,7 @@ interface MaterialItem {
 type MatFilter = 'all' | 'images' | 'videos';
 
 export default function GlobalMaterialsPanel() {
-  const { t, i18n } = useTranslation();
+  const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
   const [materials, setMaterials] = useState<MaterialItem[]>([]);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
