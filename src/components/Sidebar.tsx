@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 
-export type NavTab = 'works' | 'materials' | 'characters';
+export type NavTab = 'works' | 'materials' | 'characters' | 'agents';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -37,10 +37,23 @@ function UsersIcon({ className }: { className?: string }) {
   );
 }
 
+function BotIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <rect x="3" y="8" width="18" height="12" rx="2" />
+      <circle cx="9" cy="14" r="1.5" fill="currentColor" />
+      <circle cx="15" cy="14" r="1.5" fill="currentColor" />
+      <path d="M12 2v4" />
+      <path d="M8 8V6a4 4 0 0 1 8 0v2" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
   { key: 'works', icon: GridIcon, labelZh: '我的作品', labelEn: 'My Works' },
   { key: 'materials', icon: FolderIcon, labelZh: '素材', labelEn: 'Materials' },
   { key: 'characters', icon: UsersIcon, labelZh: '角色', labelEn: 'Characters' },
+  { key: 'agents', icon: BotIcon, labelZh: 'Agent仓库', labelEn: 'Agents' },
 ];
 
 export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {

@@ -55,6 +55,60 @@ export async function initDB(): Promise<void> {
     created_at INTEGER
   )`);
 
+  // 创作工厂项目表
+  db.run(`CREATE TABLE IF NOT EXISTS factory_projects (
+    id TEXT PRIMARY KEY,
+    status TEXT DEFAULT 'init',
+    novel_text TEXT DEFAULT '',
+    novel_dna TEXT,
+    chapters TEXT DEFAULT '[]',
+    stages TEXT DEFAULT '[]',
+    agents TEXT DEFAULT '[]',
+    current_chapter INTEGER DEFAULT 0,
+    current_generation INTEGER DEFAULT 0,
+    evolution_history TEXT DEFAULT '[]',
+    final_agent TEXT,
+    concurrency INTEGER DEFAULT 5,
+    agents_per_generation INTEGER DEFAULT 100,
+    top_k INTEGER DEFAULT 10,
+    created_at INTEGER,
+    updated_at INTEGER,
+    error TEXT
+  )`);
+
+  // 迁移：为旧数据库添加 stages 列
+  try { db.run(`ALTER TABLE factory_projects ADD COLUMN stages TEXT DEFAULT '[]'`); } catch { /* 列已存在则忽略 */ }
+
+  // Agent仓库表
+  db.run(`CREATE TABLE IF NOT EXISTS agent_store (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    genre TEXT DEFAULT '',
+    tone TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    system_prompt TEXT NOT NULL,
+    style_directive TEXT DEFAULT '',
+    technique_weights TEXT DEFAULT '{}',
+    source_novel TEXT DEFAULT '',
+    score REAL DEFAULT 0,
+    generation INTEGER DEFAULT 0,
+    score_history TEXT DEFAULT '[]',
+    mutation_log TEXT DEFAULT '[]',
+    factory_project_id TEXT,
+    created_at INTEGER,
+    updated_at INTEGER
+  )`);
+
+  // 剧本项目表
+  db.run(`CREATE TABLE IF NOT EXISTS screenplay_projects (
+    id TEXT PRIMARY KEY,
+    status TEXT DEFAULT 'init',
+    config TEXT DEFAULT '{}',
+    data TEXT DEFAULT '{}',
+    created_at INTEGER,
+    updated_at INTEGER
+  )`);
+
   saveDB();
 }
 
@@ -250,4 +304,189 @@ export function loadVisionLLMConfigFromDB(): Record<string, string> | null {
   } catch {
     return null;
   }
+}
+
+
+// ============================================================
+// 创作工厂项目持久化
+// ============================================================
+
+export interface FactoryProjectRow {
+  id: string;
+  status: string;
+  novel_text: string;
+  novel_dna: string | null;
+  chapters: string;
+  stages: string;
+  agents: string;
+  current_chapter: number;
+  current_generation: number;
+  evolution_history: string;
+  final_agent: string | null;
+  concurrency: number;
+  agents_per_generation: number;
+  top_k: number;
+  created_at: number;
+  updated_at: number;
+  error: string | null;
+}
+
+export function insertFactoryProject(row: FactoryProjectRow): void {
+  const d = getDB();
+  d.run(
+    `INSERT OR REPLACE INTO factory_projects (id, status, novel_text, novel_dna, chapters, stages, agents, current_chapter, current_generation, evolution_history, final_agent, concurrency, agents_per_generation, top_k, created_at, updated_at, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.status, row.novel_text, row.novel_dna, row.chapters, row.stages, row.agents,
+     row.current_chapter, row.current_generation, row.evolution_history, row.final_agent,
+     row.concurrency, row.agents_per_generation, row.top_k, row.created_at, row.updated_at, row.error],
+  );
+  saveDB();
+}
+
+export function getFactoryProjectById(id: string): FactoryProjectRow | null {
+  const d = getDB();
+  const stmt = d.prepare('SELECT * FROM factory_projects WHERE id = ?');
+  stmt.bind([id]);
+  if (stmt.step()) {
+    const row = stmt.getAsObject() as unknown as FactoryProjectRow;
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+export function listFactoryProjects(): FactoryProjectRow[] {
+  const d = getDB();
+  const results: FactoryProjectRow[] = [];
+  const stmt = d.prepare('SELECT * FROM factory_projects ORDER BY created_at DESC');
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as FactoryProjectRow);
+  }
+  stmt.free();
+  return results;
+}
+
+export function deleteFactoryProject(id: string): void {
+  const d = getDB();
+  d.run('DELETE FROM factory_projects WHERE id = ?', [id]);
+  saveDB();
+}
+
+// ============================================================
+// Agent 仓库
+// ============================================================
+
+export interface AgentStoreRow {
+  id: string;
+  name: string;
+  genre: string;
+  tone: string;
+  description: string;
+  system_prompt: string;
+  style_directive: string;
+  technique_weights: string;
+  source_novel: string;
+  score: number;
+  generation: number;
+  score_history: string;
+  mutation_log: string;
+  factory_project_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export function insertAgent(row: AgentStoreRow): void {
+  const d = getDB();
+  d.run(
+    `INSERT OR REPLACE INTO agent_store (id, name, genre, tone, description, system_prompt, style_directive, technique_weights, source_novel, score, generation, score_history, mutation_log, factory_project_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.name, row.genre, row.tone, row.description, row.system_prompt, row.style_directive,
+     row.technique_weights, row.source_novel, row.score, row.generation, row.score_history, row.mutation_log,
+     row.factory_project_id, row.created_at, row.updated_at],
+  );
+  saveDB();
+}
+
+export function listAgents(): AgentStoreRow[] {
+  const d = getDB();
+  const results: AgentStoreRow[] = [];
+  const stmt = d.prepare('SELECT * FROM agent_store ORDER BY created_at DESC');
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as AgentStoreRow);
+  }
+  stmt.free();
+  return results;
+}
+
+export function getAgentById(id: string): AgentStoreRow | null {
+  const d = getDB();
+  const stmt = d.prepare('SELECT * FROM agent_store WHERE id = ?');
+  stmt.bind([id]);
+  if (stmt.step()) {
+    const row = stmt.getAsObject() as unknown as AgentStoreRow;
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+export function deleteAgent(id: string): void {
+  const d = getDB();
+  d.run('DELETE FROM agent_store WHERE id = ?', [id]);
+  saveDB();
+}
+
+// ============================================================
+// 剧本项目持久化
+// ============================================================
+
+export interface ScreenplayProjectRow {
+  id: string;
+  status: string;
+  config: string;   // JSON
+  data: string;     // JSON (整个项目数据)
+  created_at: number;
+  updated_at: number;
+}
+
+export function upsertScreenplayProject(row: ScreenplayProjectRow): void {
+  const d = getDB();
+  d.run(
+    `INSERT OR REPLACE INTO screenplay_projects (id, status, config, data, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [row.id, row.status, row.config, row.data, row.created_at, row.updated_at],
+  );
+  saveDB();
+}
+
+export function getScreenplayProjectById(id: string): ScreenplayProjectRow | null {
+  const d = getDB();
+  const stmt = d.prepare('SELECT * FROM screenplay_projects WHERE id = ?');
+  stmt.bind([id]);
+  if (stmt.step()) {
+    const row = stmt.getAsObject() as unknown as ScreenplayProjectRow;
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+export function listScreenplayProjects(): ScreenplayProjectRow[] {
+  const d = getDB();
+  const results: ScreenplayProjectRow[] = [];
+  const stmt = d.prepare('SELECT * FROM screenplay_projects ORDER BY updated_at DESC');
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as ScreenplayProjectRow);
+  }
+  stmt.free();
+  return results;
+}
+
+export function deleteScreenplayProject(id: string): void {
+  const d = getDB();
+  d.run('DELETE FROM screenplay_projects WHERE id = ?', [id]);
+  saveDB();
 }

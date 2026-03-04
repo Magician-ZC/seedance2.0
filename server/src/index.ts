@@ -5,6 +5,7 @@ import cors from 'cors';
 import multer from 'multer';
 import path from 'path';
 import http from 'http';
+import os from 'os';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { generateSeedanceVideo } from './video-generator.js';
@@ -24,9 +25,20 @@ import {
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB } from './db-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, type AgentStoreRow } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
+import {
+  createScreenplay, getScreenplay, updateScreenplay, listScreenplays, removeScreenplay,
+  generateCreativePlan, generateCharacters, generateDirectory,
+  generateEpisode, generateEpisodeBatch, reviewEpisode, exportScreenplay, getGenreList,
+  loadScreenplayProjectsFromDB,
+} from './screenplay-creator.js';
+import {
+  createFactory, getFactory, updateFactory, listFactories, removeFactory,
+  parseNovelDNA, generateInitialAgents, runEvolutionRound, mutateAndBreed,
+  runFullEvolution, exportFinalAgent, requestStop, restoreFactories,
+} from './agent-factory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1172,6 +1184,416 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: err.message || '服务器内部错误' });
 });
 
+// ============================================================
+// 剧本创建 API
+// ============================================================
+
+// GET /api/screenplay/genres - 获取题材列表
+app.get('/api/screenplay/genres', (_req, res) => {
+  res.json({ genres: getGenreList() });
+});
+
+// POST /api/screenplay/create - 创建剧本项目
+app.post('/api/screenplay/create', (req, res) => {
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel } = req.body;
+  if (!genres?.length || !audience || !tone || !totalEpisodes) {
+    return res.status(400).json({ error: '缺少必要参数' });
+  }
+  const result = createScreenplay({
+    genres, audience, tone, endingType: endingType || 'HE',
+    totalEpisodes, language: language || 'zh-CN', mode: mode || 'domestic', customPrompt,
+    agentId: agentId || undefined,
+    referenceNovel: referenceNovel || undefined,
+  });
+  if ('error' in result) return res.status(400).json({ error: result.error });
+  res.json({ project: result });
+});
+
+// GET /api/screenplay/list - 列出所有剧本项目
+app.get('/api/screenplay/list', (_req, res) => {
+  res.json({ projects: listScreenplays() });
+});
+
+// GET /api/screenplay/:id - 获取剧本详情
+app.get('/api/screenplay/:id', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  console.log(`[screenplay-api] GET /${req.params.id} status=${project.status} hasDirectory=${Array.isArray(project.episodeDirectory)} dirLen=${Array.isArray(project.episodeDirectory) ? project.episodeDirectory.length : typeof project.episodeDirectory}`);
+  res.json({ project });
+});
+
+// DELETE /api/screenplay/:id - 删除剧本项目
+app.delete('/api/screenplay/:id', (req, res) => {
+  removeScreenplay(req.params.id);
+  res.json({ success: true });
+});
+
+// POST /api/screenplay/:id/select-title - 选择剧名
+app.post('/api/screenplay/:id/select-title', (req, res) => {
+  const { title } = req.body;
+  const project = updateScreenplay(req.params.id, { selectedTitle: title });
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  res.json({ project });
+});
+
+// POST /api/screenplay/:id/creative-plan - 生成创作方案
+app.post('/api/screenplay/:id/creative-plan', async (req, res) => {
+  const taskId = `sp_plan_${req.params.id}`;
+  res.json({ async: true, taskId });
+  generateCreativePlan(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? '创作方案生成完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/characters - 生成角色设计
+app.post('/api/screenplay/:id/characters', async (req, res) => {
+  const taskId = `sp_chars_${req.params.id}`;
+  res.json({ async: true, taskId });
+  generateCharacters(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? '角色开发完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/directory - 生成分集目录
+app.post('/api/screenplay/:id/directory', async (req, res) => {
+  const taskId = `sp_dir_${req.params.id}`;
+  res.json({ async: true, taskId });
+  generateDirectory(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? '分集目录生成完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/episode - 生成单集剧本
+app.post('/api/screenplay/:id/episode', async (req, res) => {
+  const { episodeNumber } = req.body;
+  if (typeof episodeNumber !== 'number') return res.status(400).json({ error: '缺少 episodeNumber' });
+  const taskId = `sp_ep_${req.params.id}_${episodeNumber}`;
+  res.json({ async: true, taskId });
+  generateEpisode(req.params.id, episodeNumber, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? `第${episodeNumber}集完成` : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/episode-batch - 批量生成剧本
+app.post('/api/screenplay/:id/episode-batch', async (req, res) => {
+  const { startEp, endEp } = req.body;
+  if (typeof startEp !== 'number' || typeof endEp !== 'number') return res.status(400).json({ error: '缺少 startEp/endEp' });
+  const taskId = `sp_batch_${req.params.id}`;
+  res.json({ async: true, taskId });
+  generateEpisodeBatch(req.params.id, startEp, endEp, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? `已完成${result.completed.length}集` : `完成${result.completed.length}集，${result.errors.length}集失败`,
+      startTime: Date.now(), result: null, error: result.errors.length > 0 ? result.errors.map(e => `第${e.episode}集: ${e.error}`).join('; ') : null,
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/review - 质量自检
+app.post('/api/screenplay/:id/review', async (req, res) => {
+  const { episodeNumber } = req.body;
+  if (typeof episodeNumber !== 'number') return res.status(400).json({ error: '缺少 episodeNumber' });
+  const result = await reviewEpisode(req.params.id, episodeNumber);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ review: result.review });
+});
+
+// POST /api/screenplay/:id/export - 导出剧本
+app.post('/api/screenplay/:id/export', (_req, res) => {
+  const result = exportScreenplay(_req.params.id);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ content: result.content });
+});
+
+// PATCH /api/screenplay/:id - 更新剧本项目（通用）
+app.patch('/api/screenplay/:id', (req, res) => {
+  const project = updateScreenplay(req.params.id, req.body);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  res.json({ project });
+});
+
+// ============================================================
+// 创作工厂 API
+// ============================================================
+
+// POST /api/factory/create - 创建工厂项目
+app.post('/api/factory/create', upload.single('novel'), (req, res) => {
+  let novelText = '';
+  if (req.file) {
+    novelText = req.file.buffer.toString('utf-8');
+  } else if (req.body?.novelText) {
+    novelText = req.body.novelText;
+  }
+  if (!novelText || novelText.trim().length < 500) {
+    return res.status(400).json({ error: '小说内容过短（至少500字）' });
+  }
+  const { concurrency, agentsPerGeneration, topK } = req.body || {};
+  const project = createFactory(novelText, {
+    concurrency: concurrency ? parseInt(concurrency) : undefined,
+    agentsPerGeneration: agentsPerGeneration ? parseInt(agentsPerGeneration) : undefined,
+    topK: topK ? parseInt(topK) : undefined,
+  });
+  res.json({ project: { id: project.id, status: project.status, createdAt: project.createdAt } });
+});
+
+// GET /api/factory/list - 列出所有工厂项目
+app.get('/api/factory/list', (_req, res) => {
+  const projects = listFactories().map(p => ({
+    id: p.id, status: p.status,
+    title: p.novelDNA?.title || '未解析',
+    genre: p.novelDNA?.genre || '',
+    chapters: p.chapters.length,
+    currentChapter: p.currentChapter,
+    currentGeneration: p.currentGeneration,
+    agentCount: p.agents.length,
+    bestScore: p.evolutionHistory.length > 0
+      ? p.evolutionHistory[p.evolutionHistory.length - 1].bestScore : 0,
+    createdAt: p.createdAt, updatedAt: p.updatedAt,
+  }));
+  res.json({ projects });
+});
+
+// GET /api/factory/:id - 获取工厂详情
+app.get('/api/factory/:id', (req, res) => {
+  const project = getFactory(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  // 返回精简数据（agents太大，只返回top10和统计）
+  const topAgents = [...project.agents]
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, 10)
+    .map(a => ({ id: a.id, generation: a.generation, score: a.score, rank: a.rank, parentId: a.parentId, scoreHistory: a.scoreHistory }));
+  res.json({
+    project: {
+      id: project.id, status: project.status,
+      novelDNA: project.novelDNA,
+      chapters: project.chapters.map(c => ({ number: c.number, title: c.title, wordCount: c.wordCount })),
+      stages: (project.stages || []).map(s => ({ index: s.index, name: s.name, chapterRange: s.chapterRange })),
+      currentChapter: project.currentChapter,
+      currentGeneration: project.currentGeneration,
+      totalAgents: project.agents.length,
+      topAgents,
+      evolutionHistory: project.evolutionHistory,
+      finalAgent: project.finalAgent ? {
+        id: project.finalAgent.id, generation: project.finalAgent.generation,
+        score: project.finalAgent.score, scoreHistory: project.finalAgent.scoreHistory,
+        mutationLog: project.finalAgent.mutationLog,
+      } : undefined,
+      concurrency: project.concurrency,
+      agentsPerGeneration: project.agentsPerGeneration,
+      topK: project.topK,
+      createdAt: project.createdAt, updatedAt: project.updatedAt,
+      error: project.error,
+    },
+  });
+});
+
+// DELETE /api/factory/:id - 删除工厂项目
+app.delete('/api/factory/:id', (req, res) => {
+  removeFactory(req.params.id);
+  res.json({ success: true });
+});
+
+// POST /api/factory/:id/parse - 解析小说DNA
+app.post('/api/factory/:id/parse', async (req, res) => {
+  const taskId = `factory_parse_${req.params.id}`;
+  res.json({ async: true, taskId });
+  parseNovelDNA(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? 'DNA解析完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/factory/:id/generate-agents - 生成初代Agent群
+app.post('/api/factory/:id/generate-agents', async (req, res) => {
+  const taskId = `factory_agents_${req.params.id}`;
+  res.json({ async: true, taskId });
+  generateInitialAgents(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? 'Agent生成完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/factory/:id/evolve - 执行单轮进化（按阶段）
+app.post('/api/factory/:id/evolve', async (req, res) => {
+  const { stage: stageIndex } = req.body;
+  if (typeof stageIndex !== 'number') return res.status(400).json({ error: '缺少 stage（阶段编号）' });
+  const project = getFactory(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const stage = project.stages.find(s => s.index === stageIndex);
+  if (!stage) return res.status(400).json({ error: `阶段${stageIndex}不存在` });
+  const taskId = `factory_evolve_${req.params.id}_s${stageIndex}`;
+  res.json({ async: true, taskId });
+  runEvolutionRound(req.params.id, stage, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? `竞赛完成` : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/factory/:id/mutate - 变异繁殖下一代
+app.post('/api/factory/:id/mutate', async (req, res) => {
+  const taskId = `factory_mutate_${req.params.id}`;
+  res.json({ async: true, taskId });
+  mutateAndBreed(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? '变异繁殖完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/factory/:id/run-full - 完整自动进化
+app.post('/api/factory/:id/run-full', async (req, res) => {
+  const taskId = `factory_full_${req.params.id}`;
+  res.json({ async: true, taskId });
+  runFullEvolution(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.success ? '进化完成' : '',
+      startTime: Date.now(), result: null, error: result.success ? null : (result.error || '失败'),
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/factory/:id/export - 导出Agent到仓库
+app.post('/api/factory/:id/export', (_req, res) => {
+  const result = exportFinalAgent(_req.params.id);
+  if (!result.success || !result.agent) return res.status(500).json({ error: result.error });
+  const project = getFactory(_req.params.id);
+  const agent = result.agent;
+  const now = Date.now();
+  const agentId = `agent_${crypto.randomUUID().slice(0, 8)}`;
+  const row: AgentStoreRow = {
+    id: agentId,
+    name: `${project?.novelDNA?.title || '未命名'} - 风格Agent`,
+    genre: project?.novelDNA?.genre || '',
+    tone: project?.novelDNA?.tone || '',
+    description: `基于「${project?.novelDNA?.title || ''}」进化${agent.generation}代，最终得分${agent.score}`,
+    system_prompt: agent.systemPrompt,
+    style_directive: agent.styleDirective,
+    technique_weights: JSON.stringify(agent.techniqueWeights),
+    source_novel: project?.novelDNA?.title || '',
+    score: agent.score || 0,
+    generation: agent.generation,
+    score_history: JSON.stringify(agent.scoreHistory),
+    mutation_log: JSON.stringify(agent.mutationLog),
+    factory_project_id: _req.params.id,
+    created_at: now, updated_at: now,
+  };
+  insertAgentStore(row);
+  res.json({ success: true, agentId, name: row.name, prompt: result.prompt });
+});
+
+// GET /api/agents - Agent仓库列表
+app.get('/api/agents', (_req, res) => {
+  const agents = listAgentStore().map(a => ({
+    id: a.id, name: a.name, genre: a.genre, tone: a.tone,
+    description: a.description, score: a.score, generation: a.generation,
+    sourceNovel: a.source_novel, createdAt: a.created_at,
+  }));
+  res.json({ agents });
+});
+
+// GET /api/agents/:id - Agent详情（含system_prompt）
+app.get('/api/agents/:id', (req, res) => {
+  const agent = getAgentStoreById(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent不存在' });
+  res.json({
+    id: agent.id, name: agent.name, genre: agent.genre, tone: agent.tone,
+    description: agent.description, systemPrompt: agent.system_prompt,
+    styleDirective: agent.style_directive, score: agent.score,
+    generation: agent.generation, sourceNovel: agent.source_novel,
+    scoreHistory: JSON.parse(agent.score_history || '[]'),
+    mutationLog: JSON.parse(agent.mutation_log || '[]'),
+    createdAt: agent.created_at,
+  });
+});
+
+// DELETE /api/agents/:id - 删除Agent
+app.delete('/api/agents/:id', (req, res) => {
+  deleteAgentStore(req.params.id);
+  res.json({ success: true });
+});
+
+// POST /api/factory/:id/stop - 中断进化
+app.post('/api/factory/:id/stop', (req, res) => {
+  const stopped = requestStop(req.params.id);
+  if (!stopped) return res.status(400).json({ error: '当前未在进化中' });
+  res.json({ success: true, message: '已发送中断信号' });
+});
+
+// PATCH /api/factory/:id - 更新工厂配置
+app.patch('/api/factory/:id', (req, res) => {
+  const project = updateFactory(req.params.id, req.body);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  res.json({ success: true });
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', mode: 'direct-jimeng-api', ws: true });
 });
@@ -1221,10 +1643,25 @@ initDB().then(() => {
     console.log(`[llm] 已从数据库恢复 Vision LLM 配置: ${savedVision.provider}/${savedVision.model}`);
   }
 
-  server.listen(PORT, () => {
-    console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
+  // 从 DB 恢复创作工厂项目
+  restoreFactories();
+
+  // 从 DB 恢复剧本项目
+  loadScreenplayProjectsFromDB();
+
+  server.listen(Number(PORT), '0.0.0.0', () => {
+    // 获取本机局域网 IP
+    const nets = os.networkInterfaces();
+    const lanIps: string[] = [];
+    for (const iface of Object.values(nets)) {
+      for (const cfg of iface || []) {
+        if (cfg.family === 'IPv4' && !cfg.internal) lanIps.push(cfg.address);
+      }
+    }
+    console.log(`\n🚀 服务器已启动: http://0.0.0.0:${PORT}`);
+    if (lanIps.length > 0) console.log(`🌐 局域网访问: http://${lanIps[0]}:${PORT}`);
     console.log(`🔗 直连即梦 API (jimeng.jianying.com)`);
-    console.log(`📡 WebSocket: ws://localhost:${PORT}/ws`);
+    console.log(`📡 WebSocket: ws://0.0.0.0:${PORT}/ws`);
     console.log(`🔑 默认 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`);
     console.log(`📁 运行模式: ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`);
   });

@@ -253,7 +253,7 @@ function estimateTokens(text: string): number {
 }
 
 // 章节拆分结果
-interface ParsedChapter {
+export interface ParsedChapter {
   number: number;
   title: string;
   content: string;
@@ -265,7 +265,7 @@ interface ParsedChapter {
 // 支持：第X章、第X回、第X节、第X卷、Chapter N 等格式
 const CHAPTER_PATTERN = /^\s*(第\s*([0-9零一二三四五六七八九十百千万亿]+)\s*[章回节篇卷])(.*)/gm;
 
-function splitNovelIntoChapters(text: string): ParsedChapter[] {
+export function splitNovelIntoChapters(text: string): ParsedChapter[] {
   const chapters: ParsedChapter[] = [];
   const matches = [...text.matchAll(CHAPTER_PATTERN)];
 
@@ -297,7 +297,7 @@ function splitNovelIntoChapters(text: string): ParsedChapter[] {
 }
 
 // 按段落/章节边界智能分块，避免在句子中间截断
-function splitTextIntoChunks(text: string, maxCharsPerChunk: number): string[] {
+export function splitTextIntoChunks(text: string, maxCharsPerChunk: number): string[] {
   if (text.length <= maxCharsPerChunk) return [text];
 
   const chunks: string[] = [];

@@ -7,9 +7,12 @@ import VideoGenModal from './components/VideoGenModal';
 import SettingsModal, { loadSettings } from './components/SettingsModal';
 import SensitiveWordsPanel from './components/SensitiveWordsPanel';
 import NovelToDrama from './components/NovelToDrama';
+import ScreenplayCreator from './components/ScreenplayCreator';
+import AgentFactory from './components/AgentFactory';
 import ProjectWorkspace from './components/ProjectWorkspace';
 import GlobalMaterialsPanel from './components/GlobalMaterialsPanel';
 import GlobalCharactersPanel from './components/GlobalCharactersPanel';
+import AgentStorePanel from './components/AgentStorePanel';
 import LanguageSwitch from './components/LanguageSwitch';
 import { GearIcon, ShieldIcon } from './components/Icons';
 import './i18n';
@@ -24,7 +27,10 @@ export default function App() {
   const [showVideoGen, setShowVideoGen] = useState(false);
   const [showSensitiveWords, setShowSensitiveWords] = useState(false);
   const [showNovelToDrama, setShowNovelToDrama] = useState(false);
+  const [showScreenplayCreator, setShowScreenplayCreator] = useState(false);
+  const [showAgentFactory, setShowAgentFactory] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [screenplayProjectId, setScreenplayProjectId] = useState<string | null>(null);
 
   useEffect(() => {
     const saved = loadSettings();
@@ -61,7 +67,9 @@ export default function App() {
                   ? (isZh ? '我的作品' : 'My Works')
                   : activeTab === 'materials'
                     ? (isZh ? '素材' : 'Materials')
-                    : (isZh ? '角色' : 'Characters')}
+                    : activeTab === 'agents'
+                      ? (isZh ? 'Agent仓库' : 'Agent Store')
+                      : (isZh ? '角色' : 'Characters')}
               </h1>
               <div className="flex items-center gap-1">
                 <LanguageSwitch />
@@ -83,8 +91,11 @@ export default function App() {
                 onNewProject={() => setShowNovelToDrama(true)}
                 onOpenNovelToDrama={() => setShowNovelToDrama(true)}
                 onOpenVideoGen={() => setShowVideoGen(true)}
+                onOpenScreenplayCreator={() => setShowScreenplayCreator(true)}
+                onOpenAgentFactory={() => setShowAgentFactory(true)}
                 onSelectHistory={handleHistorySelect}
                 onOpenProject={(projectId: string) => setActiveProjectId(projectId)}
+                onOpenScreenplayProject={(id: string) => { setScreenplayProjectId(id); setShowScreenplayCreator(true); }}
               />
             )}
             {activeTab === 'materials' && (
@@ -92,6 +103,9 @@ export default function App() {
             )}
             {activeTab === 'characters' && (
               <GlobalCharactersPanel />
+            )}
+            {activeTab === 'agents' && (
+              <AgentStorePanel />
             )}
           </div>
 
@@ -105,6 +119,16 @@ export default function App() {
               sessionId={sessionId}
               onProjectCreated={(projectId) => { setShowNovelToDrama(false); setActiveProjectId(projectId); }}
             />
+          )}
+          {showScreenplayCreator && (
+            <ScreenplayCreator
+              onClose={() => { setShowScreenplayCreator(false); setScreenplayProjectId(null); }}
+              onProjectCreated={(projectId) => { setShowScreenplayCreator(false); setScreenplayProjectId(null); setActiveProjectId(projectId); }}
+              resumeProjectId={screenplayProjectId}
+            />
+          )}
+          {showAgentFactory && (
+            <AgentFactory onClose={() => setShowAgentFactory(false)} />
           )}
         </div>
       )}

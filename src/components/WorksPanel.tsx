@@ -9,8 +9,11 @@ interface WorksPanelProps {
   onNewProject: () => void;
   onOpenNovelToDrama: () => void;
   onOpenVideoGen: () => void;
+  onOpenScreenplayCreator: () => void;
+  onOpenAgentFactory?: () => void;
   onSelectHistory: (record: HistoryRecord) => void;
   onOpenProject?: (projectId: string) => void;
+  onOpenScreenplayProject?: (projectId: string) => void;
 }
 
 interface DramaProjectItem {
@@ -23,13 +26,25 @@ interface DramaProjectItem {
   updatedAt: number;
 }
 
-export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVideoGen, onSelectHistory, onOpenProject }: WorksPanelProps) {
+interface ScreenplayProjectItem {
+  id: string;
+  title: string;
+  status: string;
+  genres: string;
+  totalEpisodes: number;
+  episodesWritten: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVideoGen, onOpenScreenplayCreator, onOpenAgentFactory, onSelectHistory, onOpenProject, onOpenScreenplayProject }: WorksPanelProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [filter, setFilter] = useState<'all' | 'done' | 'error'>('all');
   const [dramaProjects, setDramaProjects] = useState<DramaProjectItem[]>([]);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; title: string } | null>(null);
+  const [screenplayProjects, setScreenplayProjects] = useState<ScreenplayProjectItem[]>([]);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; title: string; type?: 'drama' | 'screenplay' } | null>(null);
 
   const loadProjects = () => {
     fetch('/api/drama/list').then(r => r.json()).then(data => {
@@ -45,19 +60,46 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
         })));
       }
     }).catch(() => {});
+    // 加载剧本项目
+    fetch('/api/screenplay/list').then(r => r.json()).then(data => {
+      if (data?.projects) {
+        setScreenplayProjects(data.projects.map((p: Record<string, unknown>) => {
+          const config = p.config as Record<string, unknown> || {};
+          const plan = p.creativePlan as Record<string, unknown> | undefined;
+          const titleOpts = plan?.titleOptions as Array<{ title: string }> | undefined;
+          return {
+            id: p.id as string,
+            title: (p.selectedTitle as string) || titleOpts?.[0]?.title || (config.genres as string[])?.join('+') || '未命名剧本',
+            status: p.status as string,
+            genres: ((config.genres as string[]) || []).join('+'),
+            totalEpisodes: (config.totalEpisodes as number) || 0,
+            episodesWritten: ((p.episodes as unknown[]) || []).length,
+            createdAt: p.createdAt as number,
+            updatedAt: (p.updatedAt || p.createdAt) as number,
+          };
+        }));
+      }
+    }).catch(() => {});
   };
 
   useEffect(() => {
     setRecords(getHistory());
     loadProjects();
+    // 定时刷新项目状态（后台任务可能在进行中）
+    const timer = setInterval(loadProjects, 10000);
+    return () => clearInterval(timer);
   }, []);
 
   const handleDeleteProject = async (keepAssets: boolean) => {
     if (!deleteConfirm) return;
     try {
-      // keepAssets=false 时删除关联素材（后端目前直接删除整个项目数据）
-      await fetch(`/api/drama/${deleteConfirm.id}${keepAssets ? '' : '?deleteAssets=true'}`, { method: 'DELETE' });
-      setDramaProjects(prev => prev.filter(p => p.id !== deleteConfirm.id));
+      if (deleteConfirm.type === 'screenplay') {
+        await fetch(`/api/screenplay/${deleteConfirm.id}`, { method: 'DELETE' });
+        setScreenplayProjects(prev => prev.filter(p => p.id !== deleteConfirm.id));
+      } else {
+        await fetch(`/api/drama/${deleteConfirm.id}${keepAssets ? '' : '?deleteAssets=true'}`, { method: 'DELETE' });
+        setDramaProjects(prev => prev.filter(p => p.id !== deleteConfirm.id));
+      }
     } catch { /* ignore */ }
     setDeleteConfirm(null);
   };
@@ -94,6 +136,20 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
           </div>
         )}
 
+        {/* 剧本项目 */}
+        {screenplayProjects.length > 0 && (
+          <div>
+            <h2 className="text-sm font-medium text-gray-400 mb-3">{isZh ? '剧本项目' : 'Screenplay Projects'}</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+              {screenplayProjects.map(proj => (
+                <ScreenplayCard key={proj.id} project={proj} isZh={isZh}
+                  onClick={() => onOpenScreenplayProject?.(proj.id)}
+                  onDelete={() => setDeleteConfirm({ id: proj.id, title: proj.title, type: 'screenplay' })} />
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Filter bar + New Project button */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -124,6 +180,30 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
             )}
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const activeCount = screenplayProjects.filter(p => p.status !== 'exported').length;
+                if (activeCount >= 5) {
+                  alert(isZh ? '最多同时进行5个剧本项目，请先完成或删除现有项目' : 'Max 5 concurrent projects');
+                  return;
+                }
+                onOpenScreenplayCreator();
+              }}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] hover:border-white/20 transition-colors"
+            >
+              ✍️ {isZh ? '剧本创作' : 'Screenplay'}
+              {screenplayProjects.filter(p => p.status !== 'exported').length > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-green-500/20 text-green-400">
+                  {screenplayProjects.filter(p => p.status !== 'exported').length}/5
+                </span>
+              )}
+            </button>
+            <button
+              onClick={onOpenAgentFactory}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] hover:border-white/20 transition-colors"
+            >
+              🧬 {isZh ? '创作工厂' : 'Agent Factory'}
+            </button>
             <button
               onClick={onOpenNovelToDrama}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] hover:border-white/20 transition-colors"
@@ -342,6 +422,54 @@ function DramaCard({ project, isZh, onClick, onDelete }: { project: DramaProject
           <span>{project.targetEpisodes}{isZh ? '集' : 'ep'}</span>
           <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-medium ${statusColor}`}>
             {(isZh ? STATUS_LABELS_ZH : STATUS_LABELS_EN)[project.status] || project.status}
+          </span>
+        </div>
+        <div className="text-[11px] text-gray-600 mt-1">
+          {new Date(project.updatedAt).toLocaleDateString()}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Screenplay Project Card ---- */
+const SP_STATUS_ZH: Record<string, string> = {
+  config_done: '待生成方案', plan_done: '方案已生成', characters_done: '角色已开发',
+  directory_done: '目录已生成', writing: '撰写中', review: '自检中', exported: '已导出',
+};
+
+function ScreenplayCard({ project, isZh, onClick, onDelete }: { project: ScreenplayProjectItem; isZh: boolean; onClick: () => void; onDelete: () => void }) {
+  const isDone = project.status === 'exported';
+  const isActive = ['writing', 'review', 'config_done', 'plan_done', 'characters_done', 'directory_done'].includes(project.status);
+  const isWriting = ['writing', 'review'].includes(project.status);
+  const statusColor = isDone ? 'bg-green-500/20 text-green-400' : isWriting ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400';
+
+  return (
+    <div onClick={onClick}
+      className={`group bg-[#141414] border rounded-2xl overflow-hidden hover:border-green-500/30 transition-all cursor-pointer relative ${isActive && !isDone ? 'border-green-500/20' : 'border-white/5'}`}>
+      <div className="aspect-video bg-[#111] flex items-center justify-center relative">
+        <span className="text-3xl opacity-20">✍️</span>
+        {isActive && !isDone && (
+          <div className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-full bg-green-500/10 border border-green-500/20">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+            <span className="text-[10px] text-green-400">{isZh ? '进行中' : 'Active'}</span>
+          </div>
+        )}
+        <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+          <button onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="p-2.5 bg-white/10 rounded-full hover:bg-red-500/30 transition-colors">
+            <CloseIcon className="w-5 h-5 text-white" />
+          </button>
+        </div>
+      </div>
+      <div className="p-3">
+        <p className="text-sm text-gray-300 truncate">{project.title}</p>
+        <div className="flex items-center gap-2 mt-1.5 text-[11px] text-gray-600">
+          <span>{project.genres}</span>
+          <span>·</span>
+          <span>{project.episodesWritten}/{project.totalEpisodes}{isZh ? '集' : 'ep'}</span>
+          <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-medium ${statusColor}`}>
+            {isZh ? (SP_STATUS_ZH[project.status] || project.status) : project.status}
           </span>
         </div>
         <div className="text-[11px] text-gray-600 mt-1">
