@@ -1,4 +1,4 @@
-// Agent仓库面板 - 展示从创作工厂导出的写作Agent
+// 作者仓库面板 - 展示从创作工厂导出的写作风格Agent提示词
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { UserIcon, SparkleIcon, TrashIcon } from './Icons';
@@ -62,8 +62,8 @@ export default function AgentStorePanel() {
         <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-inner">
           <UserIcon className="w-10 h-10 text-gray-600" />
         </div>
-        <p className="text-lg text-gray-400 font-medium mb-2">{isZh ? '暂无 Agent' : 'No Agents'}</p>
-        <p className="text-sm text-gray-600 max-w-xs text-center">{isZh ? '请在创作工厂中训练并导出您的专属写作 Agent' : 'Train and export your writing agents in the Creative Factory.'}</p>
+        <p className="text-lg text-gray-400 font-medium mb-2">{isZh ? '暂无作者Agent' : 'No Author Agents'}</p>
+        <p className="text-sm text-gray-600 max-w-xs text-center">{isZh ? '请在创作工厂中训练并导出您的专属写作风格Agent' : 'Train and export your writing style agents in the Creative Factory.'}</p>
       </div>
     );
   }
@@ -73,7 +73,7 @@ export default function AgentStorePanel() {
       <div className="max-w-4xl mx-auto px-6 py-10 space-y-6">
         <div className="flex items-center gap-2 mb-4 text-gray-400">
           <SparkleIcon className="w-4 h-4" />
-          <span className="text-sm font-medium">{isZh ? '已保存模型' : 'Saved Models'}</span>
+          <span className="text-sm font-medium">{isZh ? '已保存的作者Agent' : 'Saved Author Agents'}</span>
           <span className="text-xs bg-white/5 px-2 py-0.5 rounded-full text-gray-500">{agents.length}</span>
         </div>
 

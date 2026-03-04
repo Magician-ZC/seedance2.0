@@ -99,6 +99,25 @@ export async function initDB(): Promise<void> {
     updated_at INTEGER
   )`);
 
+  // 角色Agent仓库表（从小说转漫剧提取的角色，转为可复用的群演Agent）
+  db.run(`CREATE TABLE IF NOT EXISTS character_agents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT DEFAULT 'supporting',
+    source_novel TEXT DEFAULT '',
+    source_project_id TEXT,
+    category TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    personality TEXT DEFAULT '',
+    visual_prompt TEXT DEFAULT '',
+    costume_desc TEXT DEFAULT '',
+    system_prompt TEXT NOT NULL,
+    profile_images TEXT DEFAULT '{}',
+    tags TEXT DEFAULT '[]',
+    created_at INTEGER,
+    updated_at INTEGER
+  )`);
+
   // 剧本项目表
   db.run(`CREATE TABLE IF NOT EXISTS screenplay_projects (
     id TEXT PRIMARY KEY,
@@ -472,6 +491,96 @@ export function getAgentById(id: string): AgentStoreRow | null {
 export function deleteAgent(id: string): void {
   const d = getDB();
   d.run('DELETE FROM agent_store WHERE id = ?', [id]);
+  saveDB();
+}
+
+// ============================================================
+// 角色Agent仓库（群演库）
+// ============================================================
+
+export interface CharacterAgentRow {
+  id: string;
+  name: string;
+  role: string;           // protagonist | supporting | minor
+  source_novel: string;
+  source_project_id: string | null;
+  category: string;       // 分类标签（如：校园、武侠、都市）
+  description: string;
+  personality: string;
+  visual_prompt: string;
+  costume_desc: string;
+  system_prompt: string;  // 角色扮演Agent提示词
+  profile_images: string; // JSON: { main?, front?, side?, back?, costume? }
+  tags: string;           // JSON: string[]
+  created_at: number;
+  updated_at: number;
+}
+
+export function insertCharacterAgent(row: CharacterAgentRow): void {
+  const d = getDB();
+  d.run(
+    `INSERT OR REPLACE INTO character_agents (id, name, role, source_novel, source_project_id, category, description, personality, visual_prompt, costume_desc, system_prompt, profile_images, tags, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.name, row.role, row.source_novel, row.source_project_id, row.category,
+     row.description, row.personality, row.visual_prompt, row.costume_desc, row.system_prompt,
+     row.profile_images, row.tags, row.created_at, row.updated_at],
+  );
+  saveDB();
+}
+
+export function listCharacterAgents(): CharacterAgentRow[] {
+  const d = getDB();
+  const results: CharacterAgentRow[] = [];
+  const stmt = d.prepare('SELECT * FROM character_agents ORDER BY created_at DESC');
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as CharacterAgentRow);
+  }
+  stmt.free();
+  return results;
+}
+
+export function getCharacterAgentById(id: string): CharacterAgentRow | null {
+  const d = getDB();
+  const stmt = d.prepare('SELECT * FROM character_agents WHERE id = ?');
+  stmt.bind([id]);
+  if (stmt.step()) {
+    const row = stmt.getAsObject() as unknown as CharacterAgentRow;
+    stmt.free();
+    return row;
+  }
+  stmt.free();
+  return null;
+}
+
+export function listCharacterAgentsByCategory(category: string): CharacterAgentRow[] {
+  const d = getDB();
+  const results: CharacterAgentRow[] = [];
+  const stmt = d.prepare('SELECT * FROM character_agents WHERE category = ? ORDER BY created_at DESC');
+  stmt.bind([category]);
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as CharacterAgentRow);
+  }
+  stmt.free();
+  return results;
+}
+
+export function deleteCharacterAgent(id: string): void {
+  const d = getDB();
+  d.run('DELETE FROM character_agents WHERE id = ?', [id]);
+  saveDB();
+}
+
+export function updateCharacterAgent(id: string, fields: Partial<Omit<CharacterAgentRow, 'id' | 'created_at'>>): void {
+  const d = getDB();
+  const sets: string[] = [];
+  const vals: (string | number | null)[] = [];
+  for (const [key, val] of Object.entries(fields)) {
+    sets.push(`${key} = ?`);
+    vals.push(val as string | number | null);
+  }
+  if (sets.length === 0) return;
+  vals.push(id);
+  d.run(`UPDATE character_agents SET ${sets.join(', ')} WHERE id = ?`, vals);
   saveDB();
 }
 

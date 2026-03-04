@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-export type NavTab = 'works' | 'materials' | 'characters' | 'agents';
+export type NavTab = 'works' | 'materials' | 'characters' | 'authorAgents' | 'characterAgents';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -37,6 +38,39 @@ function UsersIcon({ className }: { className?: string }) {
   );
 }
 
+function PenIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+    </svg>
+  );
+}
+
+function TheaterIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <circle cx="9" cy="9" r="2" />
+      <circle cx="15" cy="9" r="2" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+    </svg>
+  );
+}
+
+// 顶级导航项
+const TOP_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
+  { key: 'works', icon: GridIcon, labelZh: '我的作品', labelEn: 'My Works' },
+  { key: 'materials', icon: FolderIcon, labelZh: '素材', labelEn: 'Materials' },
+  { key: 'characters', icon: UsersIcon, labelZh: '角色', labelEn: 'Characters' },
+];
+
+// Agent仓库子菜单
+const AGENT_SUB_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
+  { key: 'authorAgents', icon: PenIcon, labelZh: '作者仓库', labelEn: 'Author Agents' },
+  { key: 'characterAgents', icon: TheaterIcon, labelZh: '群演仓库', labelEn: 'Cast Agents' },
+];
+
 function BotIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
@@ -49,16 +83,40 @@ function BotIcon({ className }: { className?: string }) {
   );
 }
 
-const NAV_ITEMS: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
-  { key: 'works', icon: GridIcon, labelZh: '我的作品', labelEn: 'My Works' },
-  { key: 'materials', icon: FolderIcon, labelZh: '素材', labelEn: 'Materials' },
-  { key: 'characters', icon: UsersIcon, labelZh: '角色', labelEn: 'Characters' },
-  { key: 'agents', icon: BotIcon, labelZh: 'Agent仓库', labelEn: 'Agents' },
-];
+function ChevronIcon({ className, open }: { className?: string; open: boolean }) {
+  return (
+    <svg className={`${className} transition-transform duration-200 ${open ? 'rotate-90' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path d="M9 18l6-6-6-6" />
+    </svg>
+  );
+}
 
 export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
+  const isAgentTab = activeTab === 'authorAgents' || activeTab === 'characterAgents';
+  const [agentExpanded, setAgentExpanded] = useState(isAgentTab);
+
+  const renderNavButton = (key: NavTab, Icon: typeof GridIcon, labelZh: string, labelEn: string, indent = false) => {
+    const isActive = activeTab === key;
+    return (
+      <button
+        key={key}
+        onClick={() => onTabChange(key)}
+        className={`group relative w-full flex items-center gap-3 ${indent ? 'pl-8 pr-3' : 'px-3'} py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
+          isActive
+            ? 'bg-white/10 text-white shadow-sm'
+            : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'
+        }`}
+      >
+        {isActive && (
+          <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-green-500 rounded-r-full opacity-0 md:opacity-100" />
+        )}
+        <Icon className={`w-5 h-5 flex-shrink-0 transition-colors ${isActive ? 'text-green-400' : 'text-gray-500 group-hover:text-gray-300'}`} />
+        <span className="hidden md:block truncate">{isZh ? labelZh : labelEn}</span>
+      </button>
+    );
+  };
 
   return (
     <aside className="w-[72px] md:w-[200px] flex-shrink-0 bg-[#0a0a0a] border-r border-white/5 flex flex-col h-full transition-all duration-300">
@@ -74,26 +132,33 @@ export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
 
       {/* Nav Items */}
       <nav className="flex-1 py-6 px-3 space-y-1.5">
-        {NAV_ITEMS.map(({ key, icon: Icon, labelZh, labelEn }) => {
-          const isActive = activeTab === key;
-          return (
-            <button
-              key={key}
-              onClick={() => onTabChange(key)}
-              className={`group relative w-full flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
-                isActive
-                  ? 'bg-white/10 text-white shadow-sm'
-                  : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'
-              }`}
-            >
-              {isActive && (
-                <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-green-500 rounded-r-full opacity-0 md:opacity-100" />
+        {TOP_NAV.map(({ key, icon: Icon, labelZh, labelEn }) =>
+          renderNavButton(key, Icon, labelZh, labelEn)
+        )}
+
+        {/* Agent仓库 - 可展开的分组 */}
+        <div>
+          <button
+            onClick={() => setAgentExpanded(!agentExpanded)}
+            className={`group relative w-full flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
+              isAgentTab
+                ? 'text-white'
+                : 'text-gray-500 hover:text-gray-200 hover:bg-white/5'
+            }`}
+          >
+            <BotIcon className={`w-5 h-5 flex-shrink-0 transition-colors ${isAgentTab ? 'text-green-400' : 'text-gray-500 group-hover:text-gray-300'}`} />
+            <span className="hidden md:block truncate flex-1 text-left">{isZh ? 'Agent仓库' : 'Agents'}</span>
+            <ChevronIcon className="w-3.5 h-3.5 hidden md:block text-gray-600" open={agentExpanded} />
+          </button>
+
+          {agentExpanded && (
+            <div className="mt-1 space-y-0.5 animate-fade-in">
+              {AGENT_SUB_NAV.map(({ key, icon: Icon, labelZh, labelEn }) =>
+                renderNavButton(key, Icon, labelZh, labelEn, true)
               )}
-              <Icon className={`w-5 h-5 flex-shrink-0 transition-colors ${isActive ? 'text-green-400' : 'text-gray-500 group-hover:text-gray-300'}`} />
-              <span className="hidden md:block truncate">{isZh ? labelZh : labelEn}</span>
-            </button>
-          );
-        })}
+            </div>
+          )}
+        </div>
       </nav>
       
       {/* Footer / Version */}

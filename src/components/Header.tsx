@@ -16,7 +16,8 @@ export default function Header({ activeTab, onOpenSettings, onOpenSensitiveWords
     switch (activeTab) {
       case 'works': return isZh ? '我的作品' : 'My Works';
       case 'materials': return isZh ? '素材' : 'Materials';
-      case 'agents': return isZh ? 'Agent仓库' : 'Agent Store';
+      case 'authorAgents': return isZh ? '作者仓库' : 'Author Agents';
+      case 'characterAgents': return isZh ? '群演仓库' : 'Cast Agents';
       case 'characters': return isZh ? '角色' : 'Characters';
       default: return '';
     }

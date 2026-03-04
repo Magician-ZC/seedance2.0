@@ -6,7 +6,7 @@ import { chatCompletionJSON, getLLMConfig, type LLMConfig } from './llm-service.
 import { EntityGraph } from './entity-graph.js';
 import {
   insertProject, getProjectById, updateProjectFields, listAllProjects, deleteProject,
-  logLLMCall, getProjectLogs, type DramaProjectRow,
+  logLLMCall, getProjectLogs, insertCharacterAgent, type DramaProjectRow,
 } from './db-service.js';
 
 // ============================================================
@@ -2515,6 +2515,79 @@ export function repairProjectImages(projectId: string): { repairedChars: string[
   }
 
   return { repairedChars, repairedLocs, errors };
+}
+
+// ============================================================
+// 角色转Agent - 将小说角色提取为可复用的群演Agent
+// 复用 analyzeNovel 的角色提取结果，生成角色扮演提示词
+// ============================================================
+
+/** 为单个角色生成Agent系统提示词 */
+function buildCharacterAgentPrompt(char: CharacterInfo, novelTitle: string, novelSummary: string): string {
+  return `你是「${char.newName || char.originalName}」，来自小说《${novelTitle}》的角色。
+
+## 角色档案
+- 身份：${char.role === 'protagonist' ? '主角' : char.role === 'supporting' ? '配角' : '龙套'}
+- 外貌特征：${char.description}
+- 性格特质：${char.personality}
+- 视觉描述：${char.visualPrompt}
+${char.costumeDesc ? `- 服化道：${char.costumeDesc}` : ''}
+
+## 故事背景
+${novelSummary}
+
+## 行为准则
+1. 始终以「${char.newName || char.originalName}」的身份说话和行动
+2. 保持角色性格一致性：${char.personality}
+3. 对话风格要符合角色设定，不要跳出角色
+4. 在新的故事场景中，保持核心性格特征，但可以根据新剧情自然发展
+5. 与其他角色互动时，体现角色关系和情感张力`;
+}
+
+/** 从已分析的项目中批量提取角色为Agent */
+export function extractCharacterAgents(
+  projectId: string,
+  options?: { rolesFilter?: ('protagonist' | 'supporting' | 'minor')[]; category?: string },
+): { success: boolean; agents: Array<{ id: string; name: string; role: string }>; error?: string } {
+  const project = getProject(projectId);
+  if (!project) return { success: false, agents: [], error: '项目不存在' };
+  if (!project.novel?.characters?.length) return { success: false, agents: [], error: '项目尚未完成角色提取' };
+
+  const rolesFilter = options?.rolesFilter || ['protagonist', 'supporting'];
+  const category = options?.category || project.novel.themes?.[0] || '';
+  const novelTitle = project.novel.title || '未命名';
+  const novelSummary = project.novel.summary || '';
+  const now = Date.now();
+  const results: Array<{ id: string; name: string; role: string }> = [];
+
+  for (const char of project.novel.characters) {
+    if (!rolesFilter.includes(char.role as 'protagonist' | 'supporting' | 'minor')) continue;
+
+    const agentId = `ca_${projectId.slice(0, 6)}_${char.id}`;
+    const systemPrompt = buildCharacterAgentPrompt(char, novelTitle, novelSummary);
+
+    insertCharacterAgent({
+      id: agentId,
+      name: char.newName || char.originalName,
+      role: char.role,
+      source_novel: novelTitle,
+      source_project_id: projectId,
+      category,
+      description: char.description,
+      personality: char.personality,
+      visual_prompt: char.visualPrompt,
+      costume_desc: char.costumeDesc || '',
+      system_prompt: systemPrompt,
+      profile_images: JSON.stringify(char.profileImages || {}),
+      tags: JSON.stringify([char.role, category].filter(Boolean)),
+      created_at: now,
+      updated_at: now,
+    });
+
+    results.push({ id: agentId, name: char.newName || char.originalName, role: char.role });
+  }
+
+  return { success: true, agents: results };
 }
 
 // 角色生图提示词

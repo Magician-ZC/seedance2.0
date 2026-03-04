@@ -14,6 +14,7 @@ import ProjectWorkspace from './components/ProjectWorkspace';
 import GlobalMaterialsPanel from './components/GlobalMaterialsPanel';
 import GlobalCharactersPanel from './components/GlobalCharactersPanel';
 import AgentStorePanel from './components/AgentStorePanel';
+import CharacterAgentPanel from './components/CharacterAgentPanel';
 import './i18n';
 
 export default function App() {
@@ -82,8 +83,11 @@ export default function App() {
             {activeTab === 'characters' && (
               <GlobalCharactersPanel />
             )}
-            {activeTab === 'agents' && (
+            {activeTab === 'authorAgents' && (
               <AgentStorePanel />
+            )}
+            {activeTab === 'characterAgents' && (
+              <CharacterAgentPanel />
             )}
           </div>
 

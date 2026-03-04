@@ -148,6 +148,8 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
 
   // 批量生成状态
   const [batchGenerating, setBatchGenerating] = useState(false);
+  // 导出群演状态
+  const [exportCastMsg, setExportCastMsg] = useState('');
   const [batchProgress, setBatchProgress] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -1423,8 +1425,35 @@ export default function NovelToDrama({ onClose, sessionId, onProjectCreated }: N
                     className="text-[10px] px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-400 transition-colors whitespace-nowrap">
                     {loading ? '...' : t('drama.refreshPrompts')}
                   </button>
+                  {/* 导出角色到群演仓库 */}
+                  <button onClick={async () => {
+                    setExportCastMsg('');
+                    try {
+                      const res = await fetch(`/api/character-agents/extract/${project.id}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ rolesFilter: ['protagonist', 'supporting'] }),
+                      });
+                      const data = await res.json();
+                      if (data?.success) {
+                        setExportCastMsg(`✅ 已导出 ${data.count} 个角色到群演仓库`);
+                        setTimeout(() => setExportCastMsg(''), 3000);
+                      } else {
+                        setExportCastMsg(`❌ ${data?.error || '导出失败'}`);
+                      }
+                    } catch { setExportCastMsg('❌ 导出失败'); }
+                  }}
+                    className="text-[10px] px-2 py-1 rounded bg-purple-600 hover:bg-purple-500 text-white transition-colors whitespace-nowrap">
+                    🎭 {t('drama.exportCast') || '导出群演'}
+                  </button>
                 </div>
               </div>
+              {/* 导出群演提示 */}
+              {exportCastMsg && (
+                <div className={`text-xs px-3 py-2 rounded-lg ${exportCastMsg.startsWith('✅') ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                  {exportCastMsg}
+                </div>
+              )}
               {/* 主角和配角 - 需要生成角色图并确认 */}
               {project.novel.characters.filter(c => c.role !== 'minor').map((char) => {
                 const progress = charImageProgress[char.id];

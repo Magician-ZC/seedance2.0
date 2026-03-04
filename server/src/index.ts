@@ -22,10 +22,11 @@ import {
   batchGenerateRefImages, refreshVisualPrompts, refreshTitleAndSummary, updateCharacterRefImage, optimizeSingleEpisode,
   generateEpisodeRefImages, regenerateEpisodeShots, getProjectImageSubDir, updateCharacterFields, updateLocationFields,
   repairProjectImages,
+  extractCharacterAgents,
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, type AgentStoreRow } from './db-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
@@ -1681,6 +1682,73 @@ app.get('/api/agents/:id', (req, res) => {
 // DELETE /api/agents/:id - 删除Agent
 app.delete('/api/agents/:id', (req, res) => {
   deleteAgentStore(req.params.id);
+  res.json({ success: true });
+});
+
+// ============================================================
+// 角色Agent仓库（群演库）
+// ============================================================
+
+// POST /api/character-agents/extract/:projectId - 从小说项目提取角色为Agent
+app.post('/api/character-agents/extract/:projectId', (req, res) => {
+  const { rolesFilter, category } = req.body || {};
+  const result = extractCharacterAgents(req.params.projectId, { rolesFilter, category });
+  if (!result.success) return res.status(400).json({ error: result.error });
+  res.json({ success: true, agents: result.agents, count: result.agents.length });
+});
+
+// GET /api/character-agents - 角色Agent列表
+app.get('/api/character-agents', (req, res) => {
+  const agents = listCharacterAgents().map(a => ({
+    id: a.id, name: a.name, role: a.role, category: a.category,
+    description: a.description, personality: a.personality,
+    sourceNovel: a.source_novel, visualPrompt: a.visual_prompt,
+    profileImages: JSON.parse(a.profile_images || '{}'),
+    tags: JSON.parse(a.tags || '[]'),
+    createdAt: a.created_at,
+  }));
+  // 按来源小说分组
+  const grouped: Record<string, typeof agents> = {};
+  for (const a of agents) {
+    const key = a.sourceNovel || '未分类';
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(a);
+  }
+  res.json({ agents, grouped });
+});
+
+// GET /api/character-agents/:id - 角色Agent详情
+app.get('/api/character-agents/:id', (req, res) => {
+  const agent = getCharacterAgentById(req.params.id);
+  if (!agent) return res.status(404).json({ error: '角色Agent不存在' });
+  res.json({
+    id: agent.id, name: agent.name, role: agent.role, category: agent.category,
+    description: agent.description, personality: agent.personality,
+    visualPrompt: agent.visual_prompt, costumeDesc: agent.costume_desc,
+    systemPrompt: agent.system_prompt, sourceNovel: agent.source_novel,
+    profileImages: JSON.parse(agent.profile_images || '{}'),
+    tags: JSON.parse(agent.tags || '[]'),
+    createdAt: agent.created_at,
+  });
+});
+
+// PATCH /api/character-agents/:id - 更新角色Agent
+app.patch('/api/character-agents/:id', (req, res) => {
+  const agent = getCharacterAgentById(req.params.id);
+  if (!agent) return res.status(404).json({ error: '角色Agent不存在' });
+  const { category, tags, description, personality } = req.body || {};
+  const updates: Record<string, unknown> = { updated_at: Date.now() };
+  if (category !== undefined) updates.category = category;
+  if (tags !== undefined) updates.tags = JSON.stringify(tags);
+  if (description !== undefined) updates.description = description;
+  if (personality !== undefined) updates.personality = personality;
+  updateCharacterAgent(req.params.id, updates);
+  res.json({ success: true });
+});
+
+// DELETE /api/character-agents/:id - 删除角色Agent
+app.delete('/api/character-agents/:id', (req, res) => {
+  deleteCharacterAgent(req.params.id);
   res.json({ success: true });
 });
 
