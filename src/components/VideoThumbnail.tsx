@@ -15,6 +15,7 @@ export default function VideoThumbnail({ videoUrl, className = '' }: VideoThumbn
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [thumbnail, setThumbnail] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -33,14 +34,16 @@ export default function VideoThumbnail({ videoUrl, className = '' }: VideoThumbn
         if (ctx) {
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           setThumbnail(canvas.toDataURL('image/jpeg', 0.7));
+          setLoading(false);
         }
       } catch {
         setError(true);
+        setLoading(false);
       }
     };
 
     video.addEventListener('seeked', handleSeeked, { once: true });
-    video.addEventListener('error', () => setError(true), { once: true });
+    video.addEventListener('error', () => { setError(true); setLoading(false); }, { once: true });
 
     return () => {
       video.removeEventListener('seeked', handleSeeked);
@@ -48,10 +51,18 @@ export default function VideoThumbnail({ videoUrl, className = '' }: VideoThumbn
     };
   }, [videoUrl]);
 
-  if (error || !thumbnail) {
+  if (error) {
     return (
-      <div className={`w-full h-full flex items-center justify-center bg-[#161824] ${className}`}>
-        <FilmIcon className="w-6 h-6 text-gray-600" />
+      <div className={`w-full h-full flex items-center justify-center bg-[#111] ${className}`}>
+        <FilmIcon className="w-8 h-8 text-gray-700" />
+      </div>
+    );
+  }
+
+  if (loading || !thumbnail) {
+    return (
+      <div className={`w-full h-full bg-[#111] animate-pulse flex items-center justify-center ${className}`}>
+        <div className="w-8 h-8 border-2 border-white/10 border-t-white/30 rounded-full animate-spin" />
         <video ref={videoRef} className="hidden" muted preload="metadata" />
         <canvas ref={canvasRef} className="hidden" />
       </div>
@@ -60,7 +71,7 @@ export default function VideoThumbnail({ videoUrl, className = '' }: VideoThumbn
 
   return (
     <>
-      <img src={thumbnail} alt="thumbnail" className={`w-full h-full object-cover ${className}`} />
+      <img src={thumbnail} alt="thumbnail" className={`w-full h-full object-cover transition-opacity duration-500 ${className}`} />
       <video ref={videoRef} className="hidden" muted preload="metadata" />
       <canvas ref={canvasRef} className="hidden" />
     </>

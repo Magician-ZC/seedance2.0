@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CloseIcon, EyeIcon, EyeOffIcon, CheckIcon } from './Icons';
+import { CloseIcon, EyeIcon, EyeOffIcon, CheckIcon, GearIcon, SparkleIcon } from './Icons';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -189,228 +189,247 @@ export default function SettingsModal({ isOpen, onClose, sessionId, onSessionIdC
     }
   };
 
-  const inputClass = 'w-full bg-[#161824] border border-gray-700 rounded-xl px-3 py-2.5 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-purple-500 transition-colors';
+  const inputClass = 'w-full bg-[#111] border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-purple-500/50 focus:ring-1 focus:ring-purple-500/20 transition-all';
+  const labelClass = 'block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2';
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-[#1c1f2e] border border-gray-800 rounded-3xl p-6 max-w-lg w-full mx-4 shadow-2xl max-h-[85vh] flex flex-col">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg text-gray-200 font-medium">{t('settings.title')}</h2>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-800 transition-colors">
-            <CloseIcon className="w-5 h-5 text-gray-400" />
+      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm transition-opacity" onClick={onClose} />
+      <div className="relative bg-[#0a0a0a] border border-white/10 rounded-3xl w-full max-w-2xl mx-4 shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-fade-in">
+        
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur z-10">
+          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+            <GearIcon className="w-5 h-5 text-gray-400" />
+            {t('settings.title')}
+          </h2>
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 transition-colors text-gray-400 hover:text-white">
+            <CloseIcon className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Tab 切换 */}
-        <div className="flex gap-1 mb-4 bg-[#161824] rounded-xl p-1">
-          <button onClick={() => setTab('general')}
-            className={`flex-1 py-2 rounded-lg text-sm transition-all ${tab === 'general' ? 'bg-purple-600/20 text-purple-400' : 'text-gray-400 hover:text-gray-200'}`}>
-            {t('settings.tabGeneral')}
-          </button>
-          <button onClick={() => setTab('llm')}
-            className={`flex-1 py-2 rounded-lg text-sm transition-all ${tab === 'llm' ? 'bg-purple-600/20 text-purple-400' : 'text-gray-400 hover:text-gray-200'}`}>
-            {t('settings.tabLLM')}
-          </button>
+        {/* Tabs */}
+        <div className="px-6 pt-6 pb-2">
+          <div className="flex bg-[#111] rounded-xl p-1 border border-white/5">
+            <button onClick={() => setTab('general')}
+              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === 'general' ? 'bg-[#222] text-white shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>
+              {t('settings.tabGeneral')}
+            </button>
+            <button onClick={() => setTab('llm')}
+              className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${tab === 'llm' ? 'bg-[#222] text-purple-400 shadow-sm' : 'text-gray-500 hover:text-gray-300'}`}>
+              {t('settings.tabLLM')}
+            </button>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar">
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-8">
           {/* General Tab */}
           {tab === 'general' && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1.5">{t('settings.sessionId')}</label>
-                <div className="relative">
-                  <input type={showSessionId ? 'text' : 'password'} value={localSessionId}
-                    onChange={(e) => setLocalSessionId(e.target.value)}
-                    placeholder={t('settings.sessionIdPlaceholder')} className={`${inputClass} pr-10`} />
-                  <button onClick={() => setShowSessionId(!showSessionId)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
-                    {showSessionId ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
-                  </button>
+            <div className="space-y-6 animate-fade-in">
+              <div className="bg-[#111]/50 rounded-2xl p-5 border border-white/5 space-y-4">
+                <div>
+                  <label className={labelClass}>{t('settings.sessionId')}</label>
+                  <div className="relative group">
+                    <input type={showSessionId ? 'text' : 'password'} value={localSessionId}
+                      onChange={(e) => setLocalSessionId(e.target.value)}
+                      placeholder={t('settings.sessionIdPlaceholder')} className={`${inputClass} pr-12 font-mono`} />
+                    <button onClick={() => setShowSessionId(!showSessionId)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 hover:text-white transition-colors rounded-lg hover:bg-white/5">
+                      {showSessionId ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2 leading-relaxed">{t('settings.sessionIdHint')}</p>
                 </div>
-                <p className="text-xs text-gray-500 mt-1">{t('settings.sessionIdHint')}</p>
               </div>
-              <div>
-                <label className="block text-sm text-gray-400 mb-1.5">{t('drama.maxConcurrentChars')}</label>
-                <input type="number" value={maxConcurrentChars}
-                  onChange={(e) => setMaxConcurrentChars(Math.max(1, Math.min(5, Number(e.target.value))))}
-                  min={1} max={5} className={inputClass} />
-                <p className="text-xs text-gray-500 mt-1">{t('drama.maxConcurrentCharsHint')}</p>
+
+              <div className="bg-[#111]/50 rounded-2xl p-5 border border-white/5 space-y-4">
+                <div>
+                  <label className={labelClass}>{t('drama.maxConcurrentChars')}</label>
+                  <input type="number" value={maxConcurrentChars}
+                    onChange={(e) => setMaxConcurrentChars(Math.max(1, Math.min(5, Number(e.target.value))))}
+                    min={1} max={5} className={inputClass} />
+                  <p className="text-xs text-gray-500 mt-2">{t('drama.maxConcurrentCharsHint')}</p>
+                </div>
               </div>
             </div>
           )}
 
           {/* LLM Tab */}
           {tab === 'llm' && (
-            <div className="space-y-5">
-              {/* ===== 区块1: 文本模型（解析小说 + 改造剧本） ===== */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-purple-500" />
-                  <span className="text-sm text-gray-200 font-medium">{t('settings.llmTextTitle')}</span>
-                </div>
-                <p className="text-xs text-gray-500">{t('settings.llmTextHint')}</p>
-
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmProvider')}</label>
-                  <select value={llmConfig.provider} onChange={(e) => handleProviderChange(e.target.value)} className={inputClass}>
-                    {LLM_PROVIDERS.map(p => (
-                      <option key={p.value} value={p.value}>{p.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {llmConfig.provider !== 'ollama' && (
+            <div className="space-y-8 animate-fade-in">
+              {/* Text Model Section */}
+              <section className="bg-[#111]/30 rounded-2xl border border-white/5 overflow-hidden">
+                <div className="px-5 py-4 border-b border-white/5 bg-[#111]/50 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center">
+                    <SparkleIcon className="w-4 h-4 text-purple-400" />
+                  </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">API Key</label>
-                    <div className="relative">
-                      <input type={showApiKey ? 'text' : 'password'} value={llmConfig.apiKey}
-                        onChange={(e) => setLlmConfig(prev => ({ ...prev, apiKey: e.target.value }))}
-                        placeholder="sk-..." className={`${inputClass} pr-10`} />
-                      <button onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
-                        {showApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
-                      </button>
+                    <h3 className="text-sm font-bold text-white">{t('settings.llmTextTitle')}</h3>
+                    <p className="text-xs text-gray-500">{t('settings.llmTextHint')}</p>
+                  </div>
+                </div>
+                
+                <div className="p-5 space-y-5">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <div className="col-span-1 md:col-span-2">
+                      <label className={labelClass}>{t('settings.llmProvider')}</label>
+                      <select value={llmConfig.provider} onChange={(e) => handleProviderChange(e.target.value)} className={inputClass}>
+                        {LLM_PROVIDERS.map(p => (
+                          <option key={p.value} value={p.value}>{p.label}</option>
+                        ))}
+                      </select>
                     </div>
-                  </div>
-                )}
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">API URL</label>
-                    <input type="text" value={llmConfig.apiUrl}
-                      onChange={(e) => setLlmConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
-                      placeholder="https://api.example.com" className={inputClass} />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmModel')}</label>
-                    <input type="text" value={llmConfig.model}
-                      onChange={(e) => setLlmConfig(prev => ({ ...prev, model: e.target.value }))}
-                      placeholder="model-name" className={inputClass} />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmMaxTokens')}</label>
-                    <input type="number" value={llmConfig.maxTokens}
-                      onChange={(e) => setLlmConfig(prev => ({ ...prev, maxTokens: Number(e.target.value) }))}
-                      min={1000} max={128000} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmTemperature')}</label>
-                    <input type="number" value={llmConfig.temperature} step={0.1}
-                      onChange={(e) => setLlmConfig(prev => ({ ...prev, temperature: Number(e.target.value) }))}
-                      min={0} max={2} className={inputClass} />
-                  </div>
-                </div>
-
-                {llmTestStatus !== 'idle' && (
-                  <div className={`px-3 py-2 rounded-lg text-xs ${
-                    llmTestStatus === 'testing' ? 'bg-blue-900/30 text-blue-400' :
-                    llmTestStatus === 'success' ? 'bg-green-900/30 text-green-400' :
-                    'bg-red-900/30 text-red-400'
-                  }`}>
-                    {llmTestStatus === 'testing' && <span className="animate-pulse">{t('settings.llmTesting')}</span>}
-                    {llmTestStatus !== 'testing' && (
-                      <span className="flex items-center gap-1">
-                        {llmTestStatus === 'success' && <CheckIcon className="w-3 h-3" />}
-                        {llmTestMsg}
-                      </span>
+                    {llmConfig.provider !== 'ollama' && (
+                      <div className="col-span-1 md:col-span-2">
+                        <label className={labelClass}>API Key</label>
+                        <div className="relative">
+                          <input type={showApiKey ? 'text' : 'password'} value={llmConfig.apiKey}
+                            onChange={(e) => setLlmConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                            placeholder="sk-..." className={`${inputClass} pr-12 font-mono`} />
+                          <button onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 hover:text-white transition-colors rounded-lg hover:bg-white/5">
+                            {showApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
                     )}
-                  </div>
-                )}
 
-                <div className="flex gap-2">
-                  <button onClick={handleSaveLLM} disabled={llmSaving}
-                    className="flex-1 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-sm font-bold transition-all">
-                    {llmSaving ? t('common.loading') : t('settings.llmSave')}
-                  </button>
-                  <button onClick={handleTestLLM} disabled={llmTestStatus === 'testing'}
-                    className="px-4 py-2 rounded-xl bg-[#161824] border border-gray-700 text-gray-300 text-sm hover:bg-[#1c2030] transition-colors">
-                    {t('settings.llmTest')}
-                  </button>
-                </div>
-              </div>
-
-              {/* 分隔线 */}
-              <div className="border-t border-gray-700/50" />
-
-              {/* ===== 区块2: 视觉模型（AI 图片审查） ===== */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
-                  <span className="text-sm text-gray-200 font-medium">{t('settings.llmVisionTitle')}</span>
-                  {!visionConfigured && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-900/30 text-yellow-400">{t('settings.llmVisionFallback')}</span>
-                  )}
-                </div>
-                <p className="text-xs text-gray-500">{t('settings.llmVisionHint')}</p>
-
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">{t('settings.llmProvider')}</label>
-                  <select value={visionConfig.provider} onChange={(e) => handleVisionProviderChange(e.target.value)} className={inputClass}>
-                    {LLM_PROVIDERS.map(p => (
-                      <option key={p.value} value={p.value}>{p.label}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {visionConfig.provider !== 'ollama' && (
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">API Key</label>
-                    <div className="relative">
-                      <input type={showVisionApiKey ? 'text' : 'password'} value={visionConfig.apiKey}
-                        onChange={(e) => setVisionConfig(prev => ({ ...prev, apiKey: e.target.value }))}
-                        placeholder="sk-..." className={`${inputClass} pr-10`} />
-                      <button onClick={() => setShowVisionApiKey(!showVisionApiKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-500 hover:text-gray-300">
-                        {showVisionApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
-                      </button>
+                    <div>
+                      <label className={labelClass}>API URL</label>
+                      <input type="text" value={llmConfig.apiUrl}
+                        onChange={(e) => setLlmConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
+                        placeholder="https://api.example.com" className={inputClass} />
+                    </div>
+                    <div>
+                      <label className={labelClass}>{t('settings.llmModel')}</label>
+                      <input type="text" value={llmConfig.model}
+                        onChange={(e) => setLlmConfig(prev => ({ ...prev, model: e.target.value }))}
+                        placeholder="model-name" className={inputClass} />
+                    </div>
+                    <div>
+                      <label className={labelClass}>{t('settings.llmMaxTokens')}</label>
+                      <input type="number" value={llmConfig.maxTokens}
+                        onChange={(e) => setLlmConfig(prev => ({ ...prev, maxTokens: Number(e.target.value) }))}
+                        min={1000} max={128000} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className={labelClass}>{t('settings.llmTemperature')}</label>
+                      <input type="number" value={llmConfig.temperature} step={0.1}
+                        onChange={(e) => setLlmConfig(prev => ({ ...prev, temperature: Number(e.target.value) }))}
+                        min={0} max={2} className={inputClass} />
                     </div>
                   </div>
-                )}
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-400 mb-1">API URL</label>
-                    <input type="text" value={visionConfig.apiUrl}
-                      onChange={(e) => setVisionConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
-                      placeholder="https://api.example.com" className={inputClass} />
+                  {/* Test Status */}
+                  {llmTestStatus !== 'idle' && (
+                    <div className={`px-4 py-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                      llmTestStatus === 'testing' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' :
+                      llmTestStatus === 'success' ? 'bg-green-500/10 text-green-400 border border-green-500/20' :
+                      'bg-red-500/10 text-red-400 border border-red-500/20'
+                    }`}>
+                      {llmTestStatus === 'testing' && <span className="animate-spin h-3 w-3 border-2 border-current border-t-transparent rounded-full" />}
+                      {llmTestStatus === 'success' && <CheckIcon className="w-4 h-4" />}
+                      <span>{llmTestStatus === 'testing' ? t('settings.llmTesting') : llmTestMsg}</span>
+                    </div>
+                  )}
+
+                  <div className="flex gap-3 pt-2">
+                    <button onClick={handleSaveLLM} disabled={llmSaving}
+                      className="flex-1 py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-sm font-bold transition-all shadow-lg shadow-purple-900/20 disabled:opacity-50 disabled:shadow-none">
+                      {llmSaving ? t('common.loading') : t('settings.llmSave')}
+                    </button>
+                    <button onClick={handleTestLLM} disabled={llmTestStatus === 'testing'}
+                      className="px-6 py-3 rounded-xl bg-[#222] border border-white/10 text-gray-300 text-sm font-medium hover:bg-[#333] hover:text-white transition-all">
+                      {t('settings.llmTest')}
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* Vision Model Section */}
+              <section className="bg-[#111]/30 rounded-2xl border border-white/5 overflow-hidden">
+                <div className="px-5 py-4 border-b border-white/5 bg-[#111]/50 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                    <EyeIcon className="w-4 h-4 text-cyan-400" />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-400 mb-1">{t('settings.llmModel')}</label>
-                    <input type="text" value={visionConfig.model}
-                      onChange={(e) => setVisionConfig(prev => ({ ...prev, model: e.target.value }))}
-                      placeholder="gemini-2.0-flash" className={inputClass} />
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      {t('settings.llmVisionTitle')}
+                      {!visionConfigured && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 font-normal">{t('settings.llmVisionFallback')}</span>
+                      )}
+                    </h3>
+                    <p className="text-xs text-gray-500">{t('settings.llmVisionHint')}</p>
                   </div>
                 </div>
 
-                {visionSaveMsg && (
-                  <div className="px-3 py-2 rounded-lg text-xs bg-green-900/30 text-green-400">
-                    <span className="flex items-center gap-1"><CheckIcon className="w-3 h-3" />{visionSaveMsg}</span>
-                  </div>
-                )}
+                <div className="p-5 space-y-5">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                    <div className="col-span-1 md:col-span-2">
+                      <label className={labelClass}>{t('settings.llmProvider')}</label>
+                      <select value={visionConfig.provider} onChange={(e) => handleVisionProviderChange(e.target.value)} className={inputClass}>
+                        {LLM_PROVIDERS.map(p => (
+                          <option key={p.value} value={p.value}>{p.label}</option>
+                        ))}
+                      </select>
+                    </div>
 
-                <button onClick={handleSaveVision} disabled={visionSaving}
-                  className="w-full py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white text-sm font-bold transition-all">
-                  {visionSaving ? t('common.loading') : t('settings.llmSave')}
-                </button>
-              </div>
+                    {visionConfig.provider !== 'ollama' && (
+                      <div className="col-span-1 md:col-span-2">
+                        <label className={labelClass}>API Key</label>
+                        <div className="relative">
+                          <input type={showVisionApiKey ? 'text' : 'password'} value={visionConfig.apiKey}
+                            onChange={(e) => setVisionConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                            placeholder="sk-..." className={`${inputClass} pr-12 font-mono`} />
+                          <button onClick={() => setShowVisionApiKey(!showVisionApiKey)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-gray-500 hover:text-white transition-colors rounded-lg hover:bg-white/5">
+                            {showVisionApiKey ? <EyeOffIcon className="w-4 h-4" /> : <EyeIcon className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className={labelClass}>API URL</label>
+                      <input type="text" value={visionConfig.apiUrl}
+                        onChange={(e) => setVisionConfig(prev => ({ ...prev, apiUrl: e.target.value }))}
+                        placeholder="https://api.example.com" className={inputClass} />
+                    </div>
+                    <div>
+                      <label className={labelClass}>{t('settings.llmModel')}</label>
+                      <input type="text" value={visionConfig.model}
+                        onChange={(e) => setVisionConfig(prev => ({ ...prev, model: e.target.value }))}
+                        placeholder="gemini-2.0-flash" className={inputClass} />
+                    </div>
+                  </div>
+
+                  {visionSaveMsg && (
+                    <div className="px-4 py-3 rounded-xl text-xs bg-green-500/10 text-green-400 border border-green-500/20 flex items-center gap-2">
+                      <CheckIcon className="w-4 h-4" />{visionSaveMsg}
+                    </div>
+                  )}
+
+                  <button onClick={handleSaveVision} disabled={visionSaving}
+                    className="w-full py-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-bold transition-all shadow-lg shadow-cyan-900/20 disabled:opacity-50 disabled:shadow-none">
+                    {visionSaving ? t('common.loading') : t('settings.llmSave')}
+                  </button>
+                </div>
+              </section>
             </div>
           )}
         </div>
 
-        {/* 底部按钮（General tab） */}
+        {/* Footer Actions (General Tab Only) */}
         {tab === 'general' && (
-          <div className="flex gap-3 mt-6">
+          <div className="p-6 border-t border-white/5 bg-[#0a0a0a]/95 backdrop-blur flex gap-4 sticky bottom-0 z-20">
             <button onClick={onClose}
-              className="flex-1 px-4 py-2.5 rounded-xl bg-[#161824] border border-gray-700 text-gray-300 text-sm hover:bg-[#1c2030] transition-colors">
+              className="flex-1 px-6 py-3.5 rounded-xl bg-[#222] border border-white/5 text-gray-300 text-sm font-medium hover:bg-[#333] hover:text-white transition-all">
               {t('common.cancel')}
             </button>
             <button onClick={handleSave}
-              className="flex-1 px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-sm font-bold transition-all shadow-lg shadow-purple-900/20">
+              className="flex-1 px-6 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white text-sm font-bold transition-all shadow-lg shadow-green-900/20 hover:shadow-green-900/40 hover:scale-[1.02] active:scale-[0.98]">
               {t('common.save')}
             </button>
           </div>

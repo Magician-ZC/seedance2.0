@@ -20,14 +20,17 @@ export default function PromptInput({ value, onChange, disabled }: PromptInputPr
   }, [value]);
 
   return (
-    <textarea
-      ref={textareaRef}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={PLACEHOLDER}
-      disabled={disabled}
-      rows={2}
-      className="flex-1 bg-transparent border-none outline-none resize-none text-sm text-gray-200 placeholder-gray-500 leading-relaxed disabled:opacity-50"
-    />
+    <div className="relative group">
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={PLACEHOLDER}
+        disabled={disabled}
+        rows={2}
+        className="w-full bg-transparent border-none outline-none resize-none text-sm text-gray-200 placeholder-gray-600 leading-relaxed disabled:opacity-50 min-h-[60px]"
+      />
+      <div className="absolute bottom-0 right-0 h-px w-0 bg-gradient-to-r from-transparent via-green-500 to-transparent group-focus-within:w-full transition-all duration-500"></div>
+    </div>
   );
 }

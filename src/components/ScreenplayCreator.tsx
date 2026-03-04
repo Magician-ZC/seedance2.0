@@ -1,6 +1,7 @@
 // 剧本创建向导组件 - 基于 short-drama 方法论的多步骤创作流程
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CloseIcon, ArrowLeftIcon, SparkleIcon, CheckIcon, DownloadIcon, BookIcon, UserIcon, FilmIcon } from './Icons';
 
 // ============================================================
 // 类型定义（与后端对齐）
@@ -169,16 +170,19 @@ function ProgressLog({ logs }: { logs: string[] }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs.length]);
   return (
-    <div className="rounded-xl bg-[#0d0d0d] border border-blue-500/20 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-blue-500/5 border-b border-blue-500/10">
-        <span className="text-xs text-blue-400">📋 实时日志</span>
-        <span className="text-[10px] text-gray-600">{logs.length} 条</span>
+    <div className="rounded-xl bg-[#0d0d0d] border border-blue-500/20 overflow-hidden shadow-lg animate-fade-in">
+      <div className="flex items-center justify-between px-4 py-3 bg-blue-500/10 border-b border-blue-500/10">
+        <span className="text-xs font-bold text-blue-400 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+          实时创作日志
+        </span>
+        <span className="text-[10px] text-blue-300/60 font-mono">{logs.length} ops</span>
       </div>
-      <div className="max-h-48 overflow-y-auto custom-scrollbar p-3 space-y-1 font-mono">
+      <div className="max-h-48 overflow-y-auto custom-scrollbar p-4 space-y-2 font-mono">
         {logs.map((log, i) => (
-          <div key={i} className="text-xs text-gray-400 leading-relaxed">
-            <span className="text-gray-600 mr-2">{String(i + 1).padStart(2, '0')}</span>
-            {log}
+          <div key={i} className="text-xs text-gray-400 leading-relaxed flex gap-3">
+            <span className="text-gray-700 select-none">{String(i + 1).padStart(2, '0')}</span>
+            <span className={log.includes('✅') ? 'text-green-400' : ''}>{log}</span>
           </div>
         ))}
         <div ref={endRef} />
@@ -220,6 +224,17 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   const [reviewingEp, setReviewingEp] = useState<number | null>(null);
   const [exportContent, setExportContent] = useState('');
   const [existingProjects, setExistingProjects] = useState<ScreenplayProject[]>([]);
+  // 一键优化
+  const [reviewAllTaskId, setReviewAllTaskId] = useState<string | null>(null);
+  const [reviewAllCurrentEp, setReviewAllCurrentEp] = useState<number[]>([]);
+  const [reviewAllProgress, setReviewAllProgress] = useState('');
+  const [reviewAllError, setReviewAllError] = useState('');
+  const [reviewAllDone, setReviewAllDone] = useState(0);
+  const [reviewAllTotal, setReviewAllTotal] = useState(0);
+  // 记录优化前的旧分数 { [epNumber]: oldScore }
+  const [preReviewScores, setPreReviewScores] = useState<Record<number, number>>({});
+  // 审核详情弹窗
+  const [reviewDetailEp, setReviewDetailEp] = useState<number | null>(null);
 
   // 规范化项目数据（DB恢复后字段可能是JSON字符串而非对象）
   const normalizeProject = (p: ScreenplayProject): ScreenplayProject => {
@@ -279,15 +294,12 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   // 刷新项目数据
   const refreshProject = useCallback(async () => {
     const pid = projectIdRef.current;
-    console.log('[refreshProject] called, pid=', pid);
     if (!pid) return;
     try {
       const res = await fetch(`/api/screenplay/${pid}`);
       const data = await res.json();
-      console.log('[refreshProject] API response:', data?.project?.status, 'hasDir=', Array.isArray(data?.project?.episodeDirectory), 'dirType=', typeof data?.project?.episodeDirectory);
       if (data?.project) {
         const normalized = normalizeProject(data.project);
-        console.log('[refreshProject] normalized hasDir=', Array.isArray(normalized.episodeDirectory), 'dirLen=', normalized.episodeDirectory?.length);
         setProject(normalized);
       }
     } catch (err) { console.error('[refreshProject] error:', err); }
@@ -400,6 +412,81 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     finally { setReviewingEp(null); }
   };
 
+  // 一键优化：批量自检+改写所有集
+  const handleReviewAll = async () => {
+    if (!project) return;
+    setError('');
+    // 记录优化前的旧分数
+    const oldScores: Record<number, number> = {};
+    for (const ep of project.episodes) {
+      const r = project.reviews[ep.number];
+      if (r) oldScores[ep.number] = r.total;
+    }
+    setPreReviewScores(oldScores);
+    setReviewAllCurrentEp([]);
+    setReviewAllProgress('');
+    setReviewAllError('');
+    setReviewAllDone(0);
+    setReviewAllTotal(project.episodes.length);
+    try {
+      const res = await fetch(`/api/screenplay/${project.id}/review-all`, { method: 'POST' });
+      const data = await res.json();
+      if (data?.async && data.taskId) setReviewAllTaskId(data.taskId);
+      else if (data?.error) setError(data.error);
+    } catch (err) { setError((err as Error).message); }
+  };
+
+  // 一键优化 WebSocket 进度监听
+  useEffect(() => {
+    if (!reviewAllTaskId) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    let closed = false;
+
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId: reviewAllTaskId }));
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.taskId !== reviewAllTaskId) return;
+        const status = msg.data?.status || msg.status;
+        const progressRaw = msg.data?.progress || msg.progress;
+        const errorText = msg.data?.error || msg.error;
+
+        // 尝试解析结构化进度
+        let parsed: { msg?: string; currentEps?: number[]; currentEp?: number | null; done?: number; total?: number; completedEp?: number; score?: number } | null = null;
+        try { parsed = JSON.parse(progressRaw); } catch { /* plain string fallback */ }
+
+        if (status === 'processing') {
+          if (parsed) {
+            setReviewAllProgress(parsed.msg || '');
+            setReviewAllCurrentEp(parsed.currentEps ?? (parsed.currentEp != null ? [parsed.currentEp] : []));
+            if (typeof parsed.done === 'number') setReviewAllDone(parsed.done);
+            if (typeof parsed.total === 'number') setReviewAllTotal(parsed.total);
+            // 每集完成后刷新项目数据获取最新分数
+            if (parsed.completedEp) refreshProject();
+          } else {
+            setReviewAllProgress(progressRaw || '');
+          }
+        } else if (status === 'done') {
+          if (parsed) setReviewAllProgress(parsed.msg || '');
+          setReviewAllCurrentEp([]);
+          setReviewAllTaskId(null);
+          refreshProject();
+          ws.close();
+        } else if (status === 'error') {
+          setReviewAllError(errorText || '优化失败');
+          setReviewAllCurrentEp([]);
+          setReviewAllTaskId(null);
+          ws.close();
+        }
+      } catch { /* ignore */ }
+    };
+    ws.onerror = () => { setReviewAllError('WebSocket 连接失败'); setReviewAllTaskId(null); };
+    ws.onclose = () => { if (!closed) { closed = true; } };
+
+    return () => { closed = true; ws.close(); };
+  }, [reviewAllTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleExport = async () => {
     if (!project) return;
     setLoading(true); setError('');
@@ -451,346 +538,337 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   return (
     <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col">
       {/* Header */}
-      <header className="h-14 flex items-center justify-between px-6 border-b border-white/5 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
-            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
+      <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur z-20">
+        <div className="flex items-center gap-4">
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 transition-colors text-gray-400 hover:text-white">
+            <ArrowLeftIcon className="w-5 h-5" />
           </button>
-          <h1 className="text-base font-semibold text-white">
-            ✍️ {isZh ? '剧本创作' : 'Screenplay Creator'}
-            {project?.selectedTitle && <span className="text-gray-400 ml-2">— {project.selectedTitle}</span>}
-          </h1>
+          <div>
+            <h1 className="text-lg font-bold text-white flex items-center gap-2">
+              <span className="text-2xl">✍️</span>
+              {isZh ? '剧本创作' : 'Screenplay Creator'}
+            </h1>
+            {project?.selectedTitle && <p className="text-xs text-gray-500 font-mono mt-0.5">{project.selectedTitle}</p>}
+          </div>
         </div>
-      </header>
-
-      {/* Step Bar */}
-      <div className="px-6 py-3 border-b border-white/5 flex-shrink-0">
-        <div className="flex items-center gap-1 max-w-4xl mx-auto">
+        
+        {/* Step Progress */}
+        <div className="flex items-center gap-1">
           {STEPS.map((s, i) => {
             const isActive = s === step;
             const isDone = i < stepIndex;
             return (
-              <div key={s} className="flex items-center flex-1">
-                <button
-                  onClick={() => isDone && setStep(s)}
-                  disabled={!isDone && !isActive}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-colors w-full justify-center ${
-                    isActive ? 'bg-green-600/20 text-green-400 border border-green-500/30' :
-                    isDone ? 'bg-white/5 text-gray-300 hover:bg-white/10 cursor-pointer' :
-                    'text-gray-600'
-                  }`}
-                >
-                  {isDone && <span>✓</span>}
-                  <span>{isZh ? STEP_LABELS[s].zh : STEP_LABELS[s].en}</span>
-                </button>
-                {i < STEPS.length - 1 && <div className={`w-4 h-px mx-1 ${isDone ? 'bg-green-500/50' : 'bg-white/10'}`} />}
+              <div key={s} className="flex items-center">
+                <div className={`flex flex-col items-center gap-1 px-3 ${isActive ? 'opacity-100' : isDone ? 'opacity-60 hover:opacity-80 cursor-pointer' : 'opacity-30'}`}
+                  onClick={() => isDone && setStep(s)}>
+                  <div className={`w-2.5 h-2.5 rounded-full transition-all ${isActive ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)] scale-125' : isDone ? 'bg-green-500' : 'bg-gray-600'}`} />
+                  <span className="text-[10px] font-medium uppercase tracking-wider">{isZh ? STEP_LABELS[s].zh : STEP_LABELS[s].en}</span>
+                </div>
+                {i < STEPS.length - 1 && <div className={`w-8 h-[1px] ${isDone ? 'bg-green-500/50' : 'bg-white/10'}`} />}
               </div>
             );
           })}
         </div>
-      </div>
+
+        <button onClick={onClose}
+          className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
+          {isZh ? '后台运行' : 'Run in Background'}
+        </button>
+      </header>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
-        <div className="max-w-4xl mx-auto px-6 py-6">
+      <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">
+        <div className="max-w-5xl mx-auto px-8 py-10">
           {/* 进度/错误提示 */}
-          {logs.length > 0 && <ProgressLog logs={logs} />}
+          {logs.length > 0 && <div className="mb-8"><ProgressLog logs={logs} /></div>}
           {displayError && (
-            <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm">
+            <div className="mb-8 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm flex items-center gap-3 animate-fade-in">
+              <span className="text-xl">⚠️</span>
               {displayError}
             </div>
           )}
 
           {/* Step: 选题定位 */}
           {step === 'config' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '🎬 选题定位' : '🎬 Setup'}</h2>
+            <div className="space-y-8 animate-fade-in">
+              <div className="text-center mb-10">
+                <h2 className="text-3xl font-bold text-white mb-3">{isZh ? '开始你的创作之旅' : 'Start Your Journey'}</h2>
+                <p className="text-gray-500">{isZh ? '配置剧本的基本参数，AI 将为你构建世界' : 'Configure the basics, AI will build the world'}</p>
+              </div>
 
               {/* 已有项目恢复 */}
               {existingProjects.length > 0 && (
-                <div className="p-4 rounded-xl bg-[#111] border border-amber-500/20 space-y-3">
-                  <p className="text-sm text-amber-400">📂 {isZh ? '发现未完成的剧本项目' : 'Unfinished projects found'}</p>
-                  {existingProjects.map(p => {
-                    const statusLabels: Record<string, string> = {
-                      config_done: '待生成方案', plan_done: '待角色开发', characters_done: '待分集目录',
-                      directory_done: '待撰写', writing: '撰写中', review: '自检中',
-                    };
-                    return (
-                      <div key={p.id} className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-gray-200 truncate">{p.selectedTitle || p.creativePlan?.titleOptions?.[0]?.title || p.config.genres.join('+')}</p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            {isZh ? statusLabels[p.status] || p.status : p.status}
-                            {` · ${p.config.totalEpisodes}集`}
-                            {p.episodes.length > 0 ? ` · 已写${p.episodes.length}集` : ''}
+                <div className="p-6 rounded-2xl bg-[#161616] border border-amber-500/20 space-y-4 shadow-lg shadow-amber-900/5">
+                  <div className="flex items-center gap-2 text-amber-400 font-medium">
+                    <span className="text-lg">📂</span>
+                    {isZh ? '发现未完成的草稿' : 'Unfinished drafts found'}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {existingProjects.map(p => (
+                      <div key={p.id} className="flex items-center justify-between p-4 rounded-xl bg-[#0a0a0a] border border-white/5 hover:border-amber-500/30 transition-all group">
+                        <div className="min-w-0">
+                          <p className="text-sm text-gray-200 font-medium truncate">{p.selectedTitle || p.creativePlan?.titleOptions?.[0]?.title || p.config.genres.join(' + ')}</p>
+                          <p className="text-xs text-gray-500 mt-1 font-mono">
+                            {new Date(p.updatedAt).toLocaleDateString()} · {p.status}
                           </p>
                         </div>
-                        <div className="flex items-center gap-2 ml-3">
-                          <button onClick={() => resumeProject(p)} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors">
+                        <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button onClick={() => resumeProject(p)} className="px-3 py-1.5 rounded-lg text-xs bg-amber-600 hover:bg-amber-500 text-white transition-colors">
                             {isZh ? '继续' : 'Resume'}
                           </button>
                           <button onClick={async () => {
                             await fetch(`/api/screenplay/${p.id}`, { method: 'DELETE' });
                             setExistingProjects(prev => prev.filter(x => x.id !== p.id));
-                          }} className="px-2 py-1.5 rounded-lg text-xs text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            {isZh ? '删除' : 'Del'}
+                          }} className="p-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+                            <CloseIcon className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
-                    );
-                  })}
-                  <div className="border-t border-white/5 pt-3">
-                    <p className="text-xs text-gray-600">{isZh ? '或创建新项目 ↓' : 'Or create a new project ↓'}</p>
-                  </div>
-                </div>
-              )}
-
-              {/* 题材选择 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '题材（最多选2个组合）' : 'Genre (max 2)'}</label>
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                  {genres.map(g => (
-                    <button key={g.key} onClick={() => toggleGenre(g.key)}
-                      className={`p-3 rounded-xl text-left text-sm border transition-colors ${
-                        selectedGenres.includes(g.key)
-                          ? 'bg-green-600/20 border-green-500/40 text-green-300'
-                          : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                      }`}>
-                      <div className="font-medium">{g.name}</div>
-                      <div className="text-xs text-gray-500 mt-0.5">{g.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 受众 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '目标受众' : 'Audience'}</label>
-                <div className="flex gap-2">
-                  {(['男频', '女频', '全年龄'] as const).map(a => (
-                    <button key={a} onClick={() => setAudience(a)}
-                      className={`px-4 py-2 rounded-xl text-sm border transition-colors ${
-                        audience === a ? 'bg-green-600/20 border-green-500/40 text-green-300' : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                      }`}>{a}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 基调 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '故事基调' : 'Tone'}</label>
-                <div className="flex flex-wrap gap-2">
-                  {TONES.map(t => (
-                    <button key={t} onClick={() => setTone(t)}
-                      className={`px-4 py-2 rounded-xl text-sm border transition-colors ${
-                        tone === t ? 'bg-green-600/20 border-green-500/40 text-green-300' : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                      }`}>{t}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 结局 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '结局类型' : 'Ending'}</label>
-                <div className="flex flex-wrap gap-2">
-                  {ENDINGS.map(e => (
-                    <button key={e.value} onClick={() => setEndingType(e.value)}
-                      className={`px-4 py-2 rounded-xl text-sm border transition-colors ${
-                        endingType === e.value ? 'bg-green-600/20 border-green-500/40 text-green-300' : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                      }`}>{e.label}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 集数 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '集数规模' : 'Episodes'}</label>
-                <div className="flex items-center gap-3">
-                  {EPISODE_PRESETS.map(n => (
-                    <button key={n} onClick={() => setTotalEpisodes(n)}
-                      className={`px-4 py-2 rounded-xl text-sm border transition-colors ${
-                        totalEpisodes === n ? 'bg-green-600/20 border-green-500/40 text-green-300' : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                      }`}>{n}{isZh ? '集' : ' eps'}</button>
-                  ))}
-                  <input type="number" value={totalEpisodes} onChange={e => setTotalEpisodes(Number(e.target.value))}
-                    className="w-20 px-3 py-2 rounded-xl bg-[#1a1a1a] border border-white/10 text-white text-sm" min={20} max={200} />
-                </div>
-              </div>
-
-              {/* 参考小说（可选） */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '📖 参考小说（可选，基于小说二创改编）' : '📖 Reference Novel (optional)'}</label>
-                {referenceNovel ? (
-                  <div className="p-3 rounded-xl bg-[#1a1a1a] border border-green-500/30 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-green-400">✅ {isZh ? '已上传' : 'Uploaded'} ({referenceNovel.length.toLocaleString()}{isZh ? '字' : ' chars'})</span>
-                      <button onClick={() => setReferenceNovel('')} className="text-xs text-gray-500 hover:text-red-400 transition-colors">{isZh ? '移除' : 'Remove'}</button>
-                    </div>
-                    <p className="text-xs text-gray-500 line-clamp-2">{referenceNovel.slice(0, 200)}...</p>
-                  </div>
-                ) : (
-                  <div className="flex gap-3">
-                    <input ref={novelFileRef} type="file" accept=".txt,.text" className="hidden" onChange={(e) => {
-                      const file = e.target.files?.[0]; if (!file) return;
-                      const reader = new FileReader();
-                      reader.onload = (ev) => {
-                        const buffer = ev.target?.result as ArrayBuffer; if (!buffer) return;
-                        const utf8 = new TextDecoder('utf-8').decode(buffer);
-                        if (utf8.includes('\uFFFD')) {
-                          try { setReferenceNovel(new TextDecoder('gbk').decode(buffer)); } catch { setReferenceNovel(utf8); }
-                        } else { setReferenceNovel(utf8); }
-                      };
-                      reader.readAsArrayBuffer(file);
-                      e.target.value = '';
-                    }} />
-                    <button onClick={() => novelFileRef.current?.click()}
-                      className="px-4 py-2.5 rounded-xl text-sm bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] hover:border-white/20 transition-colors">
-                      📁 {isZh ? '上传小说文件' : 'Upload Novel'}
-                    </button>
-                    <span className="text-xs text-gray-600 self-center">{isZh ? '不上传则为全新原创剧本' : 'Skip for original screenplay'}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* 写作Agent（可选） */}
-              {agents.length > 0 && (
-                <div>
-                  <label className="block text-sm text-gray-400 mb-2">{isZh ? '🤖 写作Agent（可选，来自创作工厂）' : '🤖 Writing Agent (optional)'}</label>
-                  <select value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)}
-                    className="w-full px-4 py-3 rounded-xl bg-[#1a1a1a] border border-white/10 text-white text-sm appearance-none cursor-pointer focus:border-green-500/50 focus:outline-none">
-                    <option value="">{isZh ? '不使用Agent（默认编剧模式）' : 'No Agent (default mode)'}</option>
-                    {agents.map(a => (
-                      <option key={a.id} value={a.id}>
-                        {a.name}{a.score ? ` · ${a.score}分` : ''}{a.genre ? ` · ${a.genre}` : ''}
-                      </option>
                     ))}
-                  </select>
-                  {selectedAgentId && (() => {
-                    const a = agents.find(x => x.id === selectedAgentId);
-                    return a ? (
-                      <p className="text-xs text-gray-500 mt-1">
-                        {isZh ? `来源：「${a.sourceNovel}」 · 风格：${a.tone || a.genre}` : `Source: "${a.sourceNovel}"`}
-                      </p>
-                    ) : null;
-                  })()}
+                  </div>
                 </div>
               )}
 
-              {/* 自定义要求 */}
-              <div>
-                <label className="block text-sm text-gray-400 mb-2">{isZh ? '额外创作要求（可选）' : 'Custom Requirements (optional)'}</label>
-                <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
-                  placeholder={isZh ? '例如：主角是一个退伍军人，故事发生在深圳...' : 'e.g. The protagonist is a veteran...'}
-                  className="w-full h-24 px-4 py-3 rounded-xl bg-[#1a1a1a] border border-white/10 text-white text-sm resize-none placeholder-gray-600" />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {/* 左侧配置 */}
+                <div className="space-y-6">
+                  <section>
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '题材 (选1-2个)' : 'Genre (1-2)'}</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {genres.map(g => (
+                        <button key={g.key} onClick={() => toggleGenre(g.key)}
+                          className={`p-3 rounded-xl text-left border transition-all ${
+                            selectedGenres.includes(g.key)
+                              ? 'bg-green-600/20 border-green-500/50 text-green-300 shadow-[0_0_10px_rgba(34,197,94,0.1)]'
+                              : 'bg-[#161616] border-white/5 text-gray-400 hover:border-white/20 hover:text-gray-200'
+                          }`}>
+                          <div className="text-sm font-medium">{g.name}</div>
+                          <div className="text-[10px] opacity-60 mt-0.5">{g.desc}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section>
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '核心参数' : 'Core Params'}</label>
+                    <div className="space-y-4 bg-[#161616] p-5 rounded-2xl border border-white/5">
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-2">{isZh ? '目标受众' : 'Audience'}</span>
+                        <div className="flex gap-2">
+                          {(['男频', '女频', '全年龄'] as const).map(a => (
+                            <button key={a} onClick={() => setAudience(a)}
+                              className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
+                                audience === a ? 'bg-white text-black' : 'bg-[#0a0a0a] text-gray-400 hover:bg-[#222]'
+                              }`}>{a}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-2">{isZh ? '故事基调' : 'Tone'}</span>
+                        <div className="flex flex-wrap gap-2">
+                          {TONES.map(t => (
+                            <button key={t} onClick={() => setTone(t)}
+                              className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                                tone === t ? 'border-green-500 text-green-400 bg-green-500/10' : 'border-white/10 text-gray-400 hover:border-white/30'
+                              }`}>{t}</button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-2">{isZh ? '结局类型' : 'Ending'}</span>
+                        <div className="flex flex-wrap gap-2">
+                          {ENDINGS.map(e => (
+                            <button key={e.value} onClick={() => setEndingType(e.value)}
+                              className={`px-3 py-1.5 rounded-lg text-xs border transition-colors ${
+                                endingType === e.value ? 'border-purple-500 text-purple-400 bg-purple-500/10' : 'border-white/10 text-gray-400 hover:border-white/30'
+                              }`}>{e.label}</button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                {/* 右侧配置 */}
+                <div className="space-y-6">
+                  <section>
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '参考素材' : 'Reference'}</label>
+                    <div className="bg-[#161616] p-5 rounded-2xl border border-white/5 space-y-4">
+                      <div>
+                        <span className="text-xs text-gray-500 block mb-2">{isZh ? '参考小说 (可选)' : 'Novel (Optional)'}</span>
+                        {referenceNovel ? (
+                          <div className="flex items-center justify-between p-3 rounded-xl bg-green-900/20 border border-green-500/30">
+                            <div className="flex items-center gap-2">
+                              <BookIcon className="w-4 h-4 text-green-400" />
+                              <span className="text-xs text-green-300">{isZh ? '已加载' : 'Loaded'} ({referenceNovel.length} chars)</span>
+                            </div>
+                            <button onClick={() => setReferenceNovel('')} className="text-xs text-red-400 hover:text-red-300">✕</button>
+                          </div>
+                        ) : (
+                          <div onClick={() => novelFileRef.current?.click()}
+                            className="border border-dashed border-white/10 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer hover:border-green-500/50 hover:bg-green-500/5 transition-all group">
+                            <div className="w-10 h-10 rounded-full bg-[#0a0a0a] flex items-center justify-center mb-2 group-hover:scale-110 transition-transform">
+                              <span className="text-xl text-gray-500 group-hover:text-green-400">+</span>
+                            </div>
+                            <span className="text-xs text-gray-400">{isZh ? '点击上传小说文件 (.txt)' : 'Upload .txt file'}</span>
+                            <input ref={novelFileRef} type="file" accept=".txt,.text" className="hidden" onChange={(e) => {
+                              const file = e.target.files?.[0]; if (!file) return;
+                              const reader = new FileReader();
+                              reader.onload = (ev) => {
+                                const buffer = ev.target?.result as ArrayBuffer; if (!buffer) return;
+                                const utf8 = new TextDecoder('utf-8').decode(buffer);
+                                if (utf8.includes('\uFFFD')) {
+                                  try { setReferenceNovel(new TextDecoder('gbk').decode(buffer)); } catch { setReferenceNovel(utf8); }
+                                } else { setReferenceNovel(utf8); }
+                              };
+                              reader.readAsArrayBuffer(file);
+                              e.target.value = '';
+                            }} />
+                          </div>
+                        )}
+                      </div>
+
+                      {agents.length > 0 && (
+                        <div>
+                          <span className="text-xs text-gray-500 block mb-2">{isZh ? '写作 Agent' : 'Writing Agent'}</span>
+                          <select value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)}
+                            className="w-full px-3 py-2.5 rounded-xl bg-[#0a0a0a] border border-white/10 text-gray-300 text-xs outline-none focus:border-green-500/50">
+                            <option value="">{isZh ? '默认编剧 (Default)' : 'Default'}</option>
+                            {agents.map(a => (
+                              <option key={a.id} value={a.id}>{a.name} ({a.genre})</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  </section>
+
+                  <section>
+                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '自定义要求' : 'Custom Prompt'}</label>
+                    <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
+                      placeholder={isZh ? '例如：主角是一个退伍军人，故事发生在深圳...' : 'e.g. The protagonist is a veteran...'}
+                      className="w-full h-32 px-4 py-3 rounded-2xl bg-[#161616] border border-white/5 text-gray-300 text-sm resize-none placeholder-gray-600 focus:border-green-500/30 focus:ring-1 focus:ring-green-500/10 outline-none transition-all" />
+                  </section>
+                </div>
               </div>
 
-              <button onClick={handleCreate} disabled={loading || selectedGenres.length === 0}
-                className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-500 text-white transition-colors">
-                {isZh ? '确认方向，开始创作' : 'Confirm & Start'}
-              </button>
+              <div className="pt-6 border-t border-white/5">
+                <button onClick={handleCreate} disabled={loading || selectedGenres.length === 0}
+                  className="w-full py-4 rounded-2xl text-base font-bold bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 disabled:from-gray-800 disabled:to-gray-800 disabled:text-gray-500 text-white transition-all shadow-lg shadow-green-900/20 hover:shadow-green-900/40 hover:scale-[1.01] active:scale-[0.99]">
+                  {loading ? <span className="flex items-center justify-center gap-2"><div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> {isZh ? '正在创建...' : 'Creating...'}</span> : (isZh ? '✨ 开始创作' : '✨ Start Creating')}
+                </button>
+              </div>
             </div>
           )}
 
           {/* Step: 创作方案 */}
           {step === 'plan' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '📋 创作方案' : '📋 Creative Plan'}</h2>
-
+            <div className="space-y-8 animate-fade-in">
               {!project?.creativePlan ? (
-                <div className="text-center py-12">
-                  <p className="text-gray-400 mb-4">{isZh ? '基于你的选题配置，AI 将生成完整的故事骨架' : 'AI will generate a complete story skeleton'}</p>
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                    <span className="text-4xl">📋</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '生成创作方案' : 'Generate Plan'}</h3>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将基于你的配置，生成包含故事线、人物关系、三幕结构和爽点设计的完整方案。' : 'AI will generate a complete creative plan including storyline, characters, and structure.'}</p>
                   <button onClick={handleGeneratePlan} disabled={loading}
-                    className="px-6 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {isZh ? '生成创作方案' : 'Generate Plan'}
+                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                    {isZh ? '开始生成' : 'Generate Now'}
                   </button>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {/* 剧名选择 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-3">{isZh ? '剧名备选' : 'Title Options'}</h3>
-                    <div className="space-y-2">
-                      {project.creativePlan.titleOptions.map((t, i) => (
-                        <button key={i} onClick={() => handleSelectTitle(t.title)}
-                          className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                            project.selectedTitle === t.title ? 'bg-green-600/20 border-green-500/40' : 'bg-[#111] border-white/5 hover:border-white/15'
-                          }`}>
-                          <span className="text-white font-medium">{t.title}</span>
-                          <span className="text-gray-500 text-xs ml-2">{t.description}</span>
-                        </button>
-                      ))}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  {/* 左侧：核心信息 */}
+                  <div className="lg:col-span-2 space-y-6">
+                    <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '剧名方案' : 'Titles'}</h3>
+                      <div className="grid grid-cols-1 gap-3">
+                        {project.creativePlan.titleOptions.map((t, i) => (
+                          <div key={i} onClick={() => handleSelectTitle(t.title)}
+                            className={`p-4 rounded-xl border cursor-pointer transition-all ${
+                              project.selectedTitle === t.title ? 'bg-green-900/20 border-green-500/50' : 'bg-[#0a0a0a] border-white/5 hover:border-white/20'
+                            }`}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className={`font-bold ${project.selectedTitle === t.title ? 'text-green-400' : 'text-white'}`}>{t.title}</span>
+                              {project.selectedTitle === t.title && <CheckIcon className="w-4 h-4 text-green-400" />}
+                            </div>
+                            <p className="text-xs text-gray-500">{t.description}</p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
-                  {/* 故事线 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '故事线' : 'Story Line'}</h3>
-                    <p className="text-white text-sm">{project.creativePlan.storyLine}</p>
-                    <h3 className="text-sm font-medium text-gray-300 mt-3 mb-2">{isZh ? '核心冲突' : 'Core Conflict'}</h3>
-                    <p className="text-white text-sm">{project.creativePlan.coreConflict}</p>
-                  </div>
-
-                  {/* 时空背景 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '时空背景' : 'Setting'}</h3>
-                    <div className="grid grid-cols-2 gap-2 text-sm">
-                      <div><span className="text-gray-500">{isZh ? '时代：' : 'Era: '}</span><span className="text-white">{project.creativePlan.setting.era}</span></div>
-                      <div><span className="text-gray-500">{isZh ? '地点：' : 'Location: '}</span><span className="text-white">{project.creativePlan.setting.location}</span></div>
-                      <div><span className="text-gray-500">{isZh ? '社会环境：' : 'Social: '}</span><span className="text-white">{project.creativePlan.setting.socialEnv}</span></div>
-                      <div><span className="text-gray-500">{isZh ? '阶层关系：' : 'Class: '}</span><span className="text-white">{project.creativePlan.setting.classRelation}</span></div>
-                    </div>
-                  </div>
-
-                  {/* 三幕结构 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-3">{isZh ? '三幕结构' : 'Three Acts'}</h3>
-                    {(['act1', 'act2', 'act3'] as const).map((act, i) => {
-                      const a = project.creativePlan!.threeActs[act];
-                      const labels = [isZh ? '第一幕（建置）' : 'Act 1', isZh ? '第二幕（对抗）' : 'Act 2', isZh ? '第三幕（高潮）' : 'Act 3'];
-                      return (
-                        <div key={act} className="mb-3 last:mb-0">
-                          <div className="text-xs text-green-400 mb-1">{labels[i]} — {a.episodeRange}</div>
-                          {'coreEvents' in a && <div className="text-sm text-gray-300">{(a as typeof project.creativePlan.threeActs.act1).coreEvents.join(' → ')}</div>}
-                          {'conflicts' in a && <div className="text-sm text-gray-300">{(a as typeof project.creativePlan.threeActs.act2).conflicts.join(' → ')}</div>}
-                          {'climax' in a && <div className="text-sm text-gray-300">{(a as typeof project.creativePlan.threeActs.act3).climax}</div>}
+                    <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '故事核心' : 'Core Story'}</h3>
+                      <div className="space-y-4">
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">{isZh ? '故事线' : 'Logline'}</div>
+                          <p className="text-sm text-gray-200 leading-relaxed">{project.creativePlan.storyLine}</p>
                         </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* 付费卡点 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '💰 付费卡点规划' : '💰 Paywall Plan'}</h3>
-                    <div className="space-y-1">
-                      {project.creativePlan.paywallPlan.map((p, i) => (
-                        <div key={i} className="text-sm">
-                          <span className="text-yellow-400">第{p.episode}集</span>
-                          <span className="text-gray-500 mx-2">·</span>
-                          <span className="text-gray-300">{p.type}</span>
-                          <span className="text-gray-500 mx-2">·</span>
-                          <span className="text-gray-400">{p.suspense}</span>
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">{isZh ? '核心冲突' : 'Conflict'}</div>
+                          <p className="text-sm text-gray-200 leading-relaxed">{project.creativePlan.coreConflict}</p>
                         </div>
-                      ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '三幕结构' : 'Structure'}</h3>
+                      <div className="space-y-6 relative">
+                        <div className="absolute left-[15px] top-2 bottom-2 w-0.5 bg-white/5" />
+                        {(['act1', 'act2', 'act3'] as const).map((act, i) => {
+                          const a = project.creativePlan!.threeActs[act];
+                          const labels = [isZh ? '第一幕 · 建置' : 'Act 1', isZh ? '第二幕 · 对抗' : 'Act 2', isZh ? '第三幕 · 高潮' : 'Act 3'];
+                          const colors = ['text-blue-400', 'text-yellow-400', 'text-red-400'];
+                          return (
+                            <div key={act} className="relative pl-10">
+                              <div className={`absolute left-[11px] top-1 w-2.5 h-2.5 rounded-full bg-[#161616] border-2 ${i === 0 ? 'border-blue-500' : i === 1 ? 'border-yellow-500' : 'border-red-500'}`} />
+                              <div className={`text-xs font-bold mb-1 ${colors[i]}`}>{labels[i]} <span className="opacity-50 font-normal ml-2">{a.episodeRange}</span></div>
+                              <div className="text-sm text-gray-300">
+                                {'coreEvents' in a && (a as any).coreEvents.join(' → ')}
+                                {'conflicts' in a && (a as any).conflicts.join(' → ')}
+                                {'climax' in a && (a as any).climax}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
-                  {/* 爽点矩阵 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '⚡ 爽点矩阵' : '⚡ Satisfaction Matrix'}</h3>
-                    <div className="flex flex-wrap gap-2">
-                      {Object.entries(project.creativePlan.satisfactionMatrix).map(([k, v]) => (
-                        <div key={k} className="px-3 py-1.5 rounded-lg bg-[#111] border border-white/5 text-sm">
-                          <span className="text-gray-300">{k}</span>
-                          <span className="text-green-400 ml-1.5">{v}%</span>
-                        </div>
-                      ))}
+                  {/* 右侧：设定与数据 */}
+                  <div className="space-y-6">
+                    <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '世界观设定' : 'World Setting'}</h3>
+                      <div className="space-y-3">
+                        {Object.entries(project.creativePlan.setting).map(([k, v]) => (
+                          <div key={k} className="flex flex-col">
+                            <span className="text-[10px] text-gray-500 uppercase">{k}</span>
+                            <span className="text-sm text-gray-200">{v}</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  </div>
 
-                  <button onClick={() => setStep('characters')} disabled={loading}
-                    className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                    {isZh ? '确认方案，进入角色开发 →' : 'Confirm & Next →'}
-                  </button>
+                    <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '爽点分布' : 'Satisfaction'}</h3>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(project.creativePlan.satisfactionMatrix).map(([k, v]) => (
+                          <div key={k} className="px-3 py-1.5 rounded-lg bg-[#0a0a0a] border border-white/5 flex items-center gap-2">
+                            <span className="text-xs text-gray-300">{k}</span>
+                            <div className="h-1 w-12 bg-gray-800 rounded-full overflow-hidden">
+                              <div className="h-full bg-green-500" style={{ width: `${v}%` }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button onClick={() => setStep('characters')} disabled={loading}
+                      className="w-full py-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02]">
+                      {isZh ? '下一步：角色开发 →' : 'Next: Characters →'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -798,87 +876,66 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
 
           {/* Step: 角色开发 */}
           {step === 'characters' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '👥 角色开发' : '👥 Characters'}</h2>
-
+            <div className="space-y-8 animate-fade-in">
               {!project?.characterDesign ? (
-                <div className="text-center py-12">
-                  <p className="text-gray-400 mb-4">{isZh ? '基于创作方案，AI 将设计完整的角色体系和四层反派' : 'AI will design the character system'}</p>
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                    <span className="text-4xl">👥</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '角色设计' : 'Design Characters'}</h3>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将构建完整的人物小传、性格特征、反派体系以及人物关系网。' : 'AI will design character profiles, villains, and relationship networks.'}</p>
                   <button onClick={handleGenerateCharacters} disabled={loading}
-                    className="px-6 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {isZh ? '生成角色设计' : 'Generate Characters'}
+                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                    {isZh ? '生成角色' : 'Generate Characters'}
                   </button>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {/* 角色卡片 */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-8">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {project.characterDesign.characters.map(char => (
-                      <div key={char.id} className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-white font-medium">{char.name}</span>
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-white/5 text-gray-400">{char.age}</span>
-                          {char.villainLayer ? (
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">
-                              {isZh ? `第${char.villainLayer}层反派` : `Villain L${char.villainLayer}`}
-                            </span>
-                          ) : null}
+                      <div key={char.id} className="bg-[#161616] rounded-2xl border border-white/5 overflow-hidden group hover:border-white/20 transition-all">
+                        <div className="h-24 bg-gradient-to-br from-gray-800 to-black relative p-5">
+                          <div className="absolute top-4 right-4 text-4xl opacity-10">
+                            {char.villainLayer ? '👿' : '👤'}
+                          </div>
+                          <div className="relative z-10">
+                            <h3 className="text-xl font-bold text-white">{char.name}</h3>
+                            <div className="text-xs text-gray-400 mt-1">{char.age} · {char.publicIdentity}</div>
+                          </div>
                         </div>
-                        <div className="text-xs text-gray-500 mb-1">{char.publicIdentity} → {char.realIdentity}</div>
-                        <div className="text-sm text-gray-300 mb-2">{char.appearance}</div>
-                        <div className="flex flex-wrap gap-1 mb-2">
-                          {char.personality.map((p, i) => (
-                            <span key={i} className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">{p}</span>
-                          ))}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          <span className="text-gray-400">{isZh ? '动机：' : 'Motivation: '}</span>{char.motivation}
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">
-                          <span className="text-gray-400">{isZh ? '口头禅：' : 'Catchphrase: '}</span>"{char.catchphrase}"
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">
-                          <span className="text-gray-400">{isZh ? '弧线：' : 'Arc: '}</span>{char.arc}
+                        <div className="p-5 space-y-4">
+                          {char.villainLayer && (
+                            <div className="inline-block px-2 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px] font-bold uppercase tracking-wider">
+                              {isZh ? `反派等级 L${char.villainLayer}` : `Villain L${char.villainLayer}`}
+                            </div>
+                          )}
+                          <div className="space-y-2">
+                            <div className="text-xs text-gray-500 uppercase tracking-wider">{isZh ? '性格' : 'Personality'}</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {char.personality.map((p, i) => (
+                                <span key={i} className="px-2 py-1 rounded bg-[#0a0a0a] border border-white/5 text-xs text-gray-300">{p}</span>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{isZh ? '动机' : 'Motivation'}</div>
+                            <p className="text-sm text-gray-300 leading-relaxed">{char.motivation}</p>
+                          </div>
+                          <div>
+                            <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{isZh ? '人物弧光' : 'Arc'}</div>
+                            <p className="text-xs text-gray-400 leading-relaxed">{char.arc}</p>
+                          </div>
                         </div>
                       </div>
                     ))}
                   </div>
 
-                  {/* 角色关系 */}
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '角色关系' : 'Relationships'}</h3>
-                    <div className="space-y-1">
-                      {project.characterDesign.relationships.map((r, i) => (
-                        <div key={i} className="text-sm">
-                          <span className="text-white">{r.from}</span>
-                          <span className="text-green-400 mx-2">→</span>
-                          <span className="text-white">{r.to}</span>
-                          <span className="text-gray-500 ml-2">{r.relation}</span>
-                        </div>
-                      ))}
-                    </div>
+                  <div className="flex justify-end pt-6 border-t border-white/5">
+                    <button onClick={() => setStep('directory')} disabled={loading}
+                      className="px-8 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02]">
+                      {isZh ? '下一步：分集目录 →' : 'Next: Directory →'}
+                    </button>
                   </div>
-
-                  {/* 感情线 */}
-                  {project.characterDesign.romanceLine?.length > 0 && (
-                    <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                      <h3 className="text-sm font-medium text-gray-300 mb-2">{isZh ? '💕 感情线' : '💕 Romance Line'}</h3>
-                      <div className="space-y-1">
-                        {project.characterDesign.romanceLine.map((r, i) => (
-                          <div key={i} className="text-sm">
-                            <span className="text-yellow-400">{isZh ? `第${r.episode}集` : `Ep ${r.episode}`}</span>
-                            <span className="text-gray-500 mx-2">·</span>
-                            <span className="text-gray-300">{r.event}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <button onClick={() => setStep('directory')} disabled={loading}
-                    className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                    {isZh ? '确认角色，进入分集目录 →' : 'Confirm & Next →'}
-                  </button>
                 </div>
               )}
             </div>
@@ -886,55 +943,71 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
 
           {/* Step: 分集目录 */}
           {step === 'directory' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '📑 分集目录' : '📑 Episode Directory'}</h2>
-
+            <div className="space-y-8 animate-fade-in">
               {!project?.episodeDirectory ? (
-                <div className="text-center py-12">
-                  <p className="text-gray-400 mb-4">{isZh ? 'AI 将规划全剧分集目录，包含钩子类型和节奏标记' : 'AI will plan the episode directory'}</p>
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                    <span className="text-4xl">📑</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '规划分集目录' : 'Plan Episodes'}</h3>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将规划全剧的节奏、钩子和付费点，生成详细的分集大纲。' : 'AI will plan the rhythm, hooks, and paywalls for all episodes.'}</p>
                   <button onClick={handleGenerateDirectory} disabled={loading}
-                    className="px-6 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {isZh ? '生成分集目录' : 'Generate Directory'}
+                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                    {isZh ? '生成目录' : 'Generate Directory'}
                   </button>
                 </div>
               ) : (
-                <div className="space-y-4">
-                  {/* 统计 */}
-                  <div className="flex gap-3 text-sm">
-                    <span className="px-3 py-1 rounded-lg bg-[#1a1a1a] border border-white/10 text-gray-300">
-                      {isZh ? '总集数' : 'Total'}: {project.episodeDirectory.length}
-                    </span>
-                    <span className="px-3 py-1 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300">
-                      🔥 {project.episodeDirectory.filter(d => d.mark === '🔥').length}
-                    </span>
-                    <span className="px-3 py-1 rounded-lg bg-yellow-500/10 border border-yellow-500/20 text-yellow-300">
-                      💰 {project.episodeDirectory.filter(d => d.mark === '💰').length}
-                    </span>
+                <div className="space-y-6">
+                  {/* 统计栏 */}
+                  <div className="flex gap-4 p-4 bg-[#161616] rounded-xl border border-white/5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-2xl font-bold text-white">{project.episodeDirectory.length}</span>
+                      <span className="text-xs text-gray-500 uppercase">{isZh ? '总集数' : 'Episodes'}</span>
+                    </div>
+                    <div className="w-px bg-white/10" />
+                    <div className="flex items-center gap-2">
+                      <span className="text-2xl font-bold text-red-400">{project.episodeDirectory.filter(d => d.mark === '🔥').length}</span>
+                      <span className="text-xs text-gray-500 uppercase">{isZh ? '爆点' : 'Climax'}</span>
+                    </div>
+                    <div className="w-px bg-white/10" />
+                    <div className="flex items-center gap-2">
+                      <span className="text-2xl font-bold text-yellow-400">{project.episodeDirectory.filter(d => d.mark === '💰').length}</span>
+                      <span className="text-xs text-gray-500 uppercase">{isZh ? '付费点' : 'Paywall'}</span>
+                    </div>
                   </div>
 
                   {/* 目录列表 */}
-                  <div className="space-y-1 max-h-[500px] overflow-y-auto custom-scrollbar">
+                  <div className="space-y-2">
                     {project.episodeDirectory.map(d => (
-                      <div key={d.number} className="flex items-center gap-3 p-2.5 rounded-lg bg-[#1a1a1a] border border-white/5 hover:border-white/10 transition-colors">
-                        <span className="text-xs text-gray-500 w-10 text-right">{d.number}</span>
-                        <span className="w-5 text-center">{d.mark}</span>
-                        <span className="text-sm text-white flex-1">{d.title}</span>
-                        <span className="text-xs text-gray-400 hidden sm:block max-w-[200px] truncate">{d.summary}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full ${
-                          d.phase === '起势段' ? 'bg-blue-500/10 text-blue-400' :
-                          d.phase === '攀升段' ? 'bg-green-500/10 text-green-400' :
-                          d.phase === '风暴段' ? 'bg-orange-500/10 text-orange-400' :
-                          'bg-red-500/10 text-red-400'
-                        }`}>{d.phase}</span>
-                        <span className="text-xs text-gray-500 w-16 text-right">{d.hookType}</span>
+                      <div key={d.number} className="flex items-center gap-4 p-4 rounded-xl bg-[#161616] border border-white/5 hover:border-white/10 transition-all group">
+                        <div className="w-12 text-center">
+                          <div className="text-sm font-bold text-gray-500 group-hover:text-white transition-colors">#{d.number}</div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h4 className="text-sm font-medium text-white truncate">{d.title}</h4>
+                            {d.mark === '🔥' && <span className="text-xs">🔥</span>}
+                            {d.mark === '💰' && <span className="text-xs">💰</span>}
+                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                              d.phase.includes('起势') ? 'bg-blue-500/10 text-blue-400' :
+                              d.phase.includes('攀升') ? 'bg-green-500/10 text-green-400' :
+                              d.phase.includes('高潮') || d.phase.includes('风暴') ? 'bg-red-500/10 text-red-400' :
+                              'bg-gray-500/10 text-gray-400'
+                            }`}>{d.phase}</span>
+                          </div>
+                          <p className="text-xs text-gray-500 truncate">{d.summary}</p>
+                        </div>
+                        <div className="text-xs text-gray-600 font-mono">{d.hookType}</div>
                       </div>
                     ))}
                   </div>
 
-                  <button onClick={() => { setStep('writing'); setWritingRange({ start: 1, end: Math.min(5, project.config.totalEpisodes) }); }} disabled={loading}
-                    className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                    {isZh ? '确认目录，开始撰写分集 →' : 'Confirm & Start Writing →'}
-                  </button>
+                  <div className="flex justify-end pt-6 border-t border-white/5">
+                    <button onClick={() => { setStep('writing'); setWritingRange({ start: 1, end: Math.min(5, project.config.totalEpisodes) }); }} disabled={loading}
+                      className="px-8 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02]">
+                      {isZh ? '确认目录，开始撰写 →' : 'Start Writing →'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -942,117 +1015,152 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
 
           {/* Step: 分集撰写 */}
           {step === 'writing' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '✍️ 分集撰写' : '✍️ Episode Writing'}</h2>
-
-              {/* 撰写控制 */}
-              <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                <div className="flex items-center gap-3 mb-3">
-                  <label className="text-sm text-gray-400">{isZh ? '撰写范围：第' : 'Range: Ep '}</label>
-                  <input type="number" value={writingRange.start} onChange={e => setWritingRange(prev => ({ ...prev, start: Number(e.target.value) }))}
-                    className="w-16 px-2 py-1.5 rounded-lg bg-[#111] border border-white/10 text-white text-sm text-center" min={1} max={project?.config.totalEpisodes} />
-                  <span className="text-gray-500">—</span>
-                  <input type="number" value={writingRange.end} onChange={e => setWritingRange(prev => ({ ...prev, end: Number(e.target.value) }))}
-                    className="w-16 px-2 py-1.5 rounded-lg bg-[#111] border border-white/10 text-white text-sm text-center" min={1} max={project?.config.totalEpisodes} />
-                  <span className="text-sm text-gray-500">{isZh ? '集' : ''}</span>
-                  <button onClick={handleWriteEpisodes} disabled={loading}
-                    className="ml-auto px-4 py-2 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {isZh ? '开始撰写' : 'Write'}
-                  </button>
+            <div className="space-y-8 animate-fade-in">
+              {/* 控制栏 */}
+              <div className="bg-[#161616] p-6 rounded-2xl border border-white/5 flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-lg font-bold text-white mb-1">{isZh ? '批量撰写' : 'Batch Write'}</h3>
+                  <div className="flex items-center gap-3 text-sm text-gray-400">
+                    <span>{isZh ? '范围：' : 'Range:'}</span>
+                    <div className="flex items-center bg-[#0a0a0a] rounded-lg border border-white/10 px-2">
+                      <input type="number" value={writingRange.start} onChange={e => setWritingRange(prev => ({ ...prev, start: Number(e.target.value) }))}
+                        className="w-12 bg-transparent text-center py-1.5 outline-none text-white" />
+                      <span className="text-gray-600">-</span>
+                      <input type="number" value={writingRange.end} onChange={e => setWritingRange(prev => ({ ...prev, end: Number(e.target.value) }))}
+                        className="w-12 bg-transparent text-center py-1.5 outline-none text-white" />
+                    </div>
+                    <button onClick={handleWriteEpisodes} disabled={loading}
+                      className="px-4 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-white font-medium transition-colors">
+                      {isZh ? '生成' : 'Generate'}
+                    </button>
+                  </div>
                 </div>
-                <div className="text-xs text-gray-500">
-                  {isZh ? `已完成 ${project?.episodes.length || 0}/${project?.config.totalEpisodes || 0} 集` : `Completed ${project?.episodes.length || 0}/${project?.config.totalEpisodes || 0}`}
+                <div className="text-right">
+                  <div className="text-2xl font-bold text-white">{project?.episodes.length || 0} <span className="text-sm font-normal text-gray-500">/ {project?.config.totalEpisodes}</span></div>
+                  <div className="text-xs text-gray-500">{isZh ? '已完成集数' : 'Episodes Completed'}</div>
                 </div>
               </div>
 
-              {/* 已完成的集列表 */}
+              {/* 集列表 */}
               {project?.episodes && project.episodes.length > 0 && (
-                <div className="space-y-2">
-                  <h3 className="text-sm font-medium text-gray-400">{isZh ? '已完成的集' : 'Completed Episodes'}</h3>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
-                    {project.episodes.map(ep => (
-                      <button key={ep.number} onClick={() => setSelectedEpisode(selectedEpisode === ep.number ? null : ep.number)}
-                        className={`p-2 rounded-lg text-sm border transition-colors ${
-                          selectedEpisode === ep.number ? 'bg-green-600/20 border-green-500/40 text-green-300' : 'bg-[#1a1a1a] border-white/10 text-gray-300 hover:border-white/20'
-                        }`}>
-                        <div className="font-medium">{isZh ? `第${ep.number}集` : `Ep ${ep.number}`}</div>
-                        <div className="text-xs text-gray-500 truncate">{ep.title}</div>
-                      </button>
-                    ))}
-                  </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {project.episodes.map(ep => (
+                    <div key={ep.number} onClick={() => setSelectedEpisode(selectedEpisode === ep.number ? null : ep.number)}
+                      className={`cursor-pointer rounded-xl border transition-all p-4 hover:scale-[1.02] ${
+                        selectedEpisode === ep.number ? 'bg-[#1a1a1a] border-green-500/50 shadow-lg shadow-green-900/10' : 'bg-[#161616] border-white/5 hover:border-white/20'
+                      }`}>
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-xs font-mono text-green-400">EP.{String(ep.number).padStart(2, '0')}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-gray-400">{ep.phase}</span>
+                      </div>
+                      <h4 className="text-sm font-bold text-white mb-2 line-clamp-1">{ep.title}</h4>
+                      <p className="text-xs text-gray-500 line-clamp-2 mb-3">{ep.previousRecap || '暂无摘要'}</p>
+                      <div className="flex gap-1 flex-wrap">
+                        {ep.keywords.slice(0, 3).map((k, i) => (
+                          <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-[#0a0a0a] text-gray-400 border border-white/5">{k}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 
-              {/* 选中集的详情 */}
+              {/* 选中集详情 */}
               {selectedEpisode && project?.episodes.find(e => e.number === selectedEpisode) && (() => {
                 const ep = project.episodes.find(e => e.number === selectedEpisode)!;
                 return (
-                  <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-medium text-white">{isZh ? `第${ep.number}集：${ep.title}` : `Ep ${ep.number}: ${ep.title}`}</h3>
-                      <span className="text-xs text-gray-500">{ep.phase} · {ep.hookType} {ep.mark}</span>
-                    </div>
-                    <div className="flex gap-2 text-xs">
-                      {ep.keywords.map((k, i) => <span key={i} className="px-2 py-0.5 rounded-full bg-white/5 text-gray-400">{k}</span>)}
-                    </div>
-                    {ep.previousRecap && <p className="text-xs text-gray-500 italic">{isZh ? '前情提要：' : 'Previously: '}{ep.previousRecap}</p>}
-
-                    {ep.scenes.map(scene => (
-                      <div key={scene.sceneNumber} className="p-3 rounded-lg bg-[#111] border border-white/5">
-                        <div className="text-xs text-green-400 mb-1">{isZh ? `场次${scene.sceneNumber}` : `Scene ${scene.sceneNumber}`} — {scene.location}</div>
-                        <div className="text-xs text-gray-500 mb-2">{isZh ? '出场：' : 'Cast: '}{scene.characters.join('、')}</div>
-                        <div className="text-sm text-gray-300 whitespace-pre-wrap mb-2">{scene.description}</div>
-                        {scene.dialogues.map((d, i) => (
-                          <div key={i} className="text-sm mb-1">
-                            <span className="text-white font-medium">{d.character}</span>
-                            <span className="text-gray-500">（{d.direction}）</span>
-                            <span className="text-gray-300">："{d.line}"</span>
+                  <div className="fixed inset-0 z-[60] flex justify-end">
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedEpisode(null)} />
+                    <div className="relative w-full max-w-2xl bg-[#111] h-full shadow-2xl border-l border-white/10 flex flex-col animate-slide-in-right">
+                      <div className="p-6 border-b border-white/5 flex justify-between items-center bg-[#111]/95 backdrop-blur">
+                        <div>
+                          <h3 className="text-lg font-bold text-white">{ep.title}</h3>
+                          <div className="text-xs text-gray-500 mt-1">第 {ep.number} 集 · {ep.scenes.length} 场戏</div>
+                        </div>
+                        <button onClick={() => setSelectedEpisode(null)} className="p-2 hover:bg-white/10 rounded-lg text-gray-400"><CloseIcon className="w-5 h-5" /></button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
+                        {ep.scenes.map((scene, i) => (
+                          <div key={i} className="space-y-2">
+                            <div className="flex items-center gap-2 text-xs font-mono text-gray-500 bg-[#1a1a1a] px-3 py-1.5 rounded-lg w-fit">
+                              <span className="text-green-400">SCENE {scene.sceneNumber}</span>
+                              <span>{scene.location}</span>
+                              <span>·</span>
+                              <span>{scene.characters.join(', ')}</span>
+                            </div>
+                            <p className="text-sm text-gray-300 leading-relaxed pl-1">{scene.description}</p>
+                            <div className="space-y-3 pl-4 border-l-2 border-white/5 mt-3">
+                              {scene.dialogues.map((d, di) => (
+                                <div key={di} className="text-sm">
+                                  <span className="font-bold text-gray-200">{d.character}</span>
+                                  {d.direction && <span className="text-gray-500 text-xs mx-1">({d.direction})</span>}
+                                  <span className="text-gray-400">：{d.line}</span>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         ))}
-                        {scene.musicCue && <div className="text-xs text-purple-400 mt-1">{scene.musicCue}</div>}
                       </div>
-                    ))}
-
-                    <div className="text-sm text-yellow-400">🎣 {ep.endHook}</div>
-                    <div className="text-sm text-blue-400">📺 {ep.nextPreview}</div>
+                    </div>
                   </div>
                 );
               })()}
 
-              {project?.episodes && project.episodes.length > 0 && (
-                <div className="flex gap-3">
-                  <button onClick={() => setStep('review')}
-                    className="flex-1 py-3 rounded-xl text-sm font-medium bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] transition-colors">
-                    {isZh ? '进入质量自检' : 'Quality Review'}
-                  </button>
-                  <button onClick={handleExport}
-                    className="flex-1 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                    {isZh ? '导出剧本' : 'Export'}
-                  </button>
-                </div>
-              )}
+              <div className="flex justify-end gap-4 pt-6 border-t border-white/5">
+                <button onClick={() => setStep('review')}
+                  className="px-6 py-3 rounded-xl bg-[#1a1a1a] border border-white/10 text-white font-medium hover:bg-[#222] transition-colors">
+                  {isZh ? '进入质量自检' : 'Quality Review'}
+                </button>
+                <button onClick={handleExport}
+                  className="px-8 py-3 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all">
+                  {isZh ? '导出剧本' : 'Export'}
+                </button>
+              </div>
             </div>
           )}
 
           {/* Step: 质量自检 */}
           {step === 'review' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '🔍 质量自检' : '🔍 Quality Review'}</h2>
+            <div className="space-y-8 animate-fade-in">
+              <div className="flex items-center justify-between bg-[#161616] p-6 rounded-2xl border border-white/5">
+                <div>
+                  <h2 className="text-xl font-bold text-white mb-1">{isZh ? 'AI 质量自检' : 'AI Quality Review'}</h2>
+                  <p className="text-sm text-gray-500">{isZh ? '从节奏、爽点、台词等多维度评估并优化剧本' : 'Evaluate and optimize script from multiple dimensions'}</p>
+                </div>
+                <button onClick={handleReviewAll} disabled={!!reviewAllTaskId || !project?.episodes?.length}
+                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold shadow-lg shadow-purple-900/20 transition-all flex items-center gap-2">
+                  <SparkleIcon className="w-4 h-4" />
+                  {reviewAllTaskId ? (isZh ? '正在优化...' : 'Optimizing...') : (isZh ? '一键全剧优化' : 'Optimize All')}
+                </button>
+              </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2">
+              {reviewAllTaskId && reviewAllTotal > 0 && (
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs text-gray-400">
+                    <span>{reviewAllProgress || 'Processing...'}</span>
+                    <span>{Math.round((reviewAllDone / reviewAllTotal) * 100)}%</span>
+                  </div>
+                  <div className="w-full bg-[#161616] rounded-full h-2 overflow-hidden">
+                    <div className="bg-purple-500 h-2 rounded-full transition-all duration-500" style={{ width: `${(reviewAllDone / reviewAllTotal) * 100}%` }} />
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">
                 {project?.episodes.map(ep => {
                   const review = project.reviews[ep.number];
+                  const score = review?.total || 0;
+                  const color = score >= 45 ? 'text-green-400' : score >= 35 ? 'text-yellow-400' : score > 0 ? 'text-red-400' : 'text-gray-600';
                   return (
-                    <div key={ep.number} className="p-3 rounded-xl bg-[#1a1a1a] border border-white/10">
-                      <div className="text-sm text-white mb-1">{isZh ? `第${ep.number}集` : `Ep ${ep.number}`}</div>
-                      {review ? (
-                        <div className={`text-lg font-bold ${review.total >= 45 ? 'text-green-400' : review.total >= 38 ? 'text-yellow-400' : review.total >= 30 ? 'text-orange-400' : 'text-red-400'}`}>
-                          {review.total}/50
-                        </div>
-                      ) : (
-                        <button onClick={() => handleReview(ep.number)} disabled={reviewingEp === ep.number}
-                          className="text-xs px-2 py-1 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors disabled:opacity-50">
-                          {reviewingEp === ep.number ? '...' : (isZh ? '自检' : 'Review')}
+                    <div key={ep.number} onClick={() => review && setReviewDetailEp(ep.number)}
+                      className={`p-4 rounded-xl bg-[#161616] border border-white/5 hover:border-white/20 transition-all cursor-pointer group relative`}>
+                      <div className="text-xs text-gray-500 mb-1">EP.{ep.number}</div>
+                      <div className={`text-2xl font-bold ${color}`}>{score > 0 ? score : '-'}</div>
+                      {score > 0 && <div className="text-[10px] text-gray-600 mt-1">点击查看详情</div>}
+                      {!review && (
+                        <button onClick={(e) => { e.stopPropagation(); handleReview(ep.number); }}
+                          className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl text-xs text-white font-medium">
+                          {isZh ? '单集自检' : 'Review'}
                         </button>
                       )}
                     </div>
@@ -1060,76 +1168,70 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                 })}
               </div>
 
-              {/* 选中集的审核详情 */}
-              {project?.episodes.map(ep => {
-                const review = project.reviews[ep.number];
-                if (!review) return null;
+              {/* 审核详情弹窗 */}
+              {reviewDetailEp && project?.reviews[reviewDetailEp] && (() => {
+                const review = project.reviews[reviewDetailEp];
                 return (
-                  <div key={ep.number} className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10">
-                    <h3 className="text-sm font-medium text-white mb-3">{isZh ? `第${ep.number}集审核报告` : `Ep ${ep.number} Review`}</h3>
-                    <div className="grid grid-cols-5 gap-2 mb-3">
-                      {(['rhythm', 'satisfaction', 'dialogue', 'format', 'continuity'] as const).map(dim => {
-                        const labels: Record<string, string> = { rhythm: '节奏', satisfaction: '爽点', dialogue: '台词', format: '格式', continuity: '连贯性' };
-                        return (
-                          <div key={dim} className="text-center">
-                            <div className="text-xs text-gray-500">{isZh ? labels[dim] : dim}</div>
-                            <div className={`text-lg font-bold ${review[dim].score >= 8 ? 'text-green-400' : review[dim].score >= 6 ? 'text-yellow-400' : 'text-red-400'}`}>
-                              {review[dim].score}
-                            </div>
-                            <div className="text-xs text-gray-500 truncate" title={review[dim].comment}>{review[dim].comment}</div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {review.issues.length > 0 && (
-                      <div className="space-y-1">
-                        {review.issues.map((issue, i) => (
-                          <div key={i} className="text-xs">
-                            <span className={`${issue.severity === '严重' ? 'text-red-400' : issue.severity === '建议' ? 'text-yellow-400' : 'text-gray-400'}`}>
-                              【{issue.severity}】
-                            </span>
-                            <span className="text-gray-300">{issue.description}</span>
-                            <span className="text-gray-500"> → {issue.suggestion}</span>
-                          </div>
-                        ))}
+                  <div className="fixed inset-0 z-[60] flex items-center justify-center">
+                    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setReviewDetailEp(null)} />
+                    <div className="relative w-full max-w-2xl bg-[#111] rounded-2xl border border-white/10 shadow-2xl max-h-[85vh] flex flex-col animate-scale-in">
+                      <div className="p-6 border-b border-white/5 flex justify-between items-center">
+                        <h3 className="text-lg font-bold text-white">第 {reviewDetailEp} 集评估报告</h3>
+                        <div className="text-2xl font-bold text-green-400">{review.total}分</div>
                       </div>
-                    )}
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
+                        <div className="grid grid-cols-5 gap-2">
+                          {Object.entries(review).filter(([k]) => k !== 'total' && k !== 'issues').map(([k, v]: [string, any]) => (
+                            <div key={k} className="bg-[#1a1a1a] p-3 rounded-lg text-center">
+                              <div className="text-[10px] text-gray-500 uppercase mb-1">{k}</div>
+                              <div className="text-lg font-bold text-white">{v.score}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="space-y-3">
+                          <h4 className="text-sm font-bold text-white">问题与建议</h4>
+                          {review.issues.map((issue, i) => (
+                            <div key={i} className="p-4 rounded-xl bg-[#1a1a1a] border border-white/5">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className={`text-xs px-1.5 py-0.5 rounded ${issue.severity === '严重' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{issue.severity}</span>
+                                <span className="text-sm text-gray-300">{issue.description}</span>
+                              </div>
+                              <p className="text-xs text-gray-500 pl-1 border-l-2 border-white/10 ml-1 mt-2">{issue.suggestion}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 );
-              })}
-
-              <div className="flex gap-3">
-                <button onClick={() => setStep('writing')}
-                  className="flex-1 py-3 rounded-xl text-sm font-medium bg-[#1a1a1a] border border-white/10 text-gray-300 hover:bg-[#222] transition-colors">
-                  {isZh ? '← 返回撰写' : '← Back to Writing'}
-                </button>
-                <button onClick={handleExport} disabled={loading}
-                  className="flex-1 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                  {isZh ? '导出剧本' : 'Export'}
-                </button>
-              </div>
+              })()}
             </div>
           )}
 
           {/* Step: 导出 */}
           {step === 'export' && (
-            <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-white">{isZh ? '📦 导出完成' : '📦 Export Complete'}</h2>
-
-              <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20 text-green-300 text-sm">
-                ✅ {isZh
-                  ? `剧本已导出！已完成 ${project?.episodes.length}/${project?.config.totalEpisodes} 集`
-                  : `Exported! ${project?.episodes.length}/${project?.config.totalEpisodes} episodes completed`}
+            <div className="flex flex-col items-center justify-center py-20 animate-fade-in">
+              <div className="w-24 h-24 bg-green-500/20 rounded-full flex items-center justify-center mb-6 animate-pulse-glow">
+                <CheckIcon className="w-10 h-10 text-green-400" />
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-4">{isZh ? '创作完成！' : 'All Done!'}</h2>
+              <p className="text-gray-400 mb-10 text-center max-w-md">{isZh ? '你的剧本已准备就绪，支持导出 Markdown 格式或直接进入制作流程。' : 'Your screenplay is ready.'}</p>
+              
+              <div className="flex gap-4">
+                <button onClick={handleDownloadExport}
+                  className="px-8 py-4 rounded-xl bg-[#1a1a1a] border border-white/10 hover:bg-[#222] text-white font-bold transition-all flex items-center gap-2">
+                  <DownloadIcon className="w-5 h-5" />
+                  {isZh ? '下载 Markdown' : 'Download .md'}
+                </button>
+                <button onClick={onClose}
+                  className="px-8 py-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all flex items-center gap-2">
+                  <FilmIcon className="w-5 h-5" />
+                  {isZh ? '去制作视频' : 'Make Video'}
+                </button>
               </div>
 
-              <button onClick={handleDownloadExport}
-                className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                {isZh ? '下载 Markdown 文件' : 'Download Markdown'}
-              </button>
-
-              {/* 预览 */}
-              <div className="p-4 rounded-xl bg-[#1a1a1a] border border-white/10 max-h-[500px] overflow-y-auto custom-scrollbar">
-                <pre className="text-sm text-gray-300 whitespace-pre-wrap font-mono">{exportContent}</pre>
+              <div className="mt-12 w-full max-w-3xl bg-[#161616] rounded-2xl border border-white/5 p-6 max-h-[300px] overflow-y-auto custom-scrollbar">
+                <pre className="text-xs text-gray-500 font-mono whitespace-pre-wrap">{exportContent}</pre>
               </div>
             </div>
           )}

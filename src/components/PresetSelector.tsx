@@ -11,20 +11,25 @@ export default function PresetSelector({ onSelect }: PresetSelectorProps) {
   const isEn = i18n.language === 'en';
 
   return (
-    <div className="bg-[#1c1f2e] rounded-2xl p-4 border border-gray-800">
-      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider block mb-3">
+    <div className="space-y-3">
+      <label className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>
         {t('generate.presets')}
       </label>
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         {DEFAULT_PRESETS.map((preset) => (
           <button
             key={preset.id}
             onClick={() => onSelect(preset)}
-            className="text-left px-3 py-2 rounded-lg border border-gray-700 bg-[#161824] hover:border-purple-500/50 hover:bg-purple-500/5 transition-all"
+            className="group relative text-left px-4 py-3 rounded-xl border border-white/5 bg-[#111] hover:border-purple-500/30 hover:bg-purple-500/5 transition-all hover:shadow-lg hover:shadow-purple-900/10"
           >
-            <div className="text-sm text-gray-300">{isEn ? preset.nameEn : preset.name}</div>
-            <div className="text-[10px] text-gray-500 mt-0.5">
-              {preset.model === 'seedance-2.0' ? '2.0' : 'Fast'} · {preset.ratio} · {preset.duration}s
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-sm font-medium text-gray-200 group-hover:text-purple-300 transition-colors">{isEn ? preset.nameEn : preset.name}</span>
+            </div>
+            <div className="flex items-center gap-2 text-[10px] text-gray-500 font-mono">
+              <span className="bg-white/5 px-1.5 py-0.5 rounded">{preset.model === 'seedance-2.0' ? '2.0' : 'Fast'}</span>
+              <span>{preset.ratio}</span>
+              <span>{preset.duration}s</span>
             </div>
           </button>
         ))}

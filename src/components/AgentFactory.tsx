@@ -1,6 +1,7 @@
 // 创作工厂 - 进化式Agent选择系统 UI
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CloseIcon, SparkleIcon, UploadIcon, CheckIcon } from './Icons';
 
 interface NovelDNA {
   title: string; genre: string; tone: string;
@@ -67,35 +68,68 @@ function useTaskProgress(taskId: string | null, onDone: () => void) {
 
 function DNADisplay({ dna, chapters, isZh }: { dna: NovelDNA; chapters: ChapterSummary[]; isZh: boolean }) {
   return (
-    <div className="space-y-4">
-      <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-        <h3 className="text-sm font-medium text-green-400 mb-3">🧬 {dna.title} — {isZh ? '写作DNA' : 'Writing DNA'}</h3>
-        <div className="grid grid-cols-2 gap-3 text-xs">
+    <div className="space-y-6 animate-fade-in">
+      <div className="p-6 rounded-2xl bg-[#111] border border-green-500/20 shadow-[0_0_20px_rgba(34,197,94,0.05)]">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-lg bg-green-500/20 flex items-center justify-center">
+            <span className="text-lg">🧬</span>
+          </div>
+          <h3 className="text-base font-bold text-green-400">{dna.title} — {isZh ? '写作DNA图谱' : 'Writing DNA'}</h3>
+        </div>
+        
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
           {[
             [isZh ? '题材' : 'Genre', dna.genre], [isZh ? '基调' : 'Tone', dna.tone],
             [isZh ? '叙事' : 'Narrative', dna.narrativeStyle], [isZh ? '节奏' : 'Pacing', dna.pacing],
             [isZh ? '对话' : 'Dialogue', dna.dialogueStyle], [isZh ? '描写' : 'Description', dna.descriptionDensity],
           ].map(([label, val]) => (
-            <div key={label} className="p-2 rounded-lg bg-white/5"><span className="text-gray-500">{label}:</span> <span className="text-gray-300">{val}</span></div>
+            <div key={label} className="p-3 rounded-xl bg-[#0a0a0a] border border-white/5 hover:border-white/10 transition-colors">
+              <span className="text-gray-500 block mb-1">{label}</span>
+              <span className="text-gray-200 font-medium">{val}</span>
+            </div>
           ))}
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-4">
+      
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {[
-          { title: isZh ? '钩子技巧' : 'Hook Techniques', items: dna.hookTechniques },
-          { title: isZh ? '爽点模式' : 'Satisfaction Patterns', items: dna.satisfactionPatterns },
-          { title: isZh ? '独特特征' : 'Unique Traits', items: dna.uniqueTraits },
-        ].map(({ title, items }) => (
-          <div key={title} className="p-4 rounded-xl bg-[#111] border border-white/10">
-            <h4 className="text-xs text-gray-500 mb-2">{title}</h4>
-            {items.map((item, i) => <p key={i} className="text-xs text-gray-400">• {item}</p>)}
+          { title: isZh ? '钩子技巧' : 'Hook Techniques', items: dna.hookTechniques, icon: '🎣' },
+          { title: isZh ? '爽点模式' : 'Satisfaction Patterns', items: dna.satisfactionPatterns, icon: '⚡' },
+          { title: isZh ? '独特特征' : 'Unique Traits', items: dna.uniqueTraits, icon: '✨' },
+        ].map(({ title, items, icon }) => (
+          <div key={title} className="p-5 rounded-2xl bg-[#111] border border-white/5 hover:border-white/10 transition-colors">
+            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+              <span>{icon}</span> {title}
+            </h4>
+            <div className="space-y-2">
+              {items.map((item, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs text-gray-300">
+                  <span className="text-green-500 mt-0.5">•</span>
+                  <span className="leading-relaxed">{item}</span>
+                </div>
+              ))}
+            </div>
           </div>
         ))}
-        <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-          <h4 className="text-xs text-gray-500 mb-2">{isZh ? '章节信息' : 'Chapters'}</h4>
-          <p className="text-xs text-gray-400">{isZh ? '共' : 'Total'} {chapters.length} {isZh ? '章' : 'chapters'}</p>
-          <p className="text-xs text-gray-400">{isZh ? '每章约' : 'Avg'} {dna.wordCountPerChapter} {isZh ? '字' : 'chars'}</p>
-          <p className="text-xs text-gray-400">{isZh ? '总字数约' : 'Total ~'} {(chapters.reduce((s, c) => s + c.wordCount, 0) / 10000).toFixed(1)}{isZh ? '万字' : '0k'}</p>
+        
+        <div className="p-5 rounded-2xl bg-[#111] border border-white/5 hover:border-white/10 transition-colors">
+          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <span>📚</span> {isZh ? '章节结构' : 'Chapters'}
+          </h4>
+          <div className="space-y-3">
+            <div className="flex justify-between text-xs border-b border-white/5 pb-2">
+              <span className="text-gray-500">{isZh ? '总章节' : 'Total Chapters'}</span>
+              <span className="text-white font-mono">{chapters.length}</span>
+            </div>
+            <div className="flex justify-between text-xs border-b border-white/5 pb-2">
+              <span className="text-gray-500">{isZh ? '平均字数/章' : 'Avg Words/Ch'}</span>
+              <span className="text-white font-mono">{dna.wordCountPerChapter}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">{isZh ? '总字数 (估)' : 'Total Words'}</span>
+              <span className="text-white font-mono">{(chapters.reduce((s, c) => s + c.wordCount, 0) / 10000).toFixed(1)}w</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -106,16 +140,19 @@ function ProgressLog({ logs }: { logs: string[] }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs.length]);
   return (
-    <div className="rounded-xl bg-[#0d0d0d] border border-blue-500/20 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-blue-500/5 border-b border-blue-500/10">
-        <span className="text-xs text-blue-400">📋 实时日志</span>
-        <span className="text-[10px] text-gray-600">{logs.length} 条</span>
+    <div className="rounded-2xl bg-[#0a0a0a] border border-white/10 overflow-hidden shadow-xl animate-fade-in">
+      <div className="flex items-center justify-between px-4 py-3 bg-[#111] border-b border-white/5">
+        <span className="text-xs font-bold text-green-400 flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+          SYSTEM_LOG
+        </span>
+        <span className="text-[10px] text-gray-600 font-mono">{logs.length} OPS</span>
       </div>
-      <div className="max-h-48 overflow-y-auto custom-scrollbar p-3 space-y-1 font-mono">
+      <div className="max-h-48 overflow-y-auto custom-scrollbar p-4 space-y-1.5 font-mono bg-black/50">
         {logs.map((log, i) => (
-          <div key={i} className="text-xs text-gray-400 leading-relaxed">
-            <span className="text-gray-600 mr-2">{String(i + 1).padStart(2, '0')}</span>
-            {log}
+          <div key={i} className="text-[11px] text-gray-400 leading-relaxed flex gap-3 hover:bg-white/5 p-0.5 rounded transition-colors">
+            <span className="text-gray-700 select-none w-6 text-right">{String(i + 1).padStart(2, '0')}</span>
+            <span className={log.includes('✅') ? 'text-green-400' : log.includes('❌') ? 'text-red-400' : ''}>{log}</span>
           </div>
         ))}
         <div ref={endRef} />
@@ -128,66 +165,117 @@ function EvolutionDisplay({ project, isZh, loading, onRunFull, onStop }: { proje
   const history = project.evolutionHistory;
   const isEvolving = project.status === 'evolving';
   const isPaused = project.status === 'paused';
+  
   return (
-    <div className="space-y-4">
-      <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-gray-300">📊 {isZh ? '进化进度' : 'Evolution Progress'}</h3>
-            {isPaused && <span className="px-2 py-0.5 rounded-full text-[10px] bg-yellow-500/20 text-yellow-400">{isZh ? '已暂停' : 'Paused'}</span>}
-            {isEvolving && <span className="px-2 py-0.5 rounded-full text-[10px] bg-green-500/20 text-green-400 animate-pulse">{isZh ? '进化中' : 'Running'}</span>}
+    <div className="space-y-6 animate-fade-in">
+      {/* Status Card */}
+      <div className="p-6 rounded-2xl bg-[#111] border border-white/10 relative overflow-hidden">
+        <div className="absolute top-0 right-0 p-32 bg-green-500/5 blur-3xl rounded-full pointer-events-none"></div>
+        
+        <div className="flex items-center justify-between mb-6 relative z-10">
+          <div className="flex items-center gap-3">
+            <div className={`w-3 h-3 rounded-full ${isEvolving ? 'bg-green-500 animate-pulse' : isPaused ? 'bg-yellow-500' : 'bg-gray-500'}`}></div>
+            <div>
+              <h3 className="text-sm font-bold text-white">{isZh ? '进化引擎状态' : 'Evolution Engine Status'}</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                {isEvolving ? (isZh ? '正在进行自然选择与变异...' : 'Natural selection & mutation running...') : 
+                 isPaused ? (isZh ? '已暂停' : 'Paused') : (isZh ? '等待指令' : 'Idle')}
+              </p>
+            </div>
           </div>
-          <span className="text-xs text-gray-500">{isZh ? `阶段${project.currentChapter} · 第${project.currentGeneration}代` : `Stage ${project.currentChapter} · Gen ${project.currentGeneration}`}</span>
+          <div className="text-right">
+            <div className="text-2xl font-mono font-bold text-white">{project.currentGeneration}</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wider">{isZh ? '当前代数' : 'GENERATION'}</div>
+          </div>
         </div>
-        <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
-          <div className="h-full bg-green-500 rounded-full transition-all duration-500" style={{ width: `${history.length > 0 ? Math.min((history.length / 10) * 100, 100) : 0}%` }} />
+        
+        {/* Progress Bar */}
+        <div className="relative z-10">
+          <div className="flex justify-between text-xs text-gray-400 mb-2">
+            <span>{isZh ? `阶段 ${project.currentChapter}` : `Stage ${project.currentChapter}`}</span>
+            <span>{Math.round((history.length / 10) * 100)}%</span>
+          </div>
+          <div className="w-full h-2 bg-[#0a0a0a] rounded-full overflow-hidden border border-white/5">
+            <div className="h-full bg-gradient-to-r from-green-600 to-emerald-400 rounded-full transition-all duration-500 shadow-[0_0_10px_rgba(34,197,94,0.3)]" 
+              style={{ width: `${history.length > 0 ? Math.min((history.length / 10) * 100, 100) : 0}%` }} />
+          </div>
         </div>
       </div>
-      {history.length > 0 && (
-        <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-          <h4 className="text-xs text-gray-500 mb-3">{isZh ? '竞赛历史' : 'History'}</h4>
-          <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
-            {history.map((r, i) => (
-              <div key={i} className="flex items-center justify-between text-xs p-2 rounded-lg bg-white/5">
-                <span className="text-gray-400">{r.stageName || (isZh ? `阶段${r.stage || r.chapter}` : `Stage${r.stage || r.chapter}`)} · {isZh ? `第${r.generation}代` : `Gen${r.generation}`}</span>
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-500">{isZh ? '平均' : 'Avg'}: {r.avgScore}</span>
-                  <span className="text-green-400 font-medium">{isZh ? '最高' : 'Best'}: {r.bestScore}</span>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* History Chart (List) */}
+        {history.length > 0 && (
+          <div className="p-5 rounded-2xl bg-[#111] border border-white/10 flex flex-col h-[300px]">
+            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '进化历史' : 'Evolution History'}</h4>
+            <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-2">
+              {history.map((r, i) => (
+                <div key={i} className="flex items-center justify-between text-xs p-3 rounded-xl bg-[#0a0a0a] border border-white/5 hover:border-white/10 transition-colors">
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500 font-mono w-6">#{r.generation}</span>
+                    <span className="text-gray-300">{r.stageName || (isZh ? `阶段${r.stage || r.chapter}` : `Stage${r.stage || r.chapter}`)}</span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div className="flex flex-col items-end">
+                      <span className="text-[10px] text-gray-600">AVG</span>
+                      <span className="text-gray-400 font-mono">{r.avgScore.toFixed(1)}</span>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <span className="text-[10px] text-gray-600">BEST</span>
+                      <span className="text-green-400 font-mono font-bold">{r.bestScore.toFixed(1)}</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      {project.topAgents.length > 0 && (
-        <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-          <h4 className="text-xs text-gray-500 mb-3">{isZh ? '当前Top 10' : 'Top 10'}</h4>
-          <div className="space-y-1">
-            {project.topAgents.map((a, i) => (
-              <div key={a.id} className="flex items-center justify-between text-xs p-2 rounded-lg bg-white/5">
-                <div className="flex items-center gap-2">
-                  <span className={i === 0 ? 'text-yellow-400' : i < 3 ? 'text-gray-300' : 'text-gray-600'}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i+1}`}</span>
-                  <span className="text-gray-400">{a.id}</span>
+        )}
+
+        {/* Top Agents */}
+        {project.topAgents.length > 0 && (
+          <div className="p-5 rounded-2xl bg-[#111] border border-white/10 flex flex-col h-[300px]">
+            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '精英个体 (Top 10)' : 'Elite Agents (Top 10)'}</h4>
+            <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-2">
+              {project.topAgents.map((a, i) => (
+                <div key={a.id} className={`flex items-center justify-between text-xs p-3 rounded-xl border transition-all ${i === 0 ? 'bg-yellow-900/10 border-yellow-500/30' : 'bg-[#0a0a0a] border-white/5'}`}>
+                  <div className="flex items-center gap-3">
+                    <span className={`font-bold font-mono w-4 text-center ${i === 0 ? 'text-yellow-400 text-sm' : i < 3 ? 'text-gray-300' : 'text-gray-600'}`}>
+                      {i === 0 ? '1' : i + 1}
+                    </span>
+                    <div className="flex flex-col">
+                      <span className="text-gray-300 font-mono text-[10px]">{a.id.slice(0, 8)}...</span>
+                      <span className="text-[9px] text-gray-600">Gen {a.generation}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-16 bg-gray-800 rounded-full overflow-hidden">
+                      <div className="h-full bg-green-500" style={{ width: `${Math.min((a.score || 0), 100)}%` }}></div>
+                    </div>
+                    <span className="text-green-400 font-mono font-bold w-8 text-right">{a.score ?? '-'}</span>
+                  </div>
                 </div>
-                <span className="text-green-400 font-medium">{a.score ?? '-'}</span>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      {isEvolving && (
-        <button onClick={onStop} className="w-full py-3 rounded-xl text-sm font-medium bg-yellow-600 hover:bg-yellow-500 text-white transition-colors">
-          ⏸ {isZh ? '暂停进化' : 'Pause'}
-        </button>
-      )}
-      {(isPaused || (project.status !== 'completed' && project.status !== 'evolving')) && (
-        <button onClick={onRunFull} disabled={loading} className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-          {loading ? (isZh ? '启动中...' : 'Starting...') : isPaused ? (isZh ? '▶ 继续进化' : '▶ Resume') : (isZh ? '🚀 开始进化' : '🚀 Start')}
-        </button>
-      )}
+        )}
+      </div>
+
+      {/* Controls */}
+      <div className="flex gap-3 pt-4 border-t border-white/5">
+        {isEvolving ? (
+          <button onClick={onStop} className="flex-1 py-4 rounded-xl text-sm font-bold bg-yellow-600 hover:bg-yellow-500 text-white transition-all shadow-lg shadow-yellow-900/20 active:scale-[0.98]">
+            ⏸ {isZh ? '暂停进化' : 'Pause Evolution'}
+          </button>
+        ) : (
+          <button onClick={onRunFull} disabled={loading} 
+            className="flex-1 py-4 rounded-xl text-sm font-bold bg-green-600 hover:bg-green-500 disabled:bg-[#222] disabled:text-gray-500 text-white transition-all shadow-lg shadow-green-900/20 active:scale-[0.98] flex items-center justify-center gap-2">
+            {loading ? <span className="animate-pulse">...</span> : isPaused ? (isZh ? '▶ 继续进化' : '▶ Resume') : (isZh ? '🚀 开始进化' : '🚀 Start Evolution')}
+          </button>
+        )}
+      </div>
+
       {project.status === 'completed' && (
-        <div className="p-3 rounded-xl bg-green-500/10 border border-green-500/20 text-green-400 text-sm text-center">
-          ✅ {isZh ? '进化完成！前往"最终结果"查看' : 'Done! Go to Result tab.'}
+        <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20 text-green-400 text-sm text-center font-medium animate-pulse">
+          ✅ {isZh ? '进化完成！请前往"最终结果"查看冠军Agent' : 'Evolution complete! Check results.'}
         </div>
       )}
     </div>
@@ -334,135 +422,192 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
 
   return (
     <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col">
-      <header className="h-14 flex items-center justify-between px-6 border-b border-white/5 flex-shrink-0">
-        <div className="flex items-center gap-3">
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors text-lg">✕</button>
-          <h1 className="text-base font-semibold text-white">🧬 {isZh ? '创作工厂' : 'Creative Factory'}</h1>
-          {project?.novelDNA?.title && <span className="text-sm text-gray-500">— {project.novelDNA.title}</span>}
+      <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 flex-shrink-0 bg-[#0a0a0a]/95 backdrop-blur z-20">
+        <div className="flex items-center gap-4">
+          <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 transition-colors text-gray-400 hover:text-white">
+            <CloseIcon className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-lg font-bold text-white flex items-center gap-2">
+              <span className="text-2xl">🧬</span>
+              {isZh ? '创作工厂' : 'Creative Factory'}
+            </h1>
+            {project?.novelDNA?.title && <p className="text-xs text-gray-500 font-mono mt-0.5">{project.novelDNA.title}</p>}
+          </div>
         </div>
+        
+        {/* Step Progress */}
+        <div className="flex items-center gap-1">
+          {STEPS.map((s, i) => {
+            const isActive = s === step;
+            const isDone = i < stepIndex;
+            return (
+              <div key={s} className="flex items-center">
+                <div className={`flex flex-col items-center gap-1 px-3 ${isActive ? 'opacity-100' : isDone ? 'opacity-60 hover:opacity-80 cursor-pointer' : 'opacity-30'}`}
+                  onClick={() => isDone && setStep(s)}>
+                  <div className={`w-2.5 h-2.5 rounded-full transition-all ${isActive ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.6)] scale-125' : isDone ? 'bg-green-500' : 'bg-gray-600'}`} />
+                  <span className="text-[10px] font-medium uppercase tracking-wider">{isZh ? STEP_LABELS[s].zh : STEP_LABELS[s].en}</span>
+                </div>
+                {i < STEPS.length - 1 && <div className={`w-8 h-[1px] ${isDone ? 'bg-green-500/50' : 'bg-white/10'}`} />}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="w-[100px]"></div> {/* Spacer for alignment */}
       </header>
-      <div className="flex justify-center px-6 py-5 border-b border-white/5">
-        <div className="flex items-center gap-2">
-          {STEPS.map((s, i) => (
-            <div key={s} className="flex items-center gap-2">
-              {i > 0 && <div className={`w-12 h-px ${i <= stepIndex ? 'bg-green-500/50' : 'bg-white/10'}`} />}
-              <button onClick={() => i <= stepIndex && setStep(s)}
-                className={`px-5 py-2 rounded-full text-sm whitespace-nowrap transition-colors ${s === step ? 'bg-green-600 text-white' : i < stepIndex ? 'bg-white/10 text-gray-300 hover:bg-white/15' : 'bg-white/5 text-gray-600'}`}>
-                {isZh ? STEP_LABELS[s].zh : STEP_LABELS[s].en}
-              </button>
+
+      <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">
+        <div className="max-w-5xl mx-auto px-8 py-10 space-y-8">
+          {displayError && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm flex items-center gap-3 animate-fade-in">
+              <span className="text-xl">⚠️</span>
+              {displayError}
             </div>
-          ))}
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto custom-scrollbar">
-        <div className="max-w-4xl mx-auto px-6 py-6 space-y-6">
-          {displayError && <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm">{displayError}</div>}
+          )}
           {logs.length > 0 && <ProgressLog logs={logs} />}
 
           {step === 'upload' && (
-            <div className="space-y-4">
+            <div className="space-y-8 animate-fade-in">
               {existingProjects.length > 0 && (
-                <div className="p-4 rounded-xl bg-[#111] border border-amber-500/20 space-y-3">
-                  <p className="text-sm text-amber-400">📂 {isZh ? '发现未完成的项目' : 'Unfinished projects found'}</p>
-                  {existingProjects.map(p => {
-                    const statusLabels: Record<string, string> = {
-                      created: '已创建', parsing: '解析中', parsed: 'DNA已解析',
-                      evolving: '进化中', paused: '已暂停', completed: '已完成', error: '出错',
-                    };
-                    return (
-                      <div key={p.id} className="flex items-center justify-between p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-gray-200 truncate">{p.title}</p>
-                          <p className="text-xs text-gray-500 mt-0.5">
-                            {isZh ? statusLabels[p.status] || p.status : p.status}
-                            {p.genre ? ` · ${p.genre}` : ''}
-                            {p.chapters > 0 ? ` · ${p.chapters}章` : ''}
-                            {p.agentCount > 0 ? ` · ${p.agentCount}个Agent` : ''}
-                            {p.bestScore > 0 ? ` · 最高${p.bestScore}分` : ''}
-                          </p>
+                <div className="p-6 rounded-2xl bg-[#161616] border border-amber-500/20 space-y-4 shadow-lg shadow-amber-900/5">
+                  <div className="flex items-center gap-2 text-amber-400 font-medium">
+                    <span className="text-lg">📂</span>
+                    {isZh ? '发现未完成的项目' : 'Unfinished projects found'}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {existingProjects.map(p => {
+                      const statusLabels: Record<string, string> = {
+                        created: '已创建', parsing: '解析中', parsed: 'DNA已解析',
+                        evolving: '进化中', paused: '已暂停', completed: '已完成', error: '出错',
+                      };
+                      return (
+                        <div key={p.id} className="flex items-center justify-between p-4 rounded-xl bg-[#0a0a0a] border border-white/5 hover:border-amber-500/30 transition-all group">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-gray-200 font-medium truncate">{p.title}</p>
+                            <p className="text-xs text-gray-500 mt-1 font-mono">
+                              {isZh ? statusLabels[p.status] || p.status : p.status}
+                              {p.genre ? ` · ${p.genre}` : ''}
+                              {p.chapters > 0 ? ` · ${p.chapters}章` : ''}
+                              {p.agentCount > 0 ? ` · ${p.agentCount} Agents` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button onClick={() => resumeProject(p.id)} disabled={loading}
+                              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 text-white transition-colors">
+                              {isZh ? '继续' : 'Resume'}
+                            </button>
+                            <button onClick={async () => {
+                              await fetch(`/api/factory/${p.id}`, { method: 'DELETE' });
+                              setExistingProjects(prev => prev.filter(x => x.id !== p.id));
+                            }} className="p-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors">
+                              <CloseIcon className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 ml-3">
-                          <button onClick={() => resumeProject(p.id)} disabled={loading}
-                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 disabled:bg-gray-700 text-white transition-colors">
-                            {isZh ? '继续' : 'Resume'}
-                          </button>
-                          <button onClick={async () => {
-                            await fetch(`/api/factory/${p.id}`, { method: 'DELETE' });
-                            setExistingProjects(prev => prev.filter(x => x.id !== p.id));
-                          }} className="px-2 py-1.5 rounded-lg text-xs text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors">
-                            {isZh ? '删除' : 'Del'}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div className="border-t border-white/5 pt-3">
-                    <p className="text-xs text-gray-600">{isZh ? '或创建新项目 ↓' : 'Or create a new project ↓'}</p>
+                      );
+                    })}
                   </div>
                 </div>
               )}
-              <p className="text-sm text-gray-400">{isZh ? '上传一篇爆款小说，创作工厂将解析其写作DNA，通过进化式Agent竞赛找到最能复制该风格的写作Agent。' : 'Upload a hit novel to find the best style-matching writing agent.'}</p>
-              <div>
-                <label className="block text-sm text-gray-300 mb-2">{isZh ? '小说内容' : 'Novel Content'}</label>
-                <textarea value={novelText} onChange={e => setNovelText(e.target.value)} rows={12} placeholder={isZh ? '粘贴小说全文，或上传txt文件...' : 'Paste or upload .txt...'}
-                  className="w-full bg-[#111] border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-green-500/50" />
-                <div className="flex items-center justify-between mt-2">
-                  <span className="text-xs text-gray-600">{novelText.length.toLocaleString()} {isZh ? '字' : 'chars'}</span>
-                  <div><input ref={fileInputRef} type="file" accept=".txt,.text" className="hidden" onChange={handleFileUpload} />
-                    <button onClick={() => fileInputRef.current?.click()} className="text-xs text-green-500 hover:text-green-400">📁 {isZh ? '上传文件' : 'Upload'}</button></div>
+
+              <div className="text-center mb-8">
+                <h2 className="text-2xl font-bold text-white mb-3">{isZh ? '上传爆款小说' : 'Upload Hit Novel'}</h2>
+                <p className="text-gray-500 max-w-lg mx-auto">{isZh ? '创作工厂将解析其写作DNA，通过进化式Agent竞赛找到最能复制该风格的写作Agent。' : 'Upload a hit novel to find the best style-matching writing agent.'}</p>
+              </div>
+
+              <div className="bg-[#161616] p-6 rounded-2xl border border-white/5 space-y-6">
+                <div>
+                  <div className="flex justify-between items-center mb-3">
+                    <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">{isZh ? '小说内容' : 'Novel Content'}</label>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-gray-500 font-mono">{novelText.length.toLocaleString()} {isZh ? '字' : 'chars'}</span>
+                      <input ref={fileInputRef} type="file" accept=".txt,.text" className="hidden" onChange={handleFileUpload} />
+                      <button onClick={() => fileInputRef.current?.click()} 
+                        className="flex items-center gap-1.5 text-xs text-green-400 hover:text-green-300 transition-colors px-2 py-1 rounded hover:bg-green-500/10">
+                        <UploadIcon className="w-3 h-3" /> {isZh ? '上传文件' : 'Upload'}
+                      </button>
+                    </div>
+                  </div>
+                  <textarea value={novelText} onChange={e => setNovelText(e.target.value)} rows={12} 
+                    placeholder={isZh ? '粘贴小说全文，或上传txt文件...' : 'Paste or upload .txt...'}
+                    className="w-full bg-[#0a0a0a] border border-white/10 rounded-xl px-4 py-3 text-sm text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-green-500/50 transition-all font-mono leading-relaxed" />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-white/5">
+                  {[
+                    { label: isZh ? '并发数' : 'Concurrency', value: concurrency, set: setConcurrency, min: 1, max: 20, desc: 'Parallel tasks' },
+                    { label: isZh ? '每代Agent数' : 'Agents/Gen', value: agentsPerGen, set: setAgentsPerGen, min: 10, max: 200, desc: 'Population size' },
+                    { label: isZh ? '每轮TopK' : 'Top K', value: topK, set: setTopK, min: 3, max: 30, desc: 'Survivors' },
+                  ].map(({ label, value, set, min, max, desc }) => (
+                    <div key={label}>
+                      <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">{label}</label>
+                      <input type="number" value={value} onChange={e => set(Number(e.target.value))} min={min} max={max}
+                        className="w-full bg-[#0a0a0a] border border-white/10 rounded-xl px-4 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-green-500/50 transition-all" />
+                      <p className="text-[10px] text-gray-600 mt-1.5">{desc}</p>
+                    </div>
+                  ))}
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-4">
-                {[
-                  { label: isZh ? '并发数' : 'Concurrency', value: concurrency, set: setConcurrency, min: 1, max: 20 },
-                  { label: isZh ? '每代Agent数' : 'Agents/Gen', value: agentsPerGen, set: setAgentsPerGen, min: 10, max: 200 },
-                  { label: isZh ? '每轮TopK' : 'Top K', value: topK, set: setTopK, min: 3, max: 30 },
-                ].map(({ label, value, set, min, max }) => (
-                  <div key={label}><label className="block text-xs text-gray-500 mb-1">{label}</label>
-                    <input type="number" value={value} onChange={e => set(Number(e.target.value))} min={min} max={max}
-                      className="w-full bg-[#111] border border-white/10 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-green-500/50" /></div>
-                ))}
-              </div>
+
               <button onClick={handleCreate} disabled={loading || novelText.length < 500}
-                className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-500 text-white transition-colors">
-                {loading ? (isZh ? '创建中...' : 'Creating...') : (isZh ? '创建工厂项目' : 'Create Factory')}
+                className="w-full py-4 rounded-xl text-base font-bold bg-green-600 hover:bg-green-500 disabled:bg-[#222] disabled:text-gray-500 text-white transition-all shadow-lg shadow-green-900/20 hover:scale-[1.01] active:scale-[0.99]">
+                {loading ? (isZh ? '创建中...' : 'Creating...') : (isZh ? '🚀 创建工厂项目' : '🚀 Create Factory')}
               </button>
             </div>
           )}
 
           {step === 'dna' && (
-            <div className="space-y-4">
+            <div className="space-y-8 animate-fade-in">
               {!project?.novelDNA ? (
-                <div className="text-center py-8">
-                  <p className="text-sm text-gray-400 mb-4">{isZh ? '解析小说的写作DNA' : 'Parse novel writing DNA'}</p>
-                  <button onClick={handleParse} disabled={loading} className="px-6 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {loading ? (isZh ? '解析中...' : 'Parsing...') : (isZh ? '🧬 开始解析DNA' : '🧬 Parse DNA')}
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="w-24 h-24 bg-green-500/10 rounded-full flex items-center justify-center mb-6 animate-pulse">
+                    <span className="text-5xl">🧬</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '解析写作DNA' : 'Parse Writing DNA'}</h3>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将深度分析小说的叙事风格、节奏、爽点模式和独特特征。' : 'AI will analyze narrative style, pacing, and unique traits.'}</p>
+                  <button onClick={handleParse} disabled={loading} 
+                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 disabled:bg-[#222] text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                    {loading ? (isZh ? '解析中...' : 'Parsing...') : (isZh ? '开始解析' : 'Start Parsing')}
                   </button>
                 </div>
-              ) : <DNADisplay dna={project.novelDNA} chapters={project.chapters} isZh={isZh} />}
-              {project?.novelDNA && (
-                <button onClick={() => setStep('agents')} className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 text-white transition-colors">
-                  {isZh ? '下一步：生成Agent群 →' : 'Next: Generate Agents →'}
-                </button>
+              ) : (
+                <>
+                  <DNADisplay dna={project.novelDNA} chapters={project.chapters} isZh={isZh} />
+                  <div className="flex justify-end pt-4">
+                    <button onClick={() => setStep('agents')} 
+                      className="px-8 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02]">
+                      {isZh ? '下一步：生成Agent群 →' : 'Next: Generate Agents →'}
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           )}
 
           {step === 'agents' && (
-            <div className="space-y-4">
+            <div className="space-y-8 animate-fade-in">
               {(project?.totalAgents || 0) === 0 ? (
-                <div className="text-center py-8">
-                  <p className="text-sm text-gray-400 mb-4">{isZh ? `将生成 ${agentsPerGen} 个差异化写作Agent` : `Generate ${agentsPerGen} agents`}</p>
-                  <button onClick={handleGenerateAgents} disabled={loading} className="px-6 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                    {loading ? (isZh ? '生成中...' : 'Generating...') : (isZh ? `🤖 生成 ${agentsPerGen} 个Agent` : `🤖 Generate ${agentsPerGen} Agents`)}
+                <div className="flex flex-col items-center justify-center py-20">
+                  <div className="w-24 h-24 bg-blue-500/10 rounded-full flex items-center justify-center mb-6">
+                    <span className="text-5xl">🤖</span>
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '生成初始种群' : 'Initialize Population'}</h3>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? `将基于DNA生成 ${agentsPerGen} 个具有不同参数配置的差异化写作Agent。` : `Generate ${agentsPerGen} diverse agents based on the DNA.`}</p>
+                  <button onClick={handleGenerateAgents} disabled={loading} 
+                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 disabled:bg-[#222] text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                    {loading ? (isZh ? '生成中...' : 'Generating...') : (isZh ? '生成Agent群' : 'Generate Agents')}
                   </button>
                 </div>
               ) : (
-                <div>
-                  <div className="p-4 rounded-xl bg-[#111] border border-white/10">
-                    <p className="text-sm text-gray-300">✅ {isZh ? `已生成 ${project?.totalAgents} 个Agent` : `${project?.totalAgents} agents ready`}</p>
+                <div className="flex flex-col items-center justify-center py-16 bg-[#161616] rounded-3xl border border-white/5">
+                  <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mb-4">
+                    <CheckIcon className="w-8 h-8 text-green-400" />
                   </div>
-                  <button onClick={handleRunFull} disabled={loading} className="w-full mt-4 py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
+                  <h3 className="text-lg font-bold text-white mb-2">{isZh ? '种群就绪' : 'Population Ready'}</h3>
+                  <p className="text-gray-400 mb-8">{isZh ? `已生成 ${project?.totalAgents} 个Agent，准备开始进化竞赛。` : `${project?.totalAgents} agents ready for evolution.`}</p>
+                  <button onClick={handleRunFull} disabled={loading} 
+                    className="px-10 py-4 rounded-xl bg-green-600 hover:bg-green-500 disabled:bg-[#222] text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02] flex items-center gap-2">
                     {loading ? (isZh ? '进化中...' : 'Evolving...') : (isZh ? '🚀 开始完整进化' : '🚀 Start Evolution')}
                   </button>
                 </div>
@@ -473,30 +618,67 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
           {step === 'evolving' && project && <EvolutionDisplay project={project} isZh={isZh} loading={loading} onRunFull={handleRunFull} onStop={handleStop} />}
 
           {step === 'result' && project && (
-            <div className="space-y-4">
+            <div className="space-y-8 animate-fade-in">
               {project.finalAgent && (
-                <div className="p-4 rounded-xl bg-[#111] border border-green-500/30 space-y-3">
-                  <h3 className="text-sm font-medium text-green-400">🏆 {isZh ? '冠军Agent' : 'Champion'}</h3>
-                  <div className="grid grid-cols-3 gap-3 text-xs">
-                    <div className="p-2 rounded-lg bg-white/5"><span className="text-gray-500">ID:</span> <span className="text-gray-300">{project.finalAgent.id}</span></div>
-                    <div className="p-2 rounded-lg bg-white/5"><span className="text-gray-500">{isZh ? '代数' : 'Gen'}:</span> <span className="text-gray-300">{project.finalAgent.generation}</span></div>
-                    <div className="p-2 rounded-lg bg-white/5"><span className="text-gray-500">{isZh ? '得分' : 'Score'}:</span> <span className="text-green-400 font-medium">{project.finalAgent.score}</span></div>
+                <div className="p-8 rounded-3xl bg-gradient-to-br from-[#111] to-[#0a0a0a] border border-green-500/30 shadow-[0_0_30px_rgba(34,197,94,0.1)] relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-40 bg-green-500/5 blur-3xl rounded-full pointer-events-none"></div>
+                  
+                  <div className="flex items-center gap-4 mb-8 relative z-10">
+                    <div className="w-16 h-16 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
+                      <span className="text-3xl">🏆</span>
+                    </div>
+                    <div>
+                      <h3 className="text-2xl font-bold text-white">{isZh ? '冠军 Agent' : 'Champion Agent'}</h3>
+                      <p className="text-green-400 font-mono mt-1">Score: {project.finalAgent.score}</p>
+                    </div>
                   </div>
-                  <div><p className="text-xs text-gray-500 mb-1">{isZh ? '评分历史' : 'Scores'}</p><p className="text-xs text-gray-400">{project.finalAgent.scoreHistory.join(' → ')}</p></div>
-                  <div><p className="text-xs text-gray-500 mb-1">{isZh ? '进化路径' : 'Path'}</p>{project.finalAgent.mutationLog.map((m, i) => <p key={i} className="text-xs text-gray-400">• {m}</p>)}</div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative z-10">
+                    <div className="p-4 rounded-xl bg-[#0a0a0a] border border-white/10">
+                      <span className="text-xs text-gray-500 uppercase tracking-wider block mb-1">ID</span>
+                      <span className="text-sm text-gray-300 font-mono">{project.finalAgent.id}</span>
+                    </div>
+                    <div className="p-4 rounded-xl bg-[#0a0a0a] border border-white/10">
+                      <span className="text-xs text-gray-500 uppercase tracking-wider block mb-1">{isZh ? '进化代数' : 'Generation'}</span>
+                      <span className="text-sm text-gray-300 font-mono">{project.finalAgent.generation}</span>
+                    </div>
+                    <div className="p-4 rounded-xl bg-[#0a0a0a] border border-white/10">
+                      <span className="text-xs text-gray-500 uppercase tracking-wider block mb-1">{isZh ? '评分历史' : 'Score History'}</span>
+                      <span className="text-xs text-gray-300 font-mono">{project.finalAgent.scoreHistory.join(' → ')}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 p-5 rounded-xl bg-[#0a0a0a] border border-white/10 relative z-10">
+                    <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '进化路径' : 'Evolution Path'}</h4>
+                    <div className="space-y-2">
+                      {project.finalAgent.mutationLog.map((m, i) => (
+                        <div key={i} className="flex items-start gap-2 text-xs text-gray-400">
+                          <span className="text-green-500 mt-0.5">⚡</span>
+                          <span>{m}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               )}
-              {!savedAgent ? (
-                <button onClick={handleExport} disabled={loading} className="w-full py-3 rounded-xl text-sm font-medium bg-green-600 hover:bg-green-500 disabled:bg-gray-700 text-white transition-colors">
-                  {loading ? (isZh ? '保存中...' : 'Saving...') : (isZh ? '💾 保存到Agent仓库' : '💾 Save to Agent Store')}
-                </button>
-              ) : (
-                <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20 space-y-2">
-                  <p className="text-sm text-green-400">✅ {isZh ? '已保存到Agent仓库' : 'Saved to Agent Store'}</p>
-                  <p className="text-xs text-gray-400">{savedAgent.name}</p>
-                  <p className="text-xs text-gray-500">{isZh ? '可在「剧本创作」中选择此Agent进行创作' : 'Available in Screenplay Creator'}</p>
-                </div>
-              )}
+
+              <div className="flex justify-center pt-4">
+                {!savedAgent ? (
+                  <button onClick={handleExport} disabled={loading} 
+                    className="px-10 py-4 rounded-xl bg-green-600 hover:bg-green-500 disabled:bg-[#222] text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02] flex items-center gap-2">
+                    {loading ? (isZh ? '保存中...' : 'Saving...') : (isZh ? '💾 保存到Agent仓库' : '💾 Save to Agent Store')}
+                  </button>
+                ) : (
+                  <div className="flex flex-col items-center gap-2 p-6 rounded-2xl bg-green-500/10 border border-green-500/20 animate-fade-in">
+                    <div className="w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center mb-2">
+                      <CheckIcon className="w-6 h-6 text-green-400" />
+                    </div>
+                    <p className="text-lg font-bold text-green-400">{isZh ? '已保存到Agent仓库' : 'Saved to Agent Store'}</p>
+                    <p className="text-sm text-gray-400">{savedAgent.name}</p>
+                    <p className="text-xs text-gray-500 mt-2">{isZh ? '可在「剧本创作」中选择此Agent进行创作' : 'Available in Screenplay Creator'}</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>

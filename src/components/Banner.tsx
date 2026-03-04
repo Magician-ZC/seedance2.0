@@ -51,44 +51,49 @@ export default function Banner() {
   const slide = SLIDES[current];
 
   return (
-    <div className="relative w-full h-[160px] md:h-[180px] rounded-2xl overflow-hidden bg-[#1a1a1a]">
+    <div className="relative w-full h-[200px] md:h-[240px] rounded-3xl overflow-hidden bg-[#0a0a0a] border border-white/5 shadow-2xl group">
       {/* Background pattern */}
-      <div className="absolute inset-0 opacity-20">
-        <div className="absolute inset-0 bg-gradient-to-r from-green-600/30 to-transparent" />
+      <div className="absolute inset-0 opacity-30 transition-opacity duration-1000 group-hover:opacity-40">
+        <div className="absolute inset-0 bg-gradient-to-r from-green-600/20 to-transparent mix-blend-screen" />
         <div
-          className="absolute right-0 top-0 w-1/2 h-full"
+          className="absolute right-0 top-0 w-2/3 h-full opacity-20"
           style={{
-            backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2322c55e' fill-opacity='0.15'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
+            backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%2322c55e' fill-opacity='0.2'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`,
+            backgroundSize: '60px 60px',
           }}
         />
+        {/* Animated Glow */}
+        <div className="absolute -inset-[50%] bg-gradient-to-tr from-green-500/10 via-transparent to-transparent blur-3xl animate-pulse-glow opacity-50" />
       </div>
 
       {/* Gradient overlay */}
-      <div className={`absolute inset-0 bg-gradient-to-r ${slide.gradient}`} />
+      <div className={`absolute inset-0 bg-gradient-to-r ${slide.gradient} transition-colors duration-1000`} />
 
       {/* Content */}
-      <div className="relative z-10 h-full flex flex-col justify-center px-6 md:px-8">
-        <h2 className="text-xl md:text-2xl font-bold text-white mb-2">
-          {isZh ? slide.titleZh : slide.titleEn}
-        </h2>
-        <p className="text-sm text-gray-300 mb-4 max-w-md">
-          {isZh ? slide.descZh : slide.descEn}
-        </p>
-        <div>
-          <button className="px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm font-medium rounded-lg transition-colors">
-            {isZh ? '立即体验' : 'Try Now'}
-          </button>
+      <div className="relative z-10 h-full flex flex-col justify-center px-8 md:px-12 max-w-3xl">
+        <div className="animate-fade-in key={current}">
+          <h2 className="text-2xl md:text-4xl font-bold text-white mb-3 tracking-tight drop-shadow-lg">
+            {isZh ? slide.titleZh : slide.titleEn}
+          </h2>
+          <p className="text-base md:text-lg text-gray-200 mb-6 max-w-xl font-light leading-relaxed drop-shadow-md">
+            {isZh ? slide.descZh : slide.descEn}
+          </p>
+          <div>
+            <button className="px-6 py-2.5 bg-white text-green-900 hover:bg-gray-100 text-sm font-semibold rounded-full transition-all hover:scale-105 shadow-lg shadow-green-900/20 active:scale-95">
+              {isZh ? '立即体验' : 'Try Now'}
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Dots */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2">
+      <div className="absolute bottom-6 left-8 md:left-12 flex gap-2 z-20">
         {SLIDES.map((_, i) => (
           <button
             key={i}
             onClick={() => setCurrent(i)}
-            className={`banner-dot h-1.5 rounded-full transition-all ${
-              i === current ? 'active bg-white w-6' : 'bg-white/40 w-1.5'
+            className={`h-1.5 rounded-full transition-all duration-500 ${
+              i === current ? 'bg-white w-8 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'bg-white/30 w-1.5 hover:bg-white/60'
             }`}
           />
         ))}

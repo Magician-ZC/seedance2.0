@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { HistoryRecord } from './services/historyService';
 import Sidebar, { type NavTab } from './components/Sidebar';
+import Header from './components/Header';
 import WorksPanel from './components/WorksPanel';
 import VideoGenModal from './components/VideoGenModal';
 import SettingsModal, { loadSettings } from './components/SettingsModal';
@@ -13,8 +14,6 @@ import ProjectWorkspace from './components/ProjectWorkspace';
 import GlobalMaterialsPanel from './components/GlobalMaterialsPanel';
 import GlobalCharactersPanel from './components/GlobalCharactersPanel';
 import AgentStorePanel from './components/AgentStorePanel';
-import LanguageSwitch from './components/LanguageSwitch';
-import { GearIcon, ShieldIcon } from './components/Icons';
 import './i18n';
 
 export default function App() {
@@ -56,35 +55,15 @@ export default function App() {
 
       {/* 主页布局 */}
       {!activeProjectId && (
-        <div className="h-screen flex overflow-hidden bg-[#0a0a0a] text-white">
+        <div className="h-screen flex overflow-hidden bg-[#0a0a0a] text-white selection:bg-green-500/30 selection:text-green-200">
           <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
-          <div className="flex-1 flex flex-col min-w-0">
-            {/* Top Bar */}
-            <header className="h-14 flex items-center justify-between px-4 md:px-8 border-b border-white/5 flex-shrink-0">
-              <h1 className="text-base font-semibold text-white">
-                {activeTab === 'works'
-                  ? (isZh ? '我的作品' : 'My Works')
-                  : activeTab === 'materials'
-                    ? (isZh ? '素材' : 'Materials')
-                    : activeTab === 'agents'
-                      ? (isZh ? 'Agent仓库' : 'Agent Store')
-                      : (isZh ? '角色' : 'Characters')}
-              </h1>
-              <div className="flex items-center gap-1">
-                <LanguageSwitch />
-                <button onClick={() => setShowSensitiveWords(true)}
-                  className="p-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
-                  title={isZh ? '敏感词' : 'Filter'}>
-                  <ShieldIcon className="w-4 h-4" />
-                </button>
-                <button onClick={() => setShowSettings(true)}
-                  className="p-2 rounded-lg text-gray-500 hover:text-gray-300 hover:bg-white/5 transition-colors"
-                  title={isZh ? '设置' : 'Settings'}>
-                  <GearIcon className="w-4 h-4" />
-                </button>
-              </div>
-            </header>
+          <div className="flex-1 flex flex-col min-w-0 bg-gradient-to-br from-[#0a0a0a] to-[#111]">
+            <Header 
+              activeTab={activeTab}
+              onOpenSettings={() => setShowSettings(true)}
+              onOpenSensitiveWords={() => setShowSensitiveWords(true)}
+            />
 
             {activeTab === 'works' && (
               <WorksPanel
@@ -135,4 +114,3 @@ export default function App() {
     </>
   );
 }
-

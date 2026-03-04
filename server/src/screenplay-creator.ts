@@ -814,14 +814,51 @@ ${issuesList}
 
   const rewriteResult = await llmJSON<EpisodeScript>(projectId, `rewrite_${episodeNumber}`, rewriteSystemPrompt, rewriteUserPrompt);
   if (rewriteResult.success && rewriteResult.data) {
-    // 用改写后的剧本覆盖原集
     const rewritten = rewriteResult.data;
-    rewritten.number = episodeNumber; // 确保集号不变
+    rewritten.number = episodeNumber;
     rewritten.phase = episode.phase;
     rewritten.hookType = episode.hookType;
     rewritten.mark = episode.mark;
-    const episodes = project.episodes.map(e => e.number === episodeNumber ? rewritten : e);
-    updateScreenplay(projectId, { episodes });
+
+    // 对改写后的剧本重新评分
+    const reReviewResult = await llmJSON<ReviewScore>(projectId, `re_review_${episodeNumber}`, reviewSystemPrompt,
+      reviewUserPrompt.replace(episodeJSON, JSON.stringify(rewritten, null, 2)));
+
+    if (reReviewResult.success && reReviewResult.data) {
+      const newReview = reReviewResult.data;
+      if (newReview.total >= review.total) {
+        // 分数不低于原分 → 采纳改写
+        const episodes = project.episodes.map(e => e.number === episodeNumber ? rewritten : e);
+        const reviews = { ...project.reviews, [episodeNumber]: newReview };
+        updateScreenplay(projectId, { episodes, reviews });
+        console.log(`[screenplay] 第${episodeNumber}集优化: ${review.total} → ${newReview.total} ✅ 采纳`);
+        return { success: true, review: newReview };
+      } else {
+        // 分数下降 → 再尝试一次改写
+        console.log(`[screenplay] 第${episodeNumber}集优化: ${review.total} → ${newReview.total} ↓ 分数下降，重试...`);
+        const retryResult = await llmJSON<EpisodeScript>(projectId, `rewrite_retry_${episodeNumber}`, rewriteSystemPrompt,
+          rewriteUserPrompt + `\n\n⚠️ 上一次改写后评分从 ${review.total} 降到了 ${newReview.total}，请更谨慎地修改，只改必须改的问题，保留原剧本的优点。`);
+        if (retryResult.success && retryResult.data) {
+          const retryEp = retryResult.data;
+          retryEp.number = episodeNumber;
+          retryEp.phase = episode.phase;
+          retryEp.hookType = episode.hookType;
+          retryEp.mark = episode.mark;
+          // 重试版本再评分
+          const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
+            reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)));
+          if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
+            const episodes = project.episodes.map(e => e.number === episodeNumber ? retryEp : e);
+            const reviews = { ...project.reviews, [episodeNumber]: retryReview.data };
+            updateScreenplay(projectId, { episodes, reviews });
+            console.log(`[screenplay] 第${episodeNumber}集重试优化: ${review.total} → ${retryReview.data.total} ✅ 采纳`);
+            return { success: true, review: retryReview.data };
+          }
+        }
+        // 重试也失败或分数仍下降 → 保留原剧本，保留原评分
+        console.log(`[screenplay] 第${episodeNumber}集重试仍未提升，保留原剧本 (${review.total}/50)`);
+      }
+    }
   }
 
   return { success: true, review };

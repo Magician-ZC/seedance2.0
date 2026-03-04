@@ -1334,6 +1334,74 @@ app.post('/api/screenplay/:id/review', async (req, res) => {
   res.json({ review: result.review });
 });
 
+// POST /api/screenplay/:id/review-all - 一键全部自检优化（异步）
+app.post('/api/screenplay/:id/review-all', (req, res) => {
+  const projectId = req.params.id;
+  const project = getScreenplay(projectId);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  if (!project.episodes?.length) return res.status(400).json({ error: '暂无剧集' });
+
+  const taskId = `sp_review_all_${projectId}_${Date.now()}`;
+  const task: TaskInfo = {
+    id: taskId, status: 'processing', progress: '准备批量自检...',
+    startTime: Date.now(), result: null, error: null,
+  };
+  tasks.set(taskId, task);
+  res.json({ async: true, taskId });
+
+  // 后台并发执行每集自检+改写
+  (async () => {
+    const CONCURRENCY = 5;
+    const total = project.episodes.length;
+    let done = 0;
+    const errors: string[] = [];
+    const currentEps = new Set<number>(); // 当前正在优化的集号
+
+    const broadcastProgress = (msg: string, completedEp?: number, score?: number) => {
+      task.progress = JSON.stringify({
+        msg, currentEps: Array.from(currentEps), done, total,
+        ...(completedEp != null ? { completedEp, score } : {}),
+      });
+      wsManager.broadcast(taskId, task);
+    };
+
+    const tasks_list = project.episodes.map(ep => async () => {
+      currentEps.add(ep.number);
+      broadcastProgress(`正在优化: ${Array.from(currentEps).map(n => `第${n}集`).join('、')} (${done}/${total})`);
+      try {
+        const result = await reviewEpisode(projectId, ep.number);
+        done++;
+        currentEps.delete(ep.number);
+        const score = result.review?.total;
+        broadcastProgress(
+          `第${ep.number}集完成 (${done}/${total})${score ? ` 评分:${score}/50` : ''}`,
+          ep.number, score,
+        );
+      } catch (err) {
+        errors.push(`第${ep.number}集: ${(err as Error).message}`);
+        done++;
+        currentEps.delete(ep.number);
+        broadcastProgress(`第${ep.number}集失败 (${done}/${total})`);
+      }
+    });
+
+    // 并发控制器（同 agent-factory runWithConcurrency 模式）
+    const executing = new Set<Promise<void>>();
+    for (let i = 0; i < tasks_list.length; i++) {
+      const p = tasks_list[i]().then(() => { executing.delete(p); });
+      executing.add(p);
+      if (executing.size >= CONCURRENCY) await Promise.race(executing);
+    }
+    await Promise.all(executing);
+
+    task.status = 'done';
+    task.progress = JSON.stringify({ msg: errors.length > 0
+      ? `完成 ${total - errors.length}/${total} 集，${errors.length} 集失败`
+      : `全部 ${total} 集自检优化完成`, currentEps: [], done: total, total });
+    wsManager.broadcast(taskId, task);
+  })();
+});
+
 // POST /api/screenplay/:id/export - 导出剧本
 app.post('/api/screenplay/:id/export', (_req, res) => {
   const result = exportScreenplay(_req.params.id);

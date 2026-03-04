@@ -25,10 +25,10 @@ export default function DurationSelector({ value, onChange, onClose }: DurationS
   return (
     <div
       ref={ref}
-      className="absolute bottom-full mb-2 right-0 bg-gray-900 border border-gray-700 rounded-xl p-3 shadow-xl z-50 w-48"
+      className="absolute bottom-full mb-2 right-0 bg-[#1c1f2e] border border-white/10 rounded-2xl p-2 shadow-2xl z-50 w-48 animate-fade-in"
     >
-      <div className="text-xs text-gray-400 mb-2">选择视频生成时长</div>
-      <div className="max-h-64 overflow-y-auto space-y-0.5">
+      <div className="text-[10px] font-bold text-gray-500 uppercase tracking-wider px-3 py-2">Select Duration</div>
+      <div className="space-y-1">
         {DURATION_OPTIONS.map((d) => {
           const isSelected = d === value;
           return (
@@ -38,14 +38,14 @@ export default function DurationSelector({ value, onChange, onClose }: DurationS
                 onChange(d);
                 onClose();
               }}
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${
                 isSelected
-                  ? 'bg-cyan-500/15 text-cyan-400'
-                  : 'text-gray-300 hover:bg-gray-800'
+                  ? 'bg-green-600/20 text-green-400 border border-green-500/30'
+                  : 'text-gray-300 hover:bg-white/5 border border-transparent'
               }`}
             >
-              <ClockIcon className="w-4 h-4" />
-              <span>{d}s</span>
+              <ClockIcon className={`w-4 h-4 ${isSelected ? 'text-green-400' : 'text-gray-500'}`} />
+              <span className="font-medium">{d}s</span>
             </button>
           );
         })}

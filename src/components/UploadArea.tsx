@@ -56,23 +56,24 @@ export default function UploadArea({ images, onImagesChange, maxImages = 5 }: Up
   const canAdd = images.length < maxImages;
 
   return (
-    <div className="flex items-start gap-2 flex-shrink-0">
+    <div className="flex items-center gap-3 overflow-x-auto pb-2 scrollbar-hide">
       {/* Uploaded thumbnails */}
       {images.map((img) => (
-        <div key={img.id} className="relative group w-14 h-14 flex-shrink-0">
+        <div key={img.id} className="relative group w-16 h-16 flex-shrink-0 animate-scale-in">
           <img
             src={img.previewUrl}
             alt={`参考图 ${img.index}`}
-            className="w-full h-full object-cover rounded-lg border border-gray-700"
+            className="w-full h-full object-cover rounded-xl border border-white/10 group-hover:border-white/30 transition-colors"
           />
-          <span className="absolute bottom-0 left-0 bg-black/70 text-[10px] text-cyan-400 px-1 rounded-br-lg rounded-tl-lg">
+          <div className="absolute inset-0 bg-black/20 group-hover:bg-black/0 transition-colors rounded-xl" />
+          <span className="absolute bottom-1 left-1 bg-black/60 backdrop-blur-sm text-[9px] text-white px-1.5 py-0.5 rounded font-mono">
             @{img.index}
           </span>
           <button
             onClick={() => removeImage(img.id)}
-            className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-gray-800 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600"
+            className="absolute -top-2 -right-2 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all hover:bg-red-600 shadow-lg transform scale-75 group-hover:scale-100"
           >
-            <CloseIcon className="w-2.5 h-2.5 text-white" />
+            <CloseIcon className="w-3 h-3 text-white" />
           </button>
         </div>
       ))}
@@ -83,10 +84,12 @@ export default function UploadArea({ images, onImagesChange, maxImages = 5 }: Up
           onClick={() => inputRef.current?.click()}
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDrop}
-          className="w-14 h-14 flex-shrink-0 flex flex-col items-center justify-center gap-0.5 rounded-lg border border-dashed border-gray-600 hover:border-cyan-500 hover:bg-cyan-500/5 transition-colors cursor-pointer"
+          className="w-16 h-16 flex-shrink-0 flex flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-white/10 bg-[#1a1a1a] hover:bg-[#222] hover:border-green-500/50 transition-all group cursor-pointer"
         >
-          <PlusIcon className="w-5 h-5 text-gray-400" />
-          <span className="text-[9px] text-gray-500 leading-tight">参考内容</span>
+          <div className="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
+            <PlusIcon className="w-3.5 h-3.5 text-gray-500 group-hover:text-green-400" />
+          </div>
+          <span className="text-[9px] text-gray-500 group-hover:text-gray-300">Add Ref</span>
         </button>
       )}
 
