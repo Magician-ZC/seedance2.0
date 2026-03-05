@@ -134,9 +134,11 @@ export function getModelAvgScore(config: LLMConfig): number {
 }
 
 // NSFW 模式
+import { saveNSFWEnabled, loadNSFWEnabled } from './db-service.js';
 let _nsfwEnabled = false;
 export function isNSFWEnabled(): boolean { return _nsfwEnabled; }
-export function setNSFWEnabled(enabled: boolean): void { _nsfwEnabled = enabled; }
+export function setNSFWEnabled(enabled: boolean): void { _nsfwEnabled = enabled; saveNSFWEnabled(enabled); }
+export function loadNSFWFromDB(): void { _nsfwEnabled = loadNSFWEnabled(); }
 
 // NSFW 提示词增强
 const NSFW_SKILL_PROMPT = `## 成人内容创作指令

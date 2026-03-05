@@ -20,6 +20,7 @@ interface ScreenplayConfig {
   agentId?: string;
   referenceNovel?: string;
   useCharacterPool?: boolean;
+  useTimeline?: boolean;
 }
 
 interface CreativePlan {
@@ -93,6 +94,7 @@ interface ScreenplayProject {
   episodes: EpisodeScript[];
   reviews: Record<number, ReviewScore>;
   selectedTitle?: string;
+  simulationLogs?: string[];
   createdAt: number;
   updatedAt: number;
 }
@@ -101,8 +103,11 @@ interface GenreItem { key: string; name: string; desc: string; audience: string;
 
 interface ScreenplayCreatorProps {
   onClose: () => void;
+  onMinimize?: () => void;
   onProjectCreated?: (projectId: string) => void;
+  onStatusChange?: (status: { step: string; stepLabel: string; loading: boolean; projectTitle?: string }) => void;
   resumeProjectId?: string | null;
+  hidden?: boolean;
 }
 
 type Step = 'config' | 'plan' | 'characters' | 'directory' | 'writing' | 'review' | 'export';
@@ -130,7 +135,7 @@ const ENDINGS = [
 // WebSocket 进度监听 Hook
 // ============================================================
 
-function useTaskProgress(taskId: string | null, onDone: () => void) {
+function useTaskProgress(taskId: string | null, onDone: (signal?: string) => void) {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState('');
   const onDoneRef = useRef(onDone);
@@ -153,6 +158,10 @@ function useTaskProgress(taskId: string | null, onDone: () => void) {
           const errorText = msg.data?.error || msg.error;
           if (status === 'processing' && progressText) {
             setLogs(prev => [...prev, progressText]);
+            // 每完成一集实时刷新项目数据
+            if (progressText.includes('撰写完成') || progressText.includes('已完成')) {
+              onDoneRef.current('refresh');
+            }
           } else if (status === 'done') { done = true; setLogs(prev => [...prev, '✅ 完成']); onDoneRef.current(); ws.close(); }
           else if (status === 'error') { setError(errorText || '处理失败'); onDoneRef.current(); ws.close(); }
         }
@@ -238,7 +247,7 @@ function buildCharData(events: SimEvent[]) {
   const links: Array<{ source: string; target: string; type: string; tension: number }> = [];
   for (const e of events) {
     const inters = e.interactions as SimInteractionUI[] | undefined;
-    if (!inters) continue;
+    if (!inters || !Array.isArray(inters)) continue;
     const round = e.type === 'cross_result' ? '交叉' : (e.round as number);
     for (const it of inters) {
       if (!it.p || it.p.length < 2) continue;
@@ -486,7 +495,7 @@ function CharacterTimeline({ name, events, color, onClose }: {
 // 主组件
 // ============================================================
 
-export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjectCreated, resumeProjectId }: ScreenplayCreatorProps) {
+export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreated: _onProjectCreated, onStatusChange, resumeProjectId, hidden }: ScreenplayCreatorProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
 
@@ -508,6 +517,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   const [agents, setAgents] = useState<Array<{ id: string; name: string; genre: string; tone: string; score: number; sourceNovel: string }>>([]);
   const [referenceNovel, setReferenceNovel] = useState('');
   const [useCharacterPool, setUseCharacterPool] = useState(false);
+  const [useTimeline, setUseTimeline] = useState(false);
   const novelFileRef = useRef<HTMLInputElement>(null);
 
   // 模型选择 & NSFW
@@ -542,11 +552,12 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
       return val;
     };
     const episodes = parseIfString(p.episodes, [] as EpisodeScript[]);
+    const validEpisodes = (Array.isArray(episodes) ? episodes : []).filter(e => e.number != null);
     const reviews = parseIfString(p.reviews, {} as Record<number, ReviewScore>);
     const episodeDirectory = parseIfString(p.episodeDirectory, undefined as EpisodeDirectoryItem[] | undefined);
     return {
       ...p,
-      episodes: Array.isArray(episodes) ? episodes : [],
+      episodes: validEpisodes,
       reviews: (reviews && typeof reviews === 'object' && !Array.isArray(reviews)) ? reviews : {},
       episodeDirectory: Array.isArray(episodeDirectory) ? episodeDirectory : undefined,
       creativePlan: parseIfString(p.creativePlan, undefined as CreativePlan | undefined),
@@ -623,14 +634,28 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     } catch (err) { console.error('[refreshProject] error:', err); }
   }, []);
 
-  // WebSocket 进度回调
-  const handleTaskDone = useCallback(() => {
+  // WebSocket 进度回调（signal='refresh' 表示中间刷新，不清除 taskId）
+  const handleTaskDone = useCallback((signal?: string) => {
+    if (signal === 'refresh') {
+      refreshProject();
+      return;
+    }
     setTaskId(null);
     setLoading(false);
     refreshProject();
   }, [refreshProject]);
 
   const { logs, error: wsError } = useTaskProgress(taskId, handleTaskDone);
+
+  // 通知父组件当前状态（用于后台运行浮动指示器）
+  useEffect(() => {
+    onStatusChange?.({
+      step,
+      stepLabel: STEP_LABELS[step]?.zh || step,
+      loading: loading || !!taskId || !!reviewAllTaskId,
+      projectTitle: project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title,
+    });
+  }, [step, loading, taskId, reviewAllTaskId, project?.selectedTitle, project?.creativePlan?.titleOptions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 恢复已有项目
   const resumeProject = (p: ScreenplayProject) => {
@@ -660,7 +685,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     try {
       const res = await fetch('/api/screenplay/create', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, useCharacterPool: useCharacterPool || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
+        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, useCharacterPool: useCharacterPool || undefined, useTimeline: useTimeline || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
       });
       const data = await res.json();
       if (data?.project) { setProject(normalizeProject(data.project)); setStep('plan'); }
@@ -710,6 +735,17 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ startEp: writingRange.start, endEp: writingRange.end }),
       });
+      const data = await res.json();
+      if (data?.async && data.taskId) setTaskId(data.taskId);
+      else if (data?.error) { setError(data.error); setLoading(false); }
+    } catch (err) { setError((err as Error).message); setLoading(false); }
+  };
+
+  const handleRetryFailed = async () => {
+    if (!project) return;
+    setLoading(true); setError('');
+    try {
+      const res = await fetch(`/api/screenplay/${project.id}/retry-failed`, { method: 'POST' });
       const data = await res.json();
       if (data?.async && data.taskId) setTaskId(data.taskId);
       else if (data?.error) { setError(data.error); setLoading(false); }
@@ -853,8 +889,12 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   const stepIndex = STEPS.indexOf(step);
   const displayError = error || wsError;
 
+  // 模拟日志：实时logs优先，否则用持久化的simulationLogs
+  const simPanelLogs = logs.some(l => l.startsWith('[SIM]')) ? logs : project?.simulationLogs || [];
+  const hasSimLogs = simPanelLogs.some(l => l.startsWith('[SIM]'));
+
   return (
-    <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col">
+    <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col" style={hidden ? { display: 'none' } : undefined}>
       {/* Header */}
       <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur z-20">
         <div className="flex items-center gap-4">
@@ -888,7 +928,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
           })}
         </div>
 
-        <button onClick={onClose}
+        <button onClick={onMinimize || onClose}
           className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
           {isZh ? '后台运行' : 'Run in Background'}
         </button>
@@ -898,6 +938,14 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
       <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">
         <div className="max-w-5xl mx-auto px-8 py-10">
           {/* 进度/错误提示 */}
+          {loading && logs.length === 0 && (
+            <div className="mb-8 rounded-xl bg-[#0d0d0d] border border-blue-500/20 overflow-hidden shadow-lg animate-fade-in">
+              <div className="flex items-center gap-3 px-4 py-4">
+                <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                <span className="text-sm text-blue-300">{isZh ? '正在准备任务...' : 'Preparing task...'}</span>
+              </div>
+            </div>
+          )}
           {logs.length > 0 && <div className="mb-8"><ProgressLog logs={logs} /></div>}
           {displayError && (
             <div className="mb-8 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-300 text-sm flex items-center gap-3 animate-fade-in">
@@ -1096,6 +1144,24 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                   </section>
 
                   <section>
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <span className="text-sm font-medium text-gray-200">
+                          🕰️ {isZh ? '跨时代时间线' : 'Timeline Architecture'}
+                        </span>
+                        <p className="text-[10px] text-gray-500 mt-1">{isZh ? '适用于仙侠/穿越/科幻等跨时代宏大叙事，自动生成多时代设定、伏笔收线图谱和因果链' : 'Multi-era narrative with foreshadow graphs and causal chains'}</p>
+                      </div>
+                      <button onClick={() => setUseTimeline(!useTimeline)}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${useTimeline ? 'bg-purple-500' : 'bg-white/10'}`}>
+                        <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${useTimeline ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                      </button>
+                    </div>
+                    {useTimeline && (
+                      <p className="text-[10px] text-purple-400/80 mt-2">🌌 {isZh ? '创作方案将包含多时代架构、伏笔/收线节点图谱和跨时代因果链，角色支持转世/传承/封印等跨时代存在形式' : 'Plan will include multi-era architecture, foreshadow graph and causal chains'}</p>
+                    )}
+                  </section>
+
+                  <section>
                     <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '自定义要求' : 'Custom Prompt'}</label>
                     <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
                       placeholder={isZh ? '例如：主角是一个退伍军人，故事发生在深圳...' : 'e.g. The protagonist is a veteran...'}
@@ -1262,7 +1328,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                     </button>
                   </div>
                   {/* 世界观模拟实况面板 */}
-                  {logs.some(l => l.startsWith('[SIM]')) && <SimulationPanel logs={logs} />}
+                  {hasSimLogs && <SimulationPanel logs={simPanelLogs} />}
                 </div>
               ) : (
                 <div className="space-y-8">
@@ -1279,11 +1345,11 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                           </div>
                         </div>
                         <div className="p-5 space-y-4">
-                          {char.villainLayer && (
+                          {char.villainLayer ? (
                             <div className="inline-block px-2 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px] font-bold uppercase tracking-wider">
                               {isZh ? `反派等级 L${char.villainLayer}` : `Villain L${char.villainLayer}`}
                             </div>
-                          )}
+                          ) : null}
                           <div className="space-y-2">
                             <div className="text-xs text-gray-500 uppercase tracking-wider">{isZh ? '性格' : 'Personality'}</div>
                             <div className="flex flex-wrap gap-1.5">
@@ -1304,6 +1370,9 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                       </div>
                     ))}
                   </div>
+
+                  {/* 世界观模拟回看 */}
+                  {hasSimLogs && <SimulationPanel logs={simPanelLogs} />}
 
                   <div className="flex justify-end pt-6 border-t border-white/5">
                     <button onClick={() => setStep('directory')} disabled={loading}
@@ -1413,14 +1482,22 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                 <div className="text-right">
                   <div className="text-2xl font-bold text-white">{project?.episodes.length || 0} <span className="text-sm font-normal text-gray-500">/ {project?.config.totalEpisodes}</span></div>
                   <div className="text-xs text-gray-500">{isZh ? '已完成集数' : 'Episodes Completed'}</div>
+                  {project?.episodeDirectory && project.episodes.length < project.episodeDirectory.length && (
+                    <button onClick={handleRetryFailed} disabled={loading}
+                      className="mt-2 px-3 py-1 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-medium transition-colors">
+                      {loading
+                        ? (isZh ? '重试中...' : 'Retrying...')
+                        : (isZh ? `重试失败分集 (${project.episodeDirectory.length - project.episodes.length}集)` : `Retry Failed (${project.episodeDirectory.length - project.episodes.length})`)}
+                    </button>
+                  )}
                 </div>
               </div>
 
               {/* 集列表 */}
               {project?.episodes && project.episodes.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {project.episodes.map(ep => (
-                    <div key={ep.number} onClick={() => setSelectedEpisode(selectedEpisode === ep.number ? null : ep.number)}
+                  {[...project.episodes].sort((a, b) => a.number - b.number).map((ep, idx) => (
+                    <div key={ep.number ?? `ep-${idx}`} onClick={() => setSelectedEpisode(selectedEpisode === ep.number ? null : ep.number)}
                       className={`cursor-pointer rounded-xl border transition-all p-4 hover:scale-[1.02] ${
                         selectedEpisode === ep.number ? 'bg-[#1a1a1a] border-green-500/50 shadow-lg shadow-green-900/10' : 'bg-[#161616] border-white/5 hover:border-white/20'
                       }`}>
@@ -1431,7 +1508,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                       <h4 className="text-sm font-bold text-white mb-2 line-clamp-1">{ep.title}</h4>
                       <p className="text-xs text-gray-500 line-clamp-2 mb-3">{ep.previousRecap || '暂无摘要'}</p>
                       <div className="flex gap-1 flex-wrap">
-                        {ep.keywords.slice(0, 3).map((k, i) => (
+                        {(ep.keywords || []).slice(0, 3).map((k, i) => (
                           <span key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-[#0a0a0a] text-gray-400 border border-white/5">{k}</span>
                         ))}
                       </div>
@@ -1543,43 +1620,6 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                 })}
               </div>
 
-              {/* 审核详情弹窗 */}
-              {reviewDetailEp && project?.reviews[reviewDetailEp] && (() => {
-                const review = project.reviews[reviewDetailEp];
-                return (
-                  <div className="fixed inset-0 z-[60] flex items-center justify-center">
-                    <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setReviewDetailEp(null)} />
-                    <div className="relative w-full max-w-2xl bg-[#111] rounded-2xl border border-white/10 shadow-2xl max-h-[85vh] flex flex-col animate-scale-in">
-                      <div className="p-6 border-b border-white/5 flex justify-between items-center">
-                        <h3 className="text-lg font-bold text-white">第 {reviewDetailEp} 集评估报告</h3>
-                        <div className="text-2xl font-bold text-green-400">{review.total}分</div>
-                      </div>
-                      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
-                        <div className="grid grid-cols-5 gap-2">
-                          {Object.entries(review).filter(([k]) => k !== 'total' && k !== 'issues').map(([k, v]: [string, any]) => (
-                            <div key={k} className="bg-[#1a1a1a] p-3 rounded-lg text-center">
-                              <div className="text-[10px] text-gray-500 uppercase mb-1">{k}</div>
-                              <div className="text-lg font-bold text-white">{v.score}</div>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="space-y-3">
-                          <h4 className="text-sm font-bold text-white">问题与建议</h4>
-                          {review.issues.map((issue, i) => (
-                            <div key={i} className="p-4 rounded-xl bg-[#1a1a1a] border border-white/5">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className={`text-xs px-1.5 py-0.5 rounded ${issue.severity === '严重' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{issue.severity}</span>
-                                <span className="text-sm text-gray-300">{issue.description}</span>
-                              </div>
-                              <p className="text-xs text-gray-500 pl-1 border-l-2 border-white/10 ml-1 mt-2">{issue.suggestion}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
             </div>
           )}
 
@@ -1612,6 +1652,44 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
           )}
         </div>
       </div>
+
+      {/* 审核详情弹窗 - 放在最外层避免被 overflow 容器裁剪 */}
+      {reviewDetailEp && project?.reviews[reviewDetailEp] && (() => {
+        const review = project.reviews[reviewDetailEp];
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={() => setReviewDetailEp(null)} />
+            <div className="relative w-full max-w-2xl bg-[#111] rounded-2xl border border-white/10 shadow-2xl max-h-[85vh] flex flex-col animate-scale-in">
+              <div className="p-6 border-b border-white/5 flex justify-between items-center">
+                <h3 className="text-lg font-bold text-white">第 {reviewDetailEp} 集评估报告</h3>
+                <div className="text-2xl font-bold text-green-400">{review.total}分</div>
+              </div>
+              <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-6">
+                <div className="grid grid-cols-5 gap-2">
+                  {Object.entries(review).filter(([k]) => k !== 'total' && k !== 'issues').map(([k, v]: [string, any]) => (
+                    <div key={k} className="bg-[#1a1a1a] p-3 rounded-lg text-center">
+                      <div className="text-[10px] text-gray-500 uppercase mb-1">{k}</div>
+                      <div className="text-lg font-bold text-white">{v.score}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="space-y-3">
+                  <h4 className="text-sm font-bold text-white">问题与建议</h4>
+                  {review.issues.map((issue, i) => (
+                    <div key={i} className="p-4 rounded-xl bg-[#1a1a1a] border border-white/5">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs px-1.5 py-0.5 rounded ${issue.severity === '严重' ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{issue.severity}</span>
+                        <span className="text-sm text-gray-300">{issue.description}</span>
+                      </div>
+                      <p className="text-xs text-gray-500 pl-1 border-l-2 border-white/10 ml-1 mt-2">{issue.suggestion}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

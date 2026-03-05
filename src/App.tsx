@@ -15,6 +15,7 @@ import GlobalMaterialsPanel from './components/GlobalMaterialsPanel';
 import GlobalCharactersPanel from './components/GlobalCharactersPanel';
 import AgentStorePanel from './components/AgentStorePanel';
 import CharacterAgentPanel from './components/CharacterAgentPanel';
+import BackgroundIndicator, { type BackgroundStatus } from './components/BackgroundIndicator';
 import './i18n';
 
 export default function App() {
@@ -27,9 +28,17 @@ export default function App() {
   const [showSensitiveWords, setShowSensitiveWords] = useState(false);
   const [showNovelToDrama, setShowNovelToDrama] = useState(false);
   const [showScreenplayCreator, setShowScreenplayCreator] = useState(false);
+  const [screenplayMinimized, setScreenplayMinimized] = useState(false);
+  const [screenplayStatus, setScreenplayStatus] = useState<BackgroundStatus | null>(null);
   const [showAgentFactory, setShowAgentFactory] = useState(false);
+  const [factoryMinimized, setFactoryMinimized] = useState(false);
+  const [factoryStatus, setFactoryStatus] = useState<BackgroundStatus | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [screenplayProjectId, setScreenplayProjectId] = useState<string | null>(null);
+
+  // 组件是否存活（显示或后台运行中）
+  const screenplayAlive = showScreenplayCreator || screenplayMinimized;
+  const factoryAlive = showAgentFactory || factoryMinimized;
 
   useEffect(() => {
     const saved = loadSettings();
@@ -70,11 +79,11 @@ export default function App() {
                 onNewProject={() => setShowNovelToDrama(true)}
                 onOpenNovelToDrama={() => setShowNovelToDrama(true)}
                 onOpenVideoGen={() => setShowVideoGen(true)}
-                onOpenScreenplayCreator={() => setShowScreenplayCreator(true)}
-                onOpenAgentFactory={() => setShowAgentFactory(true)}
+                onOpenScreenplayCreator={() => { setShowScreenplayCreator(true); setScreenplayMinimized(false); }}
+                onOpenAgentFactory={() => { setShowAgentFactory(true); setFactoryMinimized(false); }}
                 onSelectHistory={handleHistorySelect}
                 onOpenProject={(projectId: string) => setActiveProjectId(projectId)}
-                onOpenScreenplayProject={(id: string) => { setScreenplayProjectId(id); setShowScreenplayCreator(true); }}
+                onOpenScreenplayProject={(id: string) => { setScreenplayProjectId(id); setShowScreenplayCreator(true); setScreenplayMinimized(false); }}
               />
             )}
             {activeTab === 'materials' && (
@@ -102,16 +111,44 @@ export default function App() {
               onProjectCreated={(projectId) => { setShowNovelToDrama(false); setActiveProjectId(projectId); }}
             />
           )}
-          {showScreenplayCreator && (
+          {screenplayAlive && (
             <ScreenplayCreator
-              onClose={() => { setShowScreenplayCreator(false); setScreenplayProjectId(null); }}
-              onProjectCreated={(projectId) => { setShowScreenplayCreator(false); setScreenplayProjectId(null); setActiveProjectId(projectId); }}
+              onClose={() => { setShowScreenplayCreator(false); setScreenplayMinimized(false); setScreenplayProjectId(null); setScreenplayStatus(null); }}
+              onMinimize={() => { setShowScreenplayCreator(false); setScreenplayMinimized(true); }}
+              onProjectCreated={(projectId) => { setShowScreenplayCreator(false); setScreenplayMinimized(false); setScreenplayProjectId(null); setScreenplayStatus(null); setActiveProjectId(projectId); }}
+              onStatusChange={setScreenplayStatus}
               resumeProjectId={screenplayProjectId}
+              hidden={screenplayMinimized && !showScreenplayCreator}
             />
           )}
-          {showAgentFactory && (
-            <AgentFactory onClose={() => setShowAgentFactory(false)} />
+          {factoryAlive && (
+            <AgentFactory
+              onClose={() => { setShowAgentFactory(false); setFactoryMinimized(false); setFactoryStatus(null); }}
+              onMinimize={() => { setShowAgentFactory(false); setFactoryMinimized(true); }}
+              onStatusChange={setFactoryStatus}
+              hidden={factoryMinimized && !showAgentFactory}
+            />
           )}
+
+          {/* 后台运行浮动指示器 */}
+          <div className="fixed bottom-6 right-6 z-40 flex flex-col gap-3">
+            {screenplayMinimized && !showScreenplayCreator && screenplayStatus && (
+              <BackgroundIndicator
+                status={screenplayStatus}
+                icon="✍️"
+                defaultTitle="剧本创作"
+                onClick={() => { setShowScreenplayCreator(true); setScreenplayMinimized(false); }}
+              />
+            )}
+            {factoryMinimized && !showAgentFactory && factoryStatus && (
+              <BackgroundIndicator
+                status={factoryStatus}
+                icon="🧬"
+                defaultTitle="创作工厂"
+                onClick={() => { setShowAgentFactory(true); setFactoryMinimized(false); }}
+              />
+            )}
+          </div>
         </div>
       )}
     </>

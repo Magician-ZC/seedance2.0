@@ -342,6 +342,26 @@ export function loadExtraLLMConfigsFromDB(): Array<Record<string, string>> {
   }
 }
 
+// NSFW 全局开关持久化
+export function saveNSFWEnabled(enabled: boolean): void {
+  const d = getDB();
+  d.run('INSERT OR REPLACE INTO llm_config (key, value) VALUES (?, ?)', ['nsfw_enabled', enabled ? '1' : '0']);
+  saveDB();
+}
+
+export function loadNSFWEnabled(): boolean {
+  const d = getDB();
+  try {
+    const stmt = d.prepare("SELECT value FROM llm_config WHERE key = 'nsfw_enabled'");
+    if (stmt.step()) {
+      const val = (stmt.getAsObject() as { value: string }).value;
+      stmt.free();
+      return val === '1';
+    }
+    stmt.free();
+    return false;
+  } catch { return false; }
+}
 
 
 export function loadVisionLLMConfigFromDB(): Record<string, string> | null {

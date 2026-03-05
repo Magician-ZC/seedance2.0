@@ -30,7 +30,12 @@ interface FactoryProject {
   concurrency: number; agentsPerGeneration: number; topK: number;
   createdAt: number; updatedAt: number; error?: string;
 }
-interface AgentFactoryProps { onClose: () => void; }
+interface AgentFactoryProps {
+  onClose: () => void;
+  onMinimize?: () => void;
+  onStatusChange?: (status: { step: string; stepLabel: string; loading: boolean; projectTitle?: string }) => void;
+  hidden?: boolean;
+}
 type Step = 'upload' | 'dna' | 'agents' | 'evolving' | 'result';
 const STEPS: Step[] = ['upload', 'dna', 'agents', 'evolving', 'result'];
 const STEP_LABELS: Record<Step, { zh: string; en: string }> = {
@@ -322,7 +327,7 @@ function EvolutionDisplay({ project, isZh, loading, onRunFull, onStop }: { proje
   );
 }
 
-export default function AgentFactory({ onClose }: AgentFactoryProps) {
+export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidden }: AgentFactoryProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
   const [step, setStep] = useState<Step>('upload');
@@ -406,6 +411,16 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
   const handleTaskDone = useCallback(() => { setTaskId(null); setLoading(false); refreshProject(); }, [refreshProject]);
   const { logs, error: wsError } = useTaskProgress(taskId, handleTaskDone);
 
+  // 通知父组件当前状态（用于后台运行浮动指示器）
+  useEffect(() => {
+    onStatusChange?.({
+      step,
+      stepLabel: STEP_LABELS[step]?.zh || step,
+      loading: loading || !!taskId,
+      projectTitle: project?.novelDNA?.title,
+    });
+  }, [step, loading, taskId, project?.novelDNA?.title]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!project) return;
     const map: Record<string, Step> = { parsed: 'dna', evolving: 'evolving', paused: 'evolving', completed: 'result', error: 'evolving' };
@@ -487,7 +502,7 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
   const displayError = error || wsError;
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col">
+    <div className="fixed inset-0 z-50 bg-[#0a0a0a] flex flex-col" style={hidden ? { display: 'none' } : undefined}>
       <header className="h-16 flex items-center justify-between px-8 border-b border-white/5 flex-shrink-0 bg-[#0a0a0a]/95 backdrop-blur z-20">
         <div className="flex items-center gap-4">
           <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 transition-colors text-gray-400 hover:text-white">
@@ -520,7 +535,10 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
           })}
         </div>
 
-        <div className="w-[100px]"></div> {/* Spacer for alignment */}
+        <button onClick={onMinimize || onClose}
+          className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
+          {isZh ? '后台运行' : 'Run in Background'}
+        </button>
       </header>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">

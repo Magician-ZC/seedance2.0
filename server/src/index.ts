@@ -27,12 +27,12 @@ import {
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
 import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
-import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, type LLMConfig } from './llm-service.js';
+import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, loadNSFWFromDB, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
   createScreenplay, getScreenplay, updateScreenplay, listScreenplays, removeScreenplay,
   generateCreativePlan, generateCharacters, generateDirectory,
-  generateEpisode, generateEpisodeBatch, reviewEpisode, exportScreenplay, getGenreList,
+  generateEpisode, generateEpisodeBatch, retryFailedEpisodes, reviewEpisode, exportScreenplay, getGenreList,
   loadScreenplayProjectsFromDB, analyzeReferenceNovel,
 } from './screenplay-creator.js';
 import {
@@ -1222,7 +1222,7 @@ app.get('/api/screenplay/genres', (_req, res) => {
 
 // POST /api/screenplay/create - 创建剧本项目
 app.post('/api/screenplay/create', (req, res) => {
-  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool } = req.body;
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool, useTimeline } = req.body;
   if (!genres?.length || !audience || !tone || !totalEpisodes) {
     return res.status(400).json({ error: '缺少必要参数' });
   }
@@ -1233,6 +1233,7 @@ app.post('/api/screenplay/create', (req, res) => {
     agentId: agentId || undefined,
     referenceNovel: referenceNovel || undefined,
     useCharacterPool: useCharacterPool || false,
+    useTimeline: useTimeline || false,
     fixedModel: fixedModel || undefined,
     nsfw: nsfw || false,
   });
@@ -1364,6 +1365,26 @@ app.post('/api/screenplay/:id/episode-batch', async (req, res) => {
       id: taskId, status: result.success ? 'done' : 'error',
       progress: result.success ? `已完成${result.completed.length}集` : `完成${result.completed.length}集，${result.errors.length}集失败`,
       startTime: Date.now(), result: null, error: result.errors.length > 0 ? result.errors.map(e => `第${e.episode}集: ${e.error}`).join('; ') : null,
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// POST /api/screenplay/:id/retry-failed - 重试失败/缺失的分集
+app.post('/api/screenplay/:id/retry-failed', async (req, res) => {
+  const taskId = `sp_retry_${req.params.id}`;
+  res.json({ async: true, taskId });
+  retryFailedEpisodes(req.params.id, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((result) => {
+    const task: TaskInfo = {
+      id: taskId, status: result.success ? 'done' : 'error',
+      progress: result.missing.length === 0
+        ? '所有分集均已生成，无需重试'
+        : result.success ? `已重新生成${result.completed.length}集` : `完成${result.completed.length}集，${result.errors.length}集仍失败`,
+      startTime: Date.now(), result: null,
+      error: result.errors.length > 0 ? result.errors.map(e => `第${e.episode}集: ${e.error}`).join('; ') : null,
     };
     wsManager.broadcast(taskId, task);
   });
@@ -1872,6 +1893,10 @@ initDB().then(() => {
     })));
     console.log(`[llm] 已从数据库恢复 ${savedExtra.length} 个额外 LLM 配置`);
   }
+
+  // 从 DB 恢复 NSFW 全局开关
+  loadNSFWFromDB();
+  if (isNSFWEnabled()) console.log('[llm] NSFW 模式已从数据库恢复: 开启');
 
   // 从 DB 恢复创作工厂项目
   restoreFactories();

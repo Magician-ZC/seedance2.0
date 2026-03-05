@@ -22,6 +22,7 @@ export interface ScreenplayConfig {
   referenceNovel?: string;     // 可选：参考小说内容（用于二创）
   novelAnalysis?: NovelAnalysisSummary; // 参考小说的深度解析结果（替代原文）
   useCharacterPool?: boolean;  // 是否使用群演仓库驱动角色开发
+  useTimeline?: boolean;       // 是否启用跨时代时间线架构（仙侠/穿越/科幻等宏大叙事）
   fixedModel?: LLMConfig | null; // 项目级锁定模型
   nsfw?: boolean;              // NSFW 模式
 }
@@ -56,6 +57,35 @@ export interface CreativePlan {
   paywallPlan: Array<{ episode: number; type: string; suspense: string }>;
   satisfactionMatrix: Record<string, number>;
   endingDesign: { mainLine: string; romanceLine: string; foreshadowRecovery: string };
+  // 跨时代时间线架构（useTimeline=true 时生成）
+  timelineArcs?: TimelineArcs;
+}
+
+/** 跨时代时间线架构 */
+export interface TimelineArcs {
+  eras: Array<{
+    id: string;              // 如 "era_1", "era_2"
+    name: string;            // "荒古时代", "遮天时代"
+    episodeRange: string;    // "第1-30集"
+    setting: { era: string; location: string; socialEnv: string };
+    powerSystem?: string;    // 该时代的力量体系/规则
+    keyCharacters: string[]; // 该时代的核心角色名
+  }>;
+  // 伏笔/收线节点图谱
+  foreshadowGraph: Array<{
+    id: string;
+    type: 'plant' | 'callback';  // 埋伏笔 / 收线
+    linkedId?: string;            // callback 关联的 plant id
+    era: string;                  // 所属时代 id
+    episode: number;              // 大致集数
+    description: string;          // "荒天帝留下的石刻" / "石刻内容揭晓"
+    involvedCharacters: string[];
+  }>;
+  // 跨时代因果链
+  causalChains: Array<{
+    name: string;           // "荒天帝布局线", "主角成长线"
+    nodes: Array<{ era: string; episode: number; event: string }>;
+  }>;
 }
 
 export interface ScreenplayCharacter {
@@ -72,6 +102,13 @@ export interface ScreenplayCharacter {
   catchphrase: string;
   arc: string;
   villainLayer?: number;  // 1-4层反派体系
+  // 跨时代角色存在形式（useTimeline 时使用）
+  eraPresence?: Array<{
+    era: string;           // 时代ID
+    identity: string;      // 该时代的身份
+    powerLevel: string;    // 该时代的实力层级
+    role: 'active' | 'legacy' | 'dormant' | 'reborn'; // 活跃/遗产/沉睡/转世
+  }>;
 }
 
 export interface CharacterRelationship {
@@ -100,6 +137,8 @@ export interface EpisodeDirectoryItem {
   mark: '' | '🔥' | '💰'; // 关键剧情/付费卡点/常规
   act: string;            // 所属幕
   phase: string;          // 起势段/攀升段/风暴段/决战段
+  era?: string;           // 所属时代ID（useTimeline 时使用）
+  foreshadows?: string[]; // 本集涉及的伏笔/收线节点ID
 }
 
 export interface SceneBlock {
@@ -146,6 +185,7 @@ export interface ScreenplayProject {
   episodes: EpisodeScript[];
   reviews: Record<number, ReviewScore>;
   selectedTitle?: string;
+  simulationLogs?: string[];  // 世界观模拟 [SIM] 日志，持久化用于回看和Agent进化
   createdAt: number;
   updatedAt: number;
 }
@@ -411,7 +451,25 @@ export async function generateCreativePlan(
 ## 爽点矩阵
 5大爽点类型：身份碾压、打脸复仇、逆袭翻盘、情感爆发、悬念揭秘
 根据题材合理分配各类型占比。
+${config.useTimeline ? `
+## 跨时代时间线架构要求
+本剧采用跨时代宏大叙事结构，需要设计多个时代/纪元，角色通过因果链跨时代关联。
 
+### 时代划分原则
+- 根据总集数合理划分2-5个时代/纪元，每个时代有独立的时空背景和力量体系
+- 时代之间通过伏笔/收线、转世/传承、遗迹/预言等方式产生因果关联
+- 每个时代都要有自己的核心冲突和高潮，同时服务于全剧的终极主线
+
+### 伏笔/收线图谱要求
+- 每个时代至少埋设2-3个伏笔（plant），在后续时代收线（callback）
+- 伏笔类型：遗迹线索/预言/封印/血脉传承/器物流转/因果循环
+- 收线时机要制造"恍然大悟"的爽感，优先安排在付费卡点或关键剧情集
+
+### 因果链要求
+- 至少设计2-3条贯穿多个时代的因果链
+- 因果链类型：宿命对决线/传承觉醒线/阴谋揭露线/情感轮回线
+- 每条因果链在每个时代都要有至少一个关键节点
+` : ''}
 请输出严格的 JSON 格式。`;
 
   const userPrompt = `创作配置：
@@ -468,14 +526,30 @@ ${config.novelAnalysis.keyRelationships.join('\n')}
   "rhythmWave": "全剧节奏波形描述",
   "paywallPlan": [{"episode": 10, "type": "身份揭露", "suspense": "悬念描述"}],
   "satisfactionMatrix": {"身份碾压": 30, "打脸复仇": 25, "逆袭翻盘": 20, "情感爆发": 15, "悬念揭秘": 10},
-  "endingDesign": {"mainLine": "主线结局", "romanceLine": "感情线结局", "foreshadowRecovery": "伏笔回收"}
+  "endingDesign": {"mainLine": "主线结局", "romanceLine": "感情线结局", "foreshadowRecovery": "伏笔回收"}${config.useTimeline ? `,
+  "timelineArcs": {
+    "eras": [
+      {"id": "era_1", "name": "时代名称", "episodeRange": "第1-N集", "setting": {"era": "时代", "location": "地点", "socialEnv": "社会环境"}, "powerSystem": "力量体系描述", "keyCharacters": ["角色名1", "角色名2"]}
+    ],
+    "foreshadowGraph": [
+      {"id": "fs_1", "type": "plant", "era": "era_1", "episode": 5, "description": "伏笔描述", "involvedCharacters": ["角色名"]},
+      {"id": "fs_1_cb", "type": "callback", "linkedId": "fs_1", "era": "era_2", "episode": 35, "description": "收线描述", "involvedCharacters": ["角色名"]}
+    ],
+    "causalChains": [
+      {"name": "因果链名称", "nodes": [{"era": "era_1", "episode": 3, "event": "事件描述"}]}
+    ]
+  }` : ''}
 }
 
 要求：
 1. 提供3个剧名备选
 2. 三幕结构的集数范围必须覆盖全部${config.totalEpisodes}集
 3. 付费卡点约${Math.round(config.totalEpisodes * 0.12)}个
-4. 爽点矩阵百分比之和为100`;
+4. 爽点矩阵百分比之和为100${config.useTimeline ? `
+5. timelineArcs.eras 必须覆盖全部集数，时代之间不能有集数空隙
+6. foreshadowGraph 中每个 plant 必须有对应的 callback
+7. causalChains 至少2条，每条至少跨越2个时代
+8. 每个时代的 keyCharacters 要与该时代的剧情匹配` : ''}`;
 
   const result = await llmJSON<CreativePlan>(projectId, 'creative_plan', systemPrompt, userPrompt);
   if (!result.success || !result.data) return { success: false, error: result.error || '创作方案生成失败' };
@@ -592,14 +666,21 @@ async function generateCharactersFromPool(
   const project = getScreenplay(projectId);
   if (!project?.creativePlan) return { success: false, error: '请先生成创作方案' };
 
+  // 收集 [SIM] 日志用于持久化
+  const simLogs: string[] = [];
+  const emitAndCollect = (msg: string) => {
+    if (msg.startsWith('[SIM]')) simLogs.push(msg);
+    onProgress?.(msg);
+  };
+
   const { config, creativePlan } = project;
 
   // ====== 第1步：从群演仓库匹配候选角色 ======
-  onProgress?.('🎭 正在从群演仓库中匹配候选角色...');
+  emitAndCollect('🎭 正在从群演仓库中匹配候选角色...');
 
   const allAgents = listCharacterAgents();
   if (allAgents.length === 0) {
-    onProgress?.('⚠️ 群演仓库为空，回退到默认角色开发');
+    emitAndCollect('⚠️ 群演仓库为空，回退到默认角色开发');
     return generateCharactersDefault(projectId, onProgress);
   }
 
@@ -638,7 +719,7 @@ ${candidateSummary}`;
   if (matchResult.success && matchResult.data && matchResult.data.selectedIds && matchResult.data.selectedIds.length >= 10) {
     const idSet = new Set(matchResult.data.selectedIds.slice(0, 100));
     selectedAgents = allAgents.filter(a => idSet.has(a.id));
-    onProgress?.(`✅ 选中 ${selectedAgents.length} 位候选角色（${matchResult.data.reason}）`);
+    emitAndCollect(`✅ 选中 ${selectedAgents.length} 位候选角色（${matchResult.data.reason}）`);
   } else {
     // 降级：按 category 匹配
     const genreKeywords = config.genres.join(' ');
@@ -647,11 +728,11 @@ ${candidateSummary}`;
       a.source_novel && genreKeywords.includes(a.source_novel)
     ).slice(0, 50);
     if (selectedAgents.length < 10) selectedAgents = allAgents.slice(0, Math.min(30, allAgents.length));
-    onProgress?.(`⚠️ 智能匹配失败，按分类选中 ${selectedAgents.length} 位候选角色`);
+    emitAndCollect(`⚠️ 智能匹配失败，按分类选中 ${selectedAgents.length} 位候选角色`);
   }
 
   // ====== 第2步：世界观模拟 - 并发多轮互动，实时推送 ======
-  onProgress?.(`🌍 将 ${selectedAgents.length} 位角色投入世界观中模拟互动...`);
+  emitAndCollect(`🌍 将 ${selectedAgents.length} 位角色投入世界观中模拟互动...`);
 
   // 构建角色档案
   const buildProfile = (a: CharacterAgentRow) =>
@@ -659,11 +740,32 @@ ${candidateSummary}`;
 
   const worldSetting = `时代：${creativePlan.setting.era}\n地点：${creativePlan.setting.location}\n社会环境：${creativePlan.setting.socialEnv}\n阶层关系：${creativePlan.setting.classRelation}\n核心冲突：${creativePlan.coreConflict}\n故事线：${creativePlan.storyLine}`;
 
-  // 将角色分成多组（每组5-8人），并发模拟
-  const groupSize = Math.max(5, Math.min(8, Math.ceil(selectedAgents.length / 4)));
-  const groups: CharacterAgentRow[][] = [];
-  for (let i = 0; i < selectedAgents.length; i += groupSize) {
-    groups.push(selectedAgents.slice(i, i + groupSize));
+  // 分组策略：有时间线架构时按时代分组，否则按大小随机分组
+  const hasTimeline = config.useTimeline && creativePlan.timelineArcs;
+  let groups: CharacterAgentRow[][];
+  let eraLabels: string[] = []; // 每组对应的时代名称（仅时间线模式）
+
+  if (hasTimeline && creativePlan.timelineArcs) {
+    // 按时代分组：用 LLM 将角色分配到各时代
+    const eraNames = creativePlan.timelineArcs.eras.map(e => e.name);
+    // 简单策略：均匀分配到各时代，每个时代一组
+    const eraCount = eraNames.length;
+    const perEra = Math.ceil(selectedAgents.length / eraCount);
+    groups = [];
+    for (let i = 0; i < eraCount; i++) {
+      const start = i * perEra;
+      const group = selectedAgents.slice(start, start + perEra);
+      if (group.length > 0) {
+        groups.push(group);
+        eraLabels.push(eraNames[i]);
+      }
+    }
+  } else {
+    const groupSize = Math.max(5, Math.min(8, Math.ceil(selectedAgents.length / 4)));
+    groups = [];
+    for (let i = 0; i < selectedAgents.length; i += groupSize) {
+      groups.push(selectedAgents.slice(i, i + groupSize));
+    }
   }
 
   type SimInteraction = { participants: string[]; type: string; description: string; tension: number; storyPotential: string };
@@ -673,7 +775,7 @@ ${candidateSummary}`;
   const allCharNames = selectedAgents.map(a => a.name);
 
   // [SIM] 推送开始事件，包含所有角色信息
-  onProgress?.(`[SIM]${JSON.stringify({
+  emitAndCollect(`[SIM]${JSON.stringify({
     type: 'start',
     totalRounds: groups.length,
     totalAgents: selectedAgents.length,
@@ -685,7 +787,7 @@ ${candidateSummary}`;
   const roundPromises = groups.map((group, round) => {
     const roundNum = round + 1;
     // 推送本轮开始
-    onProgress?.(`[SIM]${JSON.stringify({
+    emitAndCollect(`[SIM]${JSON.stringify({
       type: 'round_start', round: roundNum, total: groups.length,
       characters: group.map(a => a.name),
     })}`);
@@ -694,6 +796,14 @@ ${candidateSummary}`;
 
 世界观设定：
 ${worldSetting}
+${hasTimeline && eraLabels[round] && creativePlan.timelineArcs ? (() => {
+  const era = creativePlan.timelineArcs!.eras.find(e => e.name === eraLabels[round]);
+  return era ? `
+## 本组所属时代：${era.name}
+- 时空背景：${era.setting.era} · ${era.setting.location} · ${era.setting.socialEnv}
+${era.powerSystem ? `- 力量体系：${era.powerSystem}` : ''}
+- 注意：角色的行为和互动必须符合这个时代的背景设定` : '';
+})() : ''}
 
 你的任务：
 1. 以第三人称叙事视角，生动描述这组角色进入世界后的互动场景
@@ -726,7 +836,7 @@ ${worldSetting}
         // 推送本轮结果
         const narrative = result.data.narrative || '';
         const interactions = result.data.interactions || [];
-        onProgress?.(`[SIM]${JSON.stringify({
+        emitAndCollect(`[SIM]${JSON.stringify({
           type: 'round_result', round: roundNum, narrative,
           interactions: interactions.map(i => ({
             p: i.participants, t: i.type, d: i.description,
@@ -735,7 +845,7 @@ ${worldSetting}
         })}`);
         return result.data;
       } else {
-        onProgress?.(`[SIM]${JSON.stringify({ type: 'round_fail', round: roundNum })}`);
+        emitAndCollect(`[SIM]${JSON.stringify({ type: 'round_fail', round: roundNum })}`);
         return null;
       }
     });
@@ -746,13 +856,13 @@ ${worldSetting}
   const allRoundResults = roundResults.filter((r): r is NonNullable<typeof r> => r !== null);
 
   if (allRoundResults.length === 0) {
-    onProgress?.('⚠️ 世界模拟全部失败，回退到默认角色开发');
+    emitAndCollect('⚠️ 世界模拟全部失败，回退到默认角色开发');
     return generateCharactersDefault(projectId, onProgress);
   }
 
   // ====== 第2.5步：跨组交叉互动（让不同组的角色也产生关系） ======
-  onProgress?.(`[SIM]${JSON.stringify({ type: 'cross_start' })}`);
-  onProgress?.('🔗 正在模拟跨组角色交叉互动...');
+  emitAndCollect(`[SIM]${JSON.stringify({ type: 'cross_start' })}`);
+  emitAndCollect(hasTimeline ? '🔗 正在模拟跨时代因果回响...' : '🔗 正在模拟跨组角色交叉互动...');
 
   // 从每组中选出张力最高的角色，组成交叉组
   const topCharsPerGroup = allRoundResults.map(r => {
@@ -769,7 +879,43 @@ ${worldSetting}
   let crossInteractions: SimInteraction[] = [];
 
   if (crossAgents.length >= 4) {
-    const crossSystem = `你是一位全知全能的世界观监控者。这些角色来自不同的社交圈，现在他们在同一个世界中相遇了。
+    const crossSystem = hasTimeline && creativePlan.timelineArcs
+      ? `你是一位全知全能的世界观监控者。这些角色来自不同的时代/纪元，他们之间存在跨越时空的因果关联。
+
+世界观设定：
+${worldSetting}
+
+时代架构：
+${creativePlan.timelineArcs!.eras.map(e => `- ${e.name}：${e.setting.era} · ${e.setting.location}`).join('\n')}
+
+之前各时代的互动概要：
+${allRoundResults.map((r, i) => `${eraLabels[i] || `第${i + 1}组`}：${r.narrative?.slice(0, 150)}`).join('\n')}
+
+伏笔/收线图谱：
+${creativePlan.timelineArcs!.foreshadowGraph.map(f => `- [${f.type === 'plant' ? '伏笔' : '收线'}] ${f.description}（${f.era}）`).join('\n')}
+
+你的任务：模拟这些来自不同时代的角色之间的跨时空关联。关联方式包括：
+- 转世/轮回：前世今生的宿命纠葛
+- 传承/遗产：前人留下的力量、器物、预言影响后人
+- 因果循环：前一个时代的选择导致后一个时代的困境
+- 血脉延续：跨时代的家族恩怨
+- 封印/沉睡：古代强者在后世苏醒
+
+输出严格JSON格式：
+{
+  "narrative": "跨时代因果回响叙事（300-500字，要有宿命感和史诗感）",
+  "interactions": [
+    {
+      "participants": ["角色A", "角色B"],
+      "type": "转世/传承/因果/血脉/封印/宿敌",
+      "description": "跨时代关联描述（100字以上）",
+      "tension": 1-10,
+      "storyPotential": "这段跨时代关系能产生什么样的故事",
+      "timeline": "远古/传承/觉醒/对决"
+    }
+  ]
+}`
+      : `你是一位全知全能的世界观监控者。这些角色来自不同的社交圈，现在他们在同一个世界中相遇了。
 
 世界观设定：
 ${worldSetting}
@@ -794,12 +940,14 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
   ]
 }`;
 
-    const crossUser = `跨组交叉角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同圈子的角色之间的互动。`;
+    const crossUser = hasTimeline
+      ? `跨时代核心角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同时代的角色之间的跨时空因果关联。`
+      : `跨组交叉角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同圈子的角色之间的互动。`;
 
     const crossResult = await llmJSON<RoundResult>(projectId, 'world_sim_cross', crossSystem, crossUser, 'generate');
     if (crossResult.success && crossResult.data) {
       crossInteractions = crossResult.data.interactions || [];
-      onProgress?.(`[SIM]${JSON.stringify({
+      emitAndCollect(`[SIM]${JSON.stringify({
         type: 'cross_result',
         narrative: crossResult.data.narrative || '',
         interactions: crossInteractions.map(i => ({
@@ -810,8 +958,8 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
     }
   }
 
-  onProgress?.(`[SIM]${JSON.stringify({ type: 'summarizing' })}`);
-  onProgress?.('🔮 正在汇总世界模拟结果...');
+  emitAndCollect(`[SIM]${JSON.stringify({ type: 'summarizing' })}`);
+  emitAndCollect('🔮 正在汇总世界模拟结果...');
 
   // 汇总模拟
   const allInteractions = [...allRoundResults.flatMap(r => r.interactions || []), ...crossInteractions];
@@ -850,16 +998,16 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
     emergentStory: summaryResult.data?.emergentStory || allNarratives.slice(0, 500),
   };
 
-  onProgress?.(`[SIM]${JSON.stringify({
+  emitAndCollect(`[SIM]${JSON.stringify({
     type: 'done', interactions: allInteractions.length,
     alliances: simData.naturalAlliances.length,
     conflicts: simData.naturalConflicts.length,
     romances: simData.romancePotential.length,
   })}`);
-  onProgress?.(`✅ 世界模拟完成 - ${allInteractions.length} 组互动关系`);
+  emitAndCollect(`✅ 世界模拟完成 - ${allInteractions.length} 组互动关系`);
 
   // ====== 第3步：全知Agent提取最终角色体系 ======
-  onProgress?.('👁️ 全知Agent正在从模拟结果中提取最终角色体系...');
+  emitAndCollect('👁️ 全知Agent正在从模拟结果中提取最终角色体系...');
 
   const extractSystem = `你是一位全知全能的故事架构师。基于世界观模拟的结果，你需要从候选角色中提取最终的角色体系。
 
@@ -870,6 +1018,11 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
 4. 每个角色都要像真实活着的人，有自己的欲望、恐惧和选择
 5. 角色的性格和行为要基于原始角色档案，但可以根据新世界观做适当调整
 6. 排除那些与世界观格格不入的角色
+${hasTimeline && creativePlan.timelineArcs ? `
+7. 每个角色必须标注 eraPresence（在各时代的存在形式）
+8. 角色可以通过转世/传承/封印/沉睡等方式跨越多个时代
+9. 至少有2个角色跨越2个以上时代
+10. eraPresence.role 取值：active（活跃）/legacy（遗产影响）/dormant（沉睡/封印）/reborn（转世）` : ''}
 
 输出严格JSON格式（与标准角色设计格式一致）。`;
 
@@ -915,7 +1068,10 @@ ${selectedAgents.filter(a => !simData.outcasts?.includes(a.name)).map(a =>
       "satisfactionRole": "爽点功能",
       "catchphrase": "口头禅",
       "arc": "人物弧光",
-      "villainLayer": 0
+      "villainLayer": 0${hasTimeline ? `,
+      "eraPresence": [
+        {"era": "era_1", "identity": "该时代的身份", "powerLevel": "实力层级", "role": "active"}
+      ]` : ''}
     }
   ],
   "relationships": [{"from": "角色A", "to": "角色B", "relation": "关系描述"}],
@@ -925,12 +1081,12 @@ ${selectedAgents.filter(a => !simData.outcasts?.includes(a.name)).map(a =>
 
   const extractResult = await llmJSON<CharacterDesign>(projectId, 'extract_final_characters', extractSystem, extractUser, 'generate');
   if (!extractResult.success || !extractResult.data) {
-    onProgress?.('⚠️ 角色提取失败，回退到默认角色开发');
+    emitAndCollect('⚠️ 角色提取失败，回退到默认角色开发');
     return generateCharactersDefault(projectId, onProgress);
   }
 
-  onProgress?.(`✅ 最终角色体系确定 - ${extractResult.data.characters?.length || 0} 位角色`);
-  return { success: true, project: updateScreenplay(projectId, { characterDesign: extractResult.data, status: 'characters_done' }) };
+  emitAndCollect(`✅ 最终角色体系确定 - ${extractResult.data.characters?.length || 0} 位角色`);
+  return { success: true, project: updateScreenplay(projectId, { characterDesign: extractResult.data, simulationLogs: simLogs, status: 'characters_done' }) };
 }
 
 /** 默认角色开发（generateCharacters 的原始逻辑提取，用于降级回退） */
@@ -983,7 +1139,24 @@ export async function generateDirectory(
 - 🔥 关键剧情集：占比25-35%（约${keyEpisodeCount}集）
 - 💰 付费卡点集：占比10-15%（约${paywallCount}集）
 - 无标记：常规推进集
+${creativePlan?.timelineArcs ? `
+## 跨时代时间线约束
+本剧采用跨时代叙事结构，分集目录必须严格遵循时间线架构。
 
+### 时代划分
+${creativePlan.timelineArcs.eras.map(e => `- ${e.name}（${e.id}）：${e.episodeRange}，背景：${e.setting.era} · ${e.setting.location}`).join('\n')}
+
+### 伏笔/收线节点（必须在对应集数体现）
+${creativePlan.timelineArcs.foreshadowGraph.map(f => `- 第${f.episode}集（${f.era}）[${f.type === 'plant' ? '埋伏笔' : '收线'}]：${f.description}`).join('\n')}
+
+### 因果链节点（必须在对应集数体现）
+${creativePlan.timelineArcs.causalChains.map(c => `- ${c.name}：${c.nodes.map(n => `第${n.episode}集(${n.era})${n.event}`).join(' → ')}`).join('\n')}
+
+### 时代切换要求
+- 时代切换集必须标记为🔥（关键剧情）
+- 切换时使用悬念钩或反转钩制造跨时代悬念
+- 每个时代的首集要快速建立新时空的视觉和情感基调
+` : ''}
 请输出严格的 JSON 数组。`;
 
   const charSummary = characterDesign!.characters.map(c =>
@@ -1010,7 +1183,9 @@ export async function generateDirectory(
     "hookType": "悬念钩",
     "mark": "🔥",
     "act": "第一幕",
-    "phase": "起势段"
+    "phase": "起势段"${creativePlan?.timelineArcs ? `,
+    "era": "era_1",
+    "foreshadows": ["fs_1"]` : ''}
   }
 ]
 
@@ -1019,7 +1194,10 @@ export async function generateDirectory(
 2. 前10集至少3个🔥和2个💰
 3. 🔥占比25-35%，💰占比10-15%
 4. 每集都有hookType
-5. phase必须是：起势段/攀升段/风暴段/决战段`;
+5. phase必须是：起势段/攀升段/风暴段/决战段${creativePlan?.timelineArcs ? `
+6. 每集必须标注所属时代era（使用时代ID）
+7. 涉及伏笔埋设或收线的集数，foreshadows数组中填入对应节点ID
+8. 时代切换的集数必须标记为🔥` : ''}`;
 
   const result = await llmJSON<EpisodeDirectoryItem[]>(projectId, 'episode_directory', systemPrompt, userPrompt);
   if (!result.success || !result.data) return { success: false, error: result.error || '分集目录生成失败' };
@@ -1068,6 +1246,28 @@ export async function generateEpisode(
   const charBrief = characterDesign!.characters.map(c =>
     `${c.name}：${c.publicIdentity}，性格${c.personality.join('/')}，口头禅"${c.catchphrase}"`
   ).join('\n');
+
+  // 从模拟日志中提取角色互动经历，注入写作上下文
+  const simContext = (() => {
+    const simLogs = project.simulationLogs;
+    if (!simLogs?.length) return '';
+    const charNames = new Set(characterDesign!.characters.map(c => c.name));
+    const interactions: string[] = [];
+    for (const log of simLogs) {
+      if (!log.startsWith('[SIM]')) continue;
+      try {
+        const evt = JSON.parse(log.slice(5));
+        if (evt.type !== 'round_result' && evt.type !== 'cross_result') continue;
+        for (const it of (evt.interactions || [])) {
+          if (!it.p?.some((n: string) => charNames.has(n))) continue;
+          interactions.push(`${it.p.join(' ↔ ')}（${it.t}，张力${it.tension}/10）：${it.d}`);
+        }
+      } catch { /* skip */ }
+    }
+    if (interactions.length === 0) return '';
+    // 取最相关的前15条，避免prompt过长
+    return `\n## 角色世界观模拟经历（写作时请参考这些真实互动，让角色行为保持一致性）\n${interactions.slice(0, 15).join('\n')}`;
+  })();
 
   const isFirstEpisode = episodeNumber === 1;
   const isDomestic = config.mode === 'domestic';
@@ -1136,9 +1336,21 @@ ${dirItem.mark === '💰' ? '- 付费卡点集：结尾必须制造最强悬念'
 - 标记：${dirItem.mark || '常规'}
 - 所属阶段：${dirItem.phase}
 ${prevHook ? `- 上集钩子：${prevHook}` : ''}
+${dirItem.era && creativePlan?.timelineArcs ? (() => {
+  const era = creativePlan.timelineArcs!.eras.find(e => e.id === dirItem.era);
+  const foreshadows = (dirItem.foreshadows || []).map(fid => creativePlan.timelineArcs!.foreshadowGraph.find(f => f.id === fid)).filter(Boolean);
+  const chains = creativePlan.timelineArcs!.causalChains.filter(c => c.nodes.some(n => n.era === dirItem.era && Math.abs(n.episode - episodeNumber) <= 1));
+  return `
+## 时间线上下文
+- 所属时代：${era?.name || dirItem.era}（${era?.setting.era} · ${era?.setting.location}）
+${era?.powerSystem ? `- 力量体系：${era.powerSystem}` : ''}
+${foreshadows.length > 0 ? `- 本集伏笔/收线任务：\n${foreshadows.map(f => `  · [${f!.type === 'plant' ? '埋伏笔' : '收线'}] ${f!.description}（涉及：${f!.involvedCharacters.join('、')}）`).join('\n')}` : ''}
+${chains.length > 0 ? `- 本集因果链节点：\n${chains.map(c => `  · ${c.name}：${c.nodes.filter(n => n.era === dirItem.era && Math.abs(n.episode - episodeNumber) <= 1).map(n => n.event).join('、')}`).join('\n')}` : ''}`;
+})() : ''}
 
 角色简表：
 ${charBrief}
+${simContext}
 
 故事线：${creativePlan!.storyLine}
 核心冲突：${creativePlan!.coreConflict}
@@ -1172,7 +1384,11 @@ ${charBrief}
   const result = await llmJSON<EpisodeScript>(projectId, `episode_${episodeNumber}`, systemPrompt, userPrompt);
   if (!result.success || !result.data) return { success: false, error: result.error || `第${episodeNumber}集生成失败` };
 
-  // 更新项目
+  // 确保 number 字段正确（LLM 可能返回字符串或缺失）
+  result.data.number = episodeNumber;
+  result.data.keywords = result.data.keywords || [];
+
+  // 更新项目（按 number 去重后排序）
   const episodes = [...project.episodes.filter(e => e.number !== episodeNumber), result.data].sort((a, b) => a.number - b.number);
   const newStatus = episodes.length >= config.totalEpisodes ? 'review' : 'writing';
   updateScreenplay(projectId, { episodes, status: newStatus });
@@ -1203,6 +1419,57 @@ export async function generateEpisodeBatch(
 
   return { success: errors.length === 0, completed, errors };
 }
+
+// 重试失败/缺失的分集（并发执行，限制并发数）
+export async function retryFailedEpisodes(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; missing: number[]; completed: number[]; errors: Array<{ episode: number; error: string }> }> {
+  const project = getScreenplay(projectId);
+  if (!project?.episodeDirectory) return { success: false, missing: [], completed: [], errors: [{ episode: 0, error: '请先生成分集目录' }] };
+
+  const existingNums = new Set(project.episodes.map(e => e.number));
+  const missing = project.episodeDirectory
+    .map(d => d.number)
+    .filter(n => !existingNums.has(n))
+    .sort((a, b) => a - b);
+
+  if (missing.length === 0) return { success: true, missing: [], completed: [], errors: [] };
+
+  onProgress?.(`检测到 ${missing.length} 集缺失：${missing.join(', ')}，开始并发重新生成...`);
+
+  const CONCURRENCY = 5;
+  const completed: number[] = [];
+  const errors: Array<{ episode: number; error: string }> = [];
+  let doneCount = 0;
+
+  // 并发控制：分批执行
+  for (let i = 0; i < missing.length; i += CONCURRENCY) {
+    const batch = missing.slice(i, i + CONCURRENCY);
+    onProgress?.(`正在并发生成: ${batch.map(n => `第${n}集`).join('、')} (${doneCount}/${missing.length})`);
+
+    const results = await Promise.allSettled(
+      batch.map(ep => generateEpisode(projectId, ep, onProgress))
+    );
+
+    results.forEach((r, idx) => {
+      const ep = batch[idx];
+      if (r.status === 'fulfilled' && r.value.success) {
+        completed.push(ep);
+      } else {
+        const errMsg = r.status === 'fulfilled' ? (r.value.error || '未知错误') : String(r.reason);
+        errors.push({ episode: ep, error: errMsg });
+      }
+      doneCount++;
+    });
+
+    onProgress?.(`已完成 ${doneCount}/${missing.length}，成功 ${completed.length}，失败 ${errors.length}`);
+  }
+
+  return { success: errors.length === 0, missing, completed, errors };
+}
+
+
 
 // ============================================================
 // 步骤5: 质量自检
