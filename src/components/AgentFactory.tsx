@@ -3,6 +3,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CloseIcon, UploadIcon, CheckIcon } from './Icons';
 
+interface ProtagonistInfo {
+  id: string; name: string; role: string;
+  description: string; personality: string; background: string;
+  motivation: string; speechStyle: string; relationships: string;
+}
 interface NovelDNA {
   title: string; genre: string; tone: string;
   narrativeStyle: string; pacing: string; dialogueStyle: string;
@@ -12,6 +17,7 @@ interface NovelDNA {
   chapterStructure: string; wordCountPerChapter: number;
   openingTechnique: string; cliffhangerStyle: string;
   conflictEscalation: string; uniqueTraits: string[];
+  protagonists?: ProtagonistInfo[];
 }
 interface ChapterSummary { number: number; title: string; wordCount: number; }
 interface TopAgent { id: string; generation: number; score?: number; rank?: number; parentId?: string; scoreHistory: number[]; }
@@ -132,6 +138,40 @@ function DNADisplay({ dna, chapters, isZh }: { dna: NovelDNA; chapters: ChapterS
           </div>
         </div>
       </div>
+
+      {/* 主角档案 */}
+      {dna.protagonists && dna.protagonists.length > 0 && (
+        <div className="p-6 rounded-2xl bg-[#111] border border-amber-500/20 shadow-[0_0_20px_rgba(245,158,11,0.05)]">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center">
+              <span className="text-lg">🎭</span>
+            </div>
+            <h3 className="text-base font-bold text-amber-400">{isZh ? '主角档案' : 'Protagonists'}</h3>
+            <span className="text-xs text-gray-500 ml-auto">{dna.protagonists.length} {isZh ? '位角色' : 'characters'}</span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {dna.protagonists.map((char) => (
+              <div key={char.id} className="p-4 rounded-xl bg-[#0a0a0a] border border-white/5 hover:border-amber-500/20 transition-colors space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-white">{char.name}</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${char.role === 'protagonist' ? 'bg-amber-500/20 text-amber-400' : 'bg-blue-500/20 text-blue-400'}`}>
+                    {char.role === 'protagonist' ? (isZh ? '主角' : 'Lead') : (isZh ? '重要配角' : 'Key Supporting')}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 leading-relaxed line-clamp-3">{char.description}</p>
+                <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
+                  <span className="text-gray-400">性格：</span>{char.personality}
+                </p>
+                {char.background && (
+                  <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
+                    <span className="text-gray-400">背景：</span>{char.background}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -294,7 +334,7 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
   const [concurrency, setConcurrency] = useState(5);
   const [agentsPerGen, setAgentsPerGen] = useState(100);
   const [topK, setTopK] = useState(10);
-  const [savedAgent, setSavedAgent] = useState<{ id: string; name: string } | null>(null);
+  const [savedAgent, setSavedAgent] = useState<{ id: string; name: string; characterAgents?: Array<{ id: string; name: string; role: string }> } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [existingProjects, setExistingProjects] = useState<Array<{ id: string; status: string; title: string; genre: string; chapters: number; agentCount: number; bestScore: number; updatedAt: number }>>([]);
 
@@ -435,7 +475,7 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
       const res = await fetch(`/api/factory/${project?.id}/export`, { method: 'POST' });
       const data = await res.json();
       if (data?.success && data.agentId) {
-        setSavedAgent({ id: data.agentId, name: data.name });
+        setSavedAgent({ id: data.agentId, name: data.name, characterAgents: data.characterAgents || [] });
       } else {
         setError(data?.error || '保存失败');
       }
@@ -731,13 +771,34 @@ export default function AgentFactory({ onClose }: AgentFactoryProps) {
                     {loading ? (isZh ? '保存中...' : 'Saving...') : (isZh ? '💾 保存到Agent仓库' : '💾 Save to Agent Store')}
                   </button>
                 ) : (
-                  <div className="flex flex-col items-center gap-2 p-6 rounded-2xl bg-green-500/10 border border-green-500/20 animate-fade-in">
+                  <div className="flex flex-col items-center gap-2 p-6 rounded-2xl bg-green-500/10 border border-green-500/20 animate-fade-in w-full max-w-2xl">
                     <div className="w-12 h-12 rounded-full bg-green-500/20 flex items-center justify-center mb-2">
                       <CheckIcon className="w-6 h-6 text-green-400" />
                     </div>
                     <p className="text-lg font-bold text-green-400">{isZh ? '已保存到Agent仓库' : 'Saved to Agent Store'}</p>
                     <p className="text-sm text-gray-400">{savedAgent.name}</p>
-                    <p className="text-xs text-gray-500 mt-2">{isZh ? '可在「剧本创作」中选择此Agent进行创作' : 'Available in Screenplay Creator'}</p>
+
+                    {/* 角色Agent导出结果 */}
+                    {savedAgent.characterAgents && savedAgent.characterAgents.length > 0 && (
+                      <div className="w-full mt-4 pt-4 border-t border-green-500/10">
+                        <p className="text-xs text-amber-400 font-medium mb-3 flex items-center gap-1.5">
+                          <span>🎭</span>
+                          {isZh ? `同时导出了 ${savedAgent.characterAgents.length} 位主角Agent` : `${savedAgent.characterAgents.length} character agents exported`}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {savedAgent.characterAgents.map(ca => (
+                            <span key={ca.id} className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-amber-300">
+                              {ca.name}
+                              <span className="text-[10px] text-amber-500/60">
+                                {ca.role === 'protagonist' ? (isZh ? '主角' : 'Lead') : (isZh ? '配角' : 'Supporting')}
+                              </span>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <p className="text-xs text-gray-500 mt-3">{isZh ? '可在「剧本创作」中选择此Agent进行创作' : 'Available in Screenplay Creator'}</p>
                   </div>
                 )}
               </div>

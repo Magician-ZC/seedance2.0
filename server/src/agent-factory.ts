@@ -10,7 +10,24 @@ import { splitNovelIntoChapters, splitTextIntoChunks, type ParsedChapter } from 
 // ============================================================
 
 /** 小说写作DNA（风格指纹） */
-export interface NovelDNA {
+
+/** 从小说中提取的主角档案 */
+export interface FactoryProtagonist {
+  id: string;
+  name: string;
+  role: 'protagonist' | 'supporting';
+  description: string;       // 详细外貌描述
+  personality: string;        // 性格特质
+  background: string;         // 人物背景
+  motivation: string;         // 核心动机
+  speechStyle: string;        // 说话风格
+  relationships: string;      // 主要人物关系
+  visualPrompt: string;       // 视觉描述（用于生图）
+  costumeDesc: string;        // 服化道描述
+}
+
+/** 小说写作DNA（风格指纹） */
+interface NovelDNA {
   title: string;
   genre: string;
   tone: string;
@@ -29,6 +46,7 @@ export interface NovelDNA {
   cliffhangerStyle: string;
   conflictEscalation: string;
   uniqueTraits: string[];
+  protagonists?: FactoryProtagonist[]; // DNA解析时提取的主角档案
 }
 
 /** 章节摘要（轻量，用于前端展示） */
@@ -435,8 +453,101 @@ ${batchResults.map((r, i) => `=== 第${i + 1}批（${batchIndices[i]?.map(idx =>
   }
 
   emitProgress(onProgress, `✅ DNA解析完成 - 「${finalResult.data.title}」 ${finalResult.data.genre}/${finalResult.data.tone}（${totalBatches}批分析汇总）`);
+
+  // ====== 主角提取阶段 ======
+  emitProgress(onProgress, '🎭 正在提取主角档案...');
+  const protagonists = await extractProtagonistsFromChapters(projectId, chapters, finalResult.data, onProgress);
+  if (protagonists.length > 0) {
+    finalResult.data.protagonists = protagonists;
+    emitProgress(onProgress, `✅ 提取到 ${protagonists.length} 位主角：${protagonists.map(p => p.name).join('、')}`);
+  } else {
+    emitProgress(onProgress, '⚠️ 未能提取到主角信息，跳过');
+  }
+
   updateFactory(projectId, { novelDNA: finalResult.data, status: 'parsed' });
   return { success: true };
+}
+
+// ============================================================
+// 主角提取（DNA解析附属步骤）
+// ============================================================
+
+/** 从章节采样中提取主角详细档案 */
+async function extractProtagonistsFromChapters(
+  projectId: string,
+  chapters: ChapterContent[],
+  dna: NovelDNA,
+  onProgress?: (msg: string) => void,
+): Promise<FactoryProtagonist[]> {
+  // 采样前中后各取几章，确保覆盖主角出场和发展
+  const sampleIndices: number[] = [];
+  const total = chapters.length;
+  if (total <= 10) {
+    // 短篇：全部采样
+    for (let i = 0; i < total; i++) sampleIndices.push(i);
+  } else {
+    // 长篇：前3章 + 中间3章 + 后3章
+    for (let i = 0; i < 3 && i < total; i++) sampleIndices.push(i);
+    const mid = Math.floor(total / 2);
+    for (let i = mid - 1; i <= mid + 1 && i < total; i++) if (!sampleIndices.includes(i)) sampleIndices.push(i);
+    for (let i = total - 3; i < total; i++) if (!sampleIndices.includes(i) && i >= 0) sampleIndices.push(i);
+  }
+
+  const MAX_CHARS = 4000;
+  const sampleText = sampleIndices.map(i =>
+    `【第${chapters[i].number}章：${chapters[i].title}】\n${chapters[i].content.slice(0, MAX_CHARS)}`
+  ).join('\n\n---\n\n');
+
+  const system = `你是一位专业的小说角色分析师。请从以下小说片段中提取所有主角和重要配角（不要龙套和群演）。
+只提取有大量描写、在剧情中起关键作用的角色。每个角色必须有丰富详细的描述。
+
+输出严格JSON格式：
+{
+  "protagonists": [
+    {
+      "name": "角色名",
+      "role": "protagonist 或 supporting",
+      "description": "详细外貌描述（至少100字：五官、身材、气质、标志性特征等）",
+      "personality": "性格特质详述（至少80字：核心性格、行为模式、情绪特点等）",
+      "background": "人物背景（至少60字：身份、经历、社会地位等）",
+      "motivation": "核心动机（驱动角色行动的根本原因）",
+      "speechStyle": "说话风格（语气、口头禅、用词习惯等）",
+      "relationships": "主要人物关系（与其他角色的关系描述）",
+      "visualPrompt": "英文视觉描述（用于AI生图，描述外貌、服装、气质，80词以上）",
+      "costumeDesc": "服化道描述（默认服装、妆容、标志性道具）"
+    }
+  ]
+}
+
+要求：
+1. 只提取主角(protagonist)和戏份很重的配角(supporting)，绝不要龙套
+2. 每个字段都要详细丰富，不能简简单单几十个字敷衍
+3. description 和 personality 是最重要的字段，必须深入挖掘
+4. visualPrompt 用英文写，要足够详细以便AI生成角色图`;
+
+  const user = `小说标题：${dna.title}
+题材：${dna.genre}
+基调：${dna.tone}
+
+以下是采样章节（前/中/后各取样）：
+
+${sampleText}
+
+请提取所有主角和重要配角的详细档案。`;
+
+  const result = await llmJSON<{ protagonists: FactoryProtagonist[] }>(projectId, 'extract_protagonists', system, user, 'parse');
+  if (!result.success || !result.data?.protagonists?.length) {
+    emitProgress(onProgress, `⚠️ 主角提取失败: ${result.error || '未返回有效数据'}`);
+    return [];
+  }
+
+  // 过滤掉描述太短的（不够详细的角色不要）
+  const MIN_DESC_LEN = 50;
+  const valid = result.data.protagonists
+    .filter(p => p.name && p.description?.length >= MIN_DESC_LEN && p.personality?.length >= 30)
+    .map((p, i) => ({ ...p, id: `P${String(i + 1).padStart(2, '0')}` }));
+
+  return valid;
 }
 
 // ============================================================
@@ -768,12 +879,34 @@ export async function runFullEvolution(
 // 导出最终Agent
 // ============================================================
 
-export function exportFinalAgent(projectId: string): { success: boolean; agent?: WritingAgent; prompt?: string; error?: string } {
+export function exportFinalAgent(projectId: string): { success: boolean; agent?: WritingAgent; prompt?: string; protagonists?: FactoryProtagonist[]; error?: string } {
   const project = getFactory(projectId);
   if (!project?.finalAgent) return { success: false, error: '进化尚未完成' };
   const agent = project.finalAgent;
   const exportPrompt = `${agent.systemPrompt}\n\n---\n## 风格指令\n${agent.styleDirective}\n\n## 技巧权重\n${JSON.stringify(agent.techniqueWeights, null, 2)}\n\n## 进化历史\n- 代数: ${agent.generation}\n- 评分: ${agent.scoreHistory.join(' → ')}\n- 变异:\n${agent.mutationLog.map(m => `  - ${m}`).join('\n')}`;
-  return { success: true, agent, prompt: exportPrompt };
+  return { success: true, agent, prompt: exportPrompt, protagonists: project.novelDNA?.protagonists || [] };
+}
+
+/** 为主角构建角色扮演Agent的system prompt */
+export function buildFactoryCharacterPrompt(char: FactoryProtagonist, novelTitle: string, genre: string): string {
+  return `你是「${char.name}」，来自小说《${novelTitle}》的${char.role === 'protagonist' ? '主角' : '重要配角'}。
+
+## 角色档案
+- 身份背景：${char.background}
+- 外貌特征：${char.description}
+- 性格特质：${char.personality}
+- 核心动机：${char.motivation}
+- 说话风格：${char.speechStyle}
+- 人物关系：${char.relationships}
+${char.costumeDesc ? `- 服化道：${char.costumeDesc}` : ''}
+
+## 行为准则
+1. 始终以「${char.name}」的身份说话和行动
+2. 保持角色性格一致性：${char.personality}
+3. 对话风格要符合角色设定：${char.speechStyle}
+4. 在新的故事场景中，保持核心性格特征，但可以根据新剧情自然发展
+5. 与其他角色互动时，体现角色关系和情感张力
+6. 行动动机始终围绕：${char.motivation}`;
 }
 
 // ============================================================

@@ -1,6 +1,7 @@
 // 剧本创建向导组件 - 基于 short-drama 方法论的多步骤创作流程
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import ForceGraph2D from 'react-force-graph-2d';
 import { CloseIcon, ArrowLeftIcon, SparkleIcon, CheckIcon, DownloadIcon, BookIcon, FilmIcon } from './Icons';
 
 // ============================================================
@@ -18,6 +19,7 @@ interface ScreenplayConfig {
   customPrompt?: string;
   agentId?: string;
   referenceNovel?: string;
+  useCharacterPool?: boolean;
 }
 
 interface CreativePlan {
@@ -166,8 +168,10 @@ function useTaskProgress(taskId: string | null, onDone: () => void) {
 }
 
 function ProgressLog({ logs }: { logs: string[] }) {
+  const filteredLogs = logs.filter(l => !l.startsWith('[SIM]'));
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [logs.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [filteredLogs.length]);
+  if (filteredLogs.length === 0) return null;
   return (
     <div className="rounded-xl bg-[#0d0d0d] border border-blue-500/20 overflow-hidden shadow-lg animate-fade-in">
       <div className="flex items-center justify-between px-4 py-3 bg-blue-500/10 border-b border-blue-500/10">
@@ -175,13 +179,301 @@ function ProgressLog({ logs }: { logs: string[] }) {
           <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
           实时创作日志
         </span>
-        <span className="text-[10px] text-blue-300/60 font-mono">{logs.length} ops</span>
+        <span className="text-[10px] text-blue-300/60 font-mono">{filteredLogs.length} ops</span>
       </div>
       <div className="max-h-48 overflow-y-auto custom-scrollbar p-4 space-y-2 font-mono">
-        {logs.map((log, i) => (
+        {filteredLogs.map((log, i) => (
           <div key={i} className="text-xs text-gray-400 leading-relaxed flex gap-3">
             <span className="text-gray-700 select-none">{String(i + 1).padStart(2, '0')}</span>
             <span className={log.includes('✅') ? 'text-green-400' : ''}>{log}</span>
+          </div>
+        ))}
+        <div ref={endRef} />
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// 世界观模拟实况面板 - 力导向气泡图 (react-force-graph-2d)
+// ============================================================
+
+interface SimEvent { type: string; [key: string]: unknown }
+interface SimInteractionUI { p: string[]; t: string; d: string; tension: number; timeline?: string }
+
+function parseSimEvents(logs: string[]): SimEvent[] {
+  const out: SimEvent[] = [];
+  for (const l of logs) {
+    if (!l.startsWith('[SIM]')) continue;
+    try { out.push(JSON.parse(l.slice(5))); } catch { /* skip */ }
+  }
+  return out;
+}
+
+function charHue(name: string) {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+  return ((h % 360) + 360) % 360;
+}
+function charColor(name: string) { return `hsl(${charHue(name)},70%,60%)`; }
+
+const LINK_COLORS: Record<string, string> = {
+  '冲突': '#ef4444', '对抗': '#ef4444', '合作': '#3b82f6',
+  '暧昧': '#ec4899', '依赖': '#eab308', '利用': '#f97316',
+};
+const TYPE_EMOJI: Record<string, string> = {
+  '冲突': '⚔️', '对抗': '⚔️', '合作': '🤝', '暧昧': '💕', '依赖': '🔗', '利用': '🎭',
+};
+
+interface CharEvent {
+  round: number | string; type: string; partner: string;
+  description: string; tension: number; timeline: string;
+}
+
+function buildCharData(events: SimEvent[]) {
+  const names: string[] = [];
+  const startEvt = events.find(e => e.type === 'start');
+  if (startEvt?.characters) names.push(...(startEvt.characters as string[]));
+  const charMap = new Map<string, CharEvent[]>();
+  const links: Array<{ source: string; target: string; type: string; tension: number }> = [];
+  for (const e of events) {
+    const inters = e.interactions as SimInteractionUI[] | undefined;
+    if (!inters) continue;
+    const round = e.type === 'cross_result' ? '交叉' : (e.round as number);
+    for (const it of inters) {
+      if (!it.p || it.p.length < 2) continue;
+      links.push({ source: it.p[0], target: it.p[1], type: it.t, tension: it.tension });
+      for (const n of it.p) {
+        if (!names.includes(n)) names.push(n);
+        if (!charMap.has(n)) charMap.set(n, []);
+        charMap.get(n)!.push({
+          round, type: it.t, partner: it.p.filter(x => x !== n).join('、'),
+          description: it.d, tension: it.tension, timeline: it.timeline || '发展',
+        });
+      }
+    }
+  }
+  for (const n of names) if (!charMap.has(n)) charMap.set(n, []);
+  return { names, charMap, links };
+}
+
+function SimulationPanel({ logs }: { logs: string[] }) {
+  const events = parseSimEvents(logs);
+  const [selectedChar, setSelectedChar] = useState<string | null>(null);
+  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+  const graphRef = useRef<any>(); // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  if (events.length === 0) return null;
+
+  const startEvt = events.find(e => e.type === 'start');
+  const totalRounds = (startEvt?.totalRounds as number) || 0;
+  const world = (startEvt?.world as string) || '';
+  const doneEvt = events.find(e => e.type === 'done');
+  const isSummarizing = events.some(e => e.type === 'summarizing');
+  const isCrossing = events.some(e => e.type === 'cross_start') && !events.some(e => e.type === 'cross_result' || e.type === 'summarizing');
+  const completedRounds = events.filter(e => e.type === 'round_result' || e.type === 'round_fail').length;
+
+  const { names, charMap, links } = buildCharData(events);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const graphData = useMemo(() => {
+    const nodes = names.map(name => ({
+      id: name, val: Math.max(2, (charMap.get(name)?.length || 0) + 1),
+      color: charColor(name), eventCount: charMap.get(name)?.length || 0,
+    }));
+    const gLinks = links.map((l, i) => ({
+      id: `link-${i}`, source: l.source, target: l.target,
+      type: l.type, tension: l.tension, color: LINK_COLORS[l.type] || '#6b7280',
+    }));
+    return { nodes, links: gLinks };
+  }, [names.length, links.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const timeOrder: Record<string, number> = { '初遇': 0, '发展': 1, '转折': 2, '高潮': 3 };
+  const selectedEvents = selectedChar
+    ? [...(charMap.get(selectedChar) || [])].sort((a, b) => (timeOrder[a.timeline] ?? 1) - (timeOrder[b.timeline] ?? 1))
+    : [];
+
+  const paintNode = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const name = node.id as string;
+    const r = Math.sqrt(node.val || 2) * 4;
+    const isSelected = selectedChar === name;
+    const isHovered = hoveredNode === name;
+    const isRelated = selectedChar && links.some(l =>
+      (l.source === selectedChar || l.target === selectedChar) && (l.source === name || l.target === name)
+    );
+    const dimmed = selectedChar && !isSelected && !isRelated;
+
+    if ((isSelected || isHovered) && !dimmed) {
+      ctx.beginPath(); ctx.arc(node.x, node.y, r + 6, 0, 2 * Math.PI);
+      ctx.fillStyle = `${charColor(name)}33`; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = dimmed ? `${charColor(name)}22` : charColor(name);
+    ctx.globalAlpha = dimmed ? 0.3 : isSelected ? 1 : 0.8;
+    ctx.fill(); ctx.globalAlpha = 1;
+    if (isSelected) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 / globalScale; ctx.stroke(); }
+
+    const fontSize = Math.max(10, 12 / globalScale);
+    ctx.font = `${isSelected ? 'bold ' : ''}${fontSize}px sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillStyle = dimmed ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.85)';
+    ctx.fillText(name.length > 5 ? name.slice(0, 5) : name, node.x, node.y + r + 3);
+
+    const count = node.eventCount || 0;
+    if (count > 0 && !dimmed) {
+      const bx = node.x + r * 0.7, by = node.y - r * 0.7;
+      ctx.beginPath(); ctx.arc(bx, by, 6, 0, 2 * Math.PI);
+      ctx.fillStyle = '#0d0d0d'; ctx.fill();
+      ctx.strokeStyle = charColor(name); ctx.lineWidth = 1 / globalScale; ctx.stroke();
+      ctx.fillStyle = charColor(name); ctx.font = `bold 8px sans-serif`;
+      ctx.textBaseline = 'middle'; ctx.fillText(String(count), bx, by);
+    }
+  }, [selectedChar, hoveredNode, links]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const paintLink = useCallback((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const src = link.source, tgt = link.target;
+    if (!src?.x || !tgt?.x) return;
+    const srcName = typeof src === 'object' ? src.id : src;
+    const tgtName = typeof tgt === 'object' ? tgt.id : tgt;
+    const isRelated = selectedChar && (srcName === selectedChar || tgtName === selectedChar);
+    const dimmed = selectedChar && !isRelated;
+    ctx.beginPath(); ctx.moveTo(src.x, src.y); ctx.lineTo(tgt.x, tgt.y);
+    ctx.strokeStyle = link.color || '#6b7280';
+    ctx.globalAlpha = dimmed ? 0.05 : isRelated ? 0.9 : 0.3;
+    ctx.lineWidth = (dimmed ? 0.3 : Math.max(0.5, (link.tension || 3) / 4)) / globalScale;
+    if (link.type === '暧昧') ctx.setLineDash([4 / globalScale, 3 / globalScale]);
+    ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }, [selectedChar]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const paintNodeArea = useCallback((node: any, color: string, ctx: CanvasRenderingContext2D) => {
+    const r = Math.sqrt(node.val || 2) * 4 + 5;
+    ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
+    ctx.fillStyle = color; ctx.fill();
+  }, []);
+
+  return (
+    <div className="rounded-2xl bg-[#0d0d0d] border border-amber-500/20 overflow-hidden shadow-lg animate-fade-in">
+      <div className="px-5 py-4 bg-gradient-to-r from-amber-500/10 to-purple-500/10 border-b border-amber-500/10">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-bold text-amber-400 flex items-center gap-2">
+            <span className="text-lg">🌍</span> 世界观模拟实况
+          </span>
+          <div className="flex items-center gap-3">
+            {world && <span className="text-[10px] text-gray-500 font-mono">{world}</span>}
+            <span className="text-[10px] text-amber-300/60 font-mono">
+              {names.length} 角色 · {doneEvt ? '✅ 完成' : isSummarizing ? '🔮 汇总中' : isCrossing ? '🔗 交叉互动' : `${completedRounds}/${totalRounds} 轮`}
+            </span>
+          </div>
+        </div>
+        {!doneEvt && totalRounds > 0 && (
+          <div className="mt-3 h-1 bg-gray-800 rounded-full overflow-hidden">
+            <div className="h-full bg-gradient-to-r from-amber-500 to-purple-500 transition-all duration-500 rounded-full"
+              style={{ width: `${isSummarizing ? 90 : isCrossing ? 75 : (completedRounds / totalRounds) * 70}%` }} />
+          </div>
+        )}
+      </div>
+
+      <div className="flex" style={{ minHeight: 420 }}>
+        <div className="flex-1 relative" style={{ minHeight: 400 }}>
+          <ForceGraph2D
+            ref={graphRef}
+            graphData={graphData}
+            width={selectedChar ? 480 : 700}
+            height={400}
+            backgroundColor="#0d0d0d"
+            nodeCanvasObject={paintNode}
+            nodePointerAreaPaint={paintNodeArea}
+            linkCanvasObject={paintLink}
+            nodeCanvasObjectMode={() => 'replace'}
+            linkCanvasObjectMode={() => 'replace'}
+            onNodeClick={(node: any) => setSelectedChar(prev => prev === node.id ? null : node.id)}
+            onNodeHover={(node: any) => setHoveredNode(node?.id || null)}
+            onBackgroundClick={() => setSelectedChar(null)}
+            enableZoomInteraction={true}
+            enablePanInteraction={true}
+            enableNodeDrag={true}
+            cooldownTicks={80}
+            d3AlphaDecay={0.03}
+            d3VelocityDecay={0.3}
+            linkDirectionalParticles={(link: any) => {
+              if (!selectedChar) return 0;
+              const s = typeof link.source === 'object' ? link.source.id : link.source;
+              const t = typeof link.target === 'object' ? link.target.id : link.target;
+              return (s === selectedChar || t === selectedChar) ? 2 : 0;
+            }}
+            linkDirectionalParticleWidth={2}
+            linkDirectionalParticleSpeed={0.005}
+            linkDirectionalParticleColor={(link: any) => link.color || '#6b7280'}
+          />
+          <div className="absolute bottom-3 left-3 flex flex-wrap gap-2 bg-black/60 backdrop-blur rounded-lg px-3 py-2">
+            {Object.entries(LINK_COLORS).filter(([k]) => !['对抗'].includes(k)).map(([label, color]) => (
+              <div key={label} className="flex items-center gap-1">
+                <div className="w-3 h-0.5 rounded" style={{ backgroundColor: color }} />
+                <span className="text-[9px] text-gray-400">{label}</span>
+              </div>
+            ))}
+          </div>
+          {names.length > 0 && !selectedChar && (
+            <div className="absolute top-3 right-3 text-[10px] text-gray-500 bg-black/40 backdrop-blur rounded px-2 py-1">
+              点击角色查看经历
+            </div>
+          )}
+          {doneEvt && (
+            <div className="absolute bottom-3 right-3 flex gap-3 text-[10px] text-gray-500 bg-black/60 backdrop-blur rounded-lg px-3 py-2">
+              <span>⚡{doneEvt.interactions as number}</span>
+              <span>🤝{doneEvt.alliances as number}</span>
+              <span>⚔️{doneEvt.conflicts as number}</span>
+              <span>💕{doneEvt.romances as number}</span>
+            </div>
+          )}
+        </div>
+        {selectedChar && (
+          <CharacterTimeline name={selectedChar} events={selectedEvents}
+            color={charColor(selectedChar)} onClose={() => setSelectedChar(null)} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CharacterTimeline({ name, events, color, onClose }: {
+  name: string; events: CharEvent[]; color: string; onClose: () => void;
+}) {
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [events.length]);
+  const tlColors: Record<string, string> = {
+    '初遇': 'border-blue-500/30 text-blue-400', '发展': 'border-green-500/30 text-green-400',
+    '转折': 'border-yellow-500/30 text-yellow-400', '高潮': 'border-red-500/30 text-red-400',
+  };
+  return (
+    <div className="w-72 border-l border-white/5 bg-[#0a0a0a] flex flex-col" style={{ maxHeight: 420 }}>
+      <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-2">
+          <div className="w-5 h-5 rounded-full" style={{ backgroundColor: color }} />
+          <span className="text-sm font-bold text-white">{name}</span>
+          <span className="text-[10px] text-gray-500">{events.length} 事件</span>
+        </div>
+        <button onClick={onClose} className="text-gray-500 hover:text-white text-xs p-1">✕</button>
+      </div>
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-3">
+        {events.length === 0 ? (
+          <div className="text-center py-8 text-gray-600 text-xs">
+            <div className="text-2xl mb-2">🕐</div>等待互动事件...
+          </div>
+        ) : events.map((evt, i) => (
+          <div key={i} className="relative pl-4 border-l-2 border-white/5">
+            <div className="absolute -left-[5px] top-1 w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded border ${tlColors[evt.timeline] || 'border-gray-500/30 text-gray-400'}`}>
+                  {evt.timeline}
+                </span>
+                <span className="text-[10px] text-gray-500">{TYPE_EMOJI[evt.type] || '📌'} {evt.type}</span>
+                <span className="text-[10px] text-gray-600">⚡{evt.tension}</span>
+              </div>
+              <div className="text-[11px] text-gray-400">与 <span className="text-gray-200">{evt.partner}</span></div>
+              <p className="text-[11px] text-gray-400 leading-relaxed">{evt.description}</p>
+            </div>
           </div>
         ))}
         <div ref={endRef} />
@@ -215,6 +507,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
   const [agents, setAgents] = useState<Array<{ id: string; name: string; genre: string; tone: string; score: number; sourceNovel: string }>>([]);
   const [referenceNovel, setReferenceNovel] = useState('');
+  const [useCharacterPool, setUseCharacterPool] = useState(false);
   const novelFileRef = useRef<HTMLInputElement>(null);
 
   // 模型选择 & NSFW
@@ -367,7 +660,7 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
     try {
       const res = await fetch('/api/screenplay/create', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
+        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, useCharacterPool: useCharacterPool || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
       });
       const data = await res.json();
       if (data?.project) { setProject(normalizeProject(data.project)); setStep('plan'); }
@@ -783,6 +1076,25 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
                     </div>
                   </section>
 
+                  {/* 群演仓库开关 */}
+                  <section className="p-4 rounded-2xl bg-amber-500/5 border border-amber-500/20">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                          🎭 {isZh ? '使用群演仓库' : 'Character Pool'}
+                        </span>
+                        <p className="text-[10px] text-gray-500 mt-1">{isZh ? '从群演仓库中匹配角色，在世界观中模拟互动，让每个角色都像真实活着的人' : 'Match characters from pool, simulate in world'}</p>
+                      </div>
+                      <button onClick={() => setUseCharacterPool(!useCharacterPool)}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${useCharacterPool ? 'bg-amber-500' : 'bg-white/10'}`}>
+                        <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${useCharacterPool ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                      </button>
+                    </div>
+                    {useCharacterPool && (
+                      <p className="text-[10px] text-amber-400/80 mt-2">✨ {isZh ? '角色开发阶段将从群演仓库智能匹配10-100个角色，通过世界观模拟生成最终角色体系' : 'Will match 10-100 characters and simulate interactions'}</p>
+                    )}
+                  </section>
+
                   <section>
                     <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '自定义要求' : 'Custom Prompt'}</label>
                     <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
@@ -937,16 +1249,20 @@ export default function ScreenplayCreator({ onClose, onProjectCreated: _onProjec
           {step === 'characters' && (
             <div className="space-y-8 animate-fade-in">
               {!project?.characterDesign ? (
-                <div className="flex flex-col items-center justify-center py-20">
-                  <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
-                    <span className="text-4xl">👥</span>
+                <div className="space-y-8">
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                      <span className="text-4xl">👥</span>
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">{isZh ? '角色设计' : 'Design Characters'}</h3>
+                    <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将构建完整的人物小传、性格特征、反派体系以及人物关系网。' : 'AI will design character profiles, villains, and relationship networks.'}</p>
+                    <button onClick={handleGenerateCharacters} disabled={loading}
+                      className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
+                      {isZh ? '生成角色' : 'Generate Characters'}
+                    </button>
                   </div>
-                  <h3 className="text-xl font-bold text-white mb-2">{isZh ? '角色设计' : 'Design Characters'}</h3>
-                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将构建完整的人物小传、性格特征、反派体系以及人物关系网。' : 'AI will design character profiles, villains, and relationship networks.'}</p>
-                  <button onClick={handleGenerateCharacters} disabled={loading}
-                    className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
-                    {isZh ? '生成角色' : 'Generate Characters'}
-                  </button>
+                  {/* 世界观模拟实况面板 */}
+                  {logs.some(l => l.startsWith('[SIM]')) && <SimulationPanel logs={logs} />}
                 </div>
               ) : (
                 <div className="space-y-8">

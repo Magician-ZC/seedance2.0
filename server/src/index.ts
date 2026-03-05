@@ -26,19 +26,20 @@ import {
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
   createScreenplay, getScreenplay, updateScreenplay, listScreenplays, removeScreenplay,
   generateCreativePlan, generateCharacters, generateDirectory,
   generateEpisode, generateEpisodeBatch, reviewEpisode, exportScreenplay, getGenreList,
-  loadScreenplayProjectsFromDB,
+  loadScreenplayProjectsFromDB, analyzeReferenceNovel,
 } from './screenplay-creator.js';
 import {
   createFactory, getFactory, updateFactory, listFactories, removeFactory,
   parseNovelDNA, generateInitialAgents, runEvolutionRound, mutateAndBreed,
   runFullEvolution, exportFinalAgent, requestStop, restoreFactories,
+  buildFactoryCharacterPrompt, type FactoryProtagonist,
 } from './agent-factory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1221,7 +1222,7 @@ app.get('/api/screenplay/genres', (_req, res) => {
 
 // POST /api/screenplay/create - 创建剧本项目
 app.post('/api/screenplay/create', (req, res) => {
-  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw } = req.body;
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool } = req.body;
   if (!genres?.length || !audience || !tone || !totalEpisodes) {
     return res.status(400).json({ error: '缺少必要参数' });
   }
@@ -1231,6 +1232,7 @@ app.post('/api/screenplay/create', (req, res) => {
     totalEpisodes, language: language || 'zh-CN', mode: mode || 'domestic', customPrompt,
     agentId: agentId || undefined,
     referenceNovel: referenceNovel || undefined,
+    useCharacterPool: useCharacterPool || false,
     fixedModel: fixedModel || undefined,
     nsfw: nsfw || false,
   });
@@ -1269,10 +1271,23 @@ app.post('/api/screenplay/:id/select-title', (req, res) => {
 app.post('/api/screenplay/:id/creative-plan', async (req, res) => {
   const taskId = `sp_plan_${req.params.id}`;
   res.json({ async: true, taskId });
-  generateCreativePlan(req.params.id, (msg) => {
+
+  const emitProgress = (msg: string) => {
     const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
     wsManager.broadcast(taskId, task);
-  }).then((result) => {
+  };
+
+  // 如果有参考小说且尚未解析，先进行深度解析
+  const project = getScreenplay(req.params.id);
+  if (project?.config.referenceNovel && !project.config.novelAnalysis) {
+    emitProgress('📖 检测到参考小说，开始深度解析...');
+    const analysisResult = await analyzeReferenceNovel(req.params.id, project.config.referenceNovel, emitProgress);
+    if (analysisResult.success && analysisResult.analysis) {
+      updateScreenplay(req.params.id, { config: { ...project.config, novelAnalysis: analysisResult.analysis } });
+    }
+  }
+
+  generateCreativePlan(req.params.id, emitProgress).then((result) => {
     const task: TaskInfo = {
       id: taskId, status: result.success ? 'done' : 'error',
       progress: result.success ? '创作方案生成完成' : '',
@@ -1631,16 +1646,18 @@ app.post('/api/factory/:id/export', (_req, res) => {
   const agent = result.agent;
   const now = Date.now();
   const agentId = `agent_${crypto.randomUUID().slice(0, 8)}`;
+  const novelTitle = project?.novelDNA?.title || '未命名';
+  const genre = project?.novelDNA?.genre || '';
   const row: AgentStoreRow = {
     id: agentId,
-    name: `${project?.novelDNA?.title || '未命名'} - 风格Agent`,
-    genre: project?.novelDNA?.genre || '',
+    name: `${novelTitle} - 风格Agent`,
+    genre,
     tone: project?.novelDNA?.tone || '',
-    description: `基于「${project?.novelDNA?.title || ''}」进化${agent.generation}代，最终得分${agent.score}`,
+    description: `基于「${novelTitle}」进化${agent.generation}代，最终得分${agent.score}`,
     system_prompt: agent.systemPrompt,
     style_directive: agent.styleDirective,
     technique_weights: JSON.stringify(agent.techniqueWeights),
-    source_novel: project?.novelDNA?.title || '',
+    source_novel: novelTitle,
     score: agent.score || 0,
     generation: agent.generation,
     score_history: JSON.stringify(agent.scoreHistory),
@@ -1649,7 +1666,34 @@ app.post('/api/factory/:id/export', (_req, res) => {
     created_at: now, updated_at: now,
   };
   insertAgentStore(row);
-  res.json({ success: true, agentId, name: row.name, prompt: result.prompt });
+
+  // 同时导出主角为角色Agent
+  const protagonists = result.protagonists || [];
+  const savedCharacters: Array<{ id: string; name: string; role: string }> = [];
+  for (const char of protagonists) {
+    const charAgentId = `ca_fac_${_req.params.id.slice(0, 6)}_${char.id}`;
+    const systemPrompt = buildFactoryCharacterPrompt(char, novelTitle, genre);
+    insertCharacterAgent({
+      id: charAgentId,
+      name: char.name,
+      role: char.role,
+      source_novel: novelTitle,
+      source_project_id: _req.params.id,
+      category: genre,
+      description: char.description,
+      personality: char.personality,
+      visual_prompt: char.visualPrompt || '',
+      costume_desc: char.costumeDesc || '',
+      system_prompt: systemPrompt,
+      profile_images: JSON.stringify({}),
+      tags: JSON.stringify([char.role, genre].filter(Boolean)),
+      created_at: now,
+      updated_at: now,
+    });
+    savedCharacters.push({ id: charAgentId, name: char.name, role: char.role });
+  }
+
+  res.json({ success: true, agentId, name: row.name, prompt: result.prompt, characterAgents: savedCharacters });
 });
 
 // GET /api/agents - Agent仓库列表

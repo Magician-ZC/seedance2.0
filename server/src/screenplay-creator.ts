@@ -2,7 +2,8 @@
 // 流程: 选题定位 → 创作方案 → 角色开发 → 分集目录 → 分集剧本 → 自检 → 导出
 import crypto from 'crypto';
 import { chatCompletionJSON, chatCompletion, getLLMConfig, getNextConfig, selectConfig, enhancePromptForNSFW, type LLMConfig, type TaskType } from './llm-service.js';
-import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProjectById, listScreenplayProjects as dbListScreenplayProjects, deleteScreenplayProject as dbDeleteScreenplayProject } from './db-service.js';
+import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProjectById, listScreenplayProjects as dbListScreenplayProjects, deleteScreenplayProject as dbDeleteScreenplayProject, listCharacterAgents, type CharacterAgentRow } from './db-service.js';
+import { splitNovelIntoChapters, splitTextIntoChunks } from './novel-to-drama.js';
 
 // ============================================================
 // 类型定义
@@ -19,8 +20,26 @@ export interface ScreenplayConfig {
   customPrompt?: string;       // 用户自定义创作要求
   agentId?: string;            // 可选：使用Agent仓库中的写作Agent
   referenceNovel?: string;     // 可选：参考小说内容（用于二创）
+  novelAnalysis?: NovelAnalysisSummary; // 参考小说的深度解析结果（替代原文）
+  useCharacterPool?: boolean;  // 是否使用群演仓库驱动角色开发
   fixedModel?: LLMConfig | null; // 项目级锁定模型
   nsfw?: boolean;              // NSFW 模式
+}
+
+/** 参考小说深度解析摘要 */
+interface NovelAnalysisSummary {
+  title: string;
+  genre: string;
+  setting: string;             // 时空背景
+  mainCharacters: Array<{ name: string; role: string; description: string; personality: string; motivation: string }>;
+  storyLine: string;           // 完整故事线
+  plotArcs: string[];          // 主要剧情弧
+  climax: string;              // 高潮
+  ending: string;              // 大结局
+  coreConflict: string;        // 核心冲突
+  themes: string[];            // 主题
+  emotionalCurve: string;      // 情感曲线
+  keyRelationships: string[];  // 关键人物关系
 }
 
 export interface CreativePlan {
@@ -279,6 +298,85 @@ function distributePhases(total: number): { rise: number; climb: number; storm: 
 }
 
 // ============================================================
+// 参考小说深度解析（替代直接塞原文）
+// ============================================================
+
+/** 对参考小说进行深度解析，提取故事线、角色、结局等结构化信息 */
+export async function analyzeReferenceNovel(
+  projectId: string,
+  novelText: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; analysis?: NovelAnalysisSummary; error?: string }> {
+  onProgress?.('📖 开始解析参考小说...');
+
+  // 复用 novel-to-drama 的章节拆分
+  const parsed = splitNovelIntoChapters(novelText);
+  let chapters: Array<{ number: number; title: string; content: string }>;
+  if (parsed.length >= 3) {
+    chapters = parsed.map(ch => ({ number: ch.number, title: ch.title, content: ch.content }));
+  } else {
+    const chunks = splitTextIntoChunks(novelText, 8000);
+    chapters = chunks.map((c, i) => ({ number: i + 1, title: `段落${i + 1}`, content: c }));
+  }
+  onProgress?.(`📖 识别到 ${chapters.length} 个章节，开始采样分析...`);
+
+  // 采样：前3章 + 中间3章 + 后3章（确保覆盖开头、发展、结局）
+  const indices: number[] = [];
+  const total = chapters.length;
+  // 前段
+  for (let i = 0; i < Math.min(3, total); i++) indices.push(i);
+  // 中段
+  const mid = Math.floor(total / 2);
+  for (let i = mid - 1; i <= mid + 1 && i < total; i++) if (!indices.includes(i) && i >= 0) indices.push(i);
+  // 后段（关键：必须包含最后几章以提取结局）
+  for (let i = Math.max(0, total - 3); i < total; i++) if (!indices.includes(i)) indices.push(i);
+
+  const MAX_CHARS = 5000;
+  const sampleText = indices.map(i =>
+    `【第${chapters[i].number}章：${chapters[i].title}】\n${chapters[i].content.slice(0, MAX_CHARS)}`
+  ).join('\n\n---\n\n');
+
+  const system = `你是一位专业的小说分析师。请对以下小说片段进行深度分析，提取完整的故事结构。
+注意：采样包含了小说的开头、中间和结尾部分，请据此推断完整的故事线和大结局。
+
+输出严格JSON格式：
+{
+  "title": "小说标题（从内容推断）",
+  "genre": "题材类型",
+  "setting": "时空背景描述（时代、地点、社会环境）",
+  "mainCharacters": [
+    { "name": "角色名", "role": "protagonist/supporting/antagonist", "description": "外貌和身份描述", "personality": "性格特质", "motivation": "核心动机" }
+  ],
+  "storyLine": "完整故事线概述（300字以上，从开头到结局的完整脉络）",
+  "plotArcs": ["主要剧情弧1：描述", "主要剧情弧2：描述", ...],
+  "climax": "故事高潮描述（100字以上）",
+  "ending": "大结局详细描述（150字以上，包括各主要角色的最终归宿）",
+  "coreConflict": "核心冲突描述",
+  "themes": ["主题1", "主题2"],
+  "emotionalCurve": "全书情感曲线描述（从开头到结尾的情感变化）",
+  "keyRelationships": ["角色A与角色B：关系描述", ...]
+}
+
+要求：
+1. storyLine 必须是完整的故事线，不能只写开头
+2. ending 必须详细描述大结局，包括主要角色的命运
+3. mainCharacters 只提取主角和重要角色（不超过8个）
+4. 每个字段都要详细丰富，不能敷衍`;
+
+  const user = `以下是小说的采样章节（前/中/后各取样，共${indices.length}章，全书${chapters.length}章）：\n\n${sampleText}`;
+
+  onProgress?.('📖 正在深度分析故事结构...');
+  const result = await llmJSON<NovelAnalysisSummary>(projectId, 'analyze_reference_novel', system, user, 'parse');
+  if (!result.success || !result.data) {
+    onProgress?.(`⚠️ 小说解析失败: ${result.error || '未知错误'}`);
+    return { success: false, error: result.error || '小说解析失败' };
+  }
+
+  onProgress?.(`✅ 小说解析完成 - 「${result.data.title}」`);
+  return { success: true, analysis: result.data };
+}
+
+// ============================================================
 // 步骤1: 生成创作方案
 // ============================================================
 
@@ -324,7 +422,37 @@ export async function generateCreativePlan(
 - 结局类型：${config.endingType}
 - 总集数：${config.totalEpisodes}集
 ${config.customPrompt ? `- 用户额外要求：${config.customPrompt}` : ''}
-${config.referenceNovel ? `\n## 参考小说（基于此小说进行二次创作改编）\n以下是参考小说的内容，请基于其核心故事线、人物关系和情节框架进行短剧改编，但需要适配短剧节奏和格式要求：\n\n${config.referenceNovel.slice(0, 30000)}\n` : ''}
+${config.novelAnalysis ? `\n## 参考小说深度解析（基于此小说进行二次创作改编）
+请基于以下解析结果进行短剧改编，保留核心故事线和人物关系，但需要适配短剧节奏和格式要求。
+
+### 原作信息
+- 标题：${config.novelAnalysis.title}
+- 题材：${config.novelAnalysis.genre}
+- 时空背景：${config.novelAnalysis.setting}
+- 核心冲突：${config.novelAnalysis.coreConflict}
+- 主题：${config.novelAnalysis.themes.join('、')}
+
+### 完整故事线
+${config.novelAnalysis.storyLine}
+
+### 主要剧情弧
+${config.novelAnalysis.plotArcs.map((a, i) => `${i + 1}. ${a}`).join('\n')}
+
+### 高潮
+${config.novelAnalysis.climax}
+
+### 大结局
+${config.novelAnalysis.ending}
+
+### 情感曲线
+${config.novelAnalysis.emotionalCurve}
+
+### 主要角色
+${config.novelAnalysis.mainCharacters.map(c => `- ${c.name}（${c.role}）：${c.description}，性格${c.personality}，动机：${c.motivation}`).join('\n')}
+
+### 关键人物关系
+${config.novelAnalysis.keyRelationships.join('\n')}
+` : config.referenceNovel ? `\n## 参考小说（基于此小说进行二次创作改编）\n以下是参考小说的内容，请基于其核心故事线、人物关系和情节框架进行短剧改编，但需要适配短剧节奏和格式要求：\n\n${config.referenceNovel.slice(0, 30000)}\n` : ''}
 
 请生成创作方案，JSON 格式如下：
 {
@@ -366,6 +494,11 @@ export async function generateCharacters(
 ): Promise<{ success: boolean; project?: ScreenplayProject; error?: string }> {
   const project = getScreenplay(projectId);
   if (!project?.creativePlan) return { success: false, error: '请先生成创作方案' };
+
+  // 如果开启了群演仓库，走群演驱动路径
+  if (project.config.useCharacterPool) {
+    return generateCharactersFromPool(projectId, onProgress);
+  }
 
   onProgress?.('正在开发角色体系...');
 
@@ -445,6 +578,374 @@ export async function generateCharacters(
 
   onProgress?.('角色体系开发完成');
   return { success: true, project: updateScreenplay(projectId, { characterDesign: result.data, status: 'characters_done' }) };
+}
+
+// ============================================================
+// 步骤2b: 群演仓库驱动角色开发
+// ============================================================
+
+/** 从群演仓库中匹配角色，在世界观中模拟互动，由全知Agent提取最终角色体系 */
+async function generateCharactersFromPool(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; project?: ScreenplayProject; error?: string }> {
+  const project = getScreenplay(projectId);
+  if (!project?.creativePlan) return { success: false, error: '请先生成创作方案' };
+
+  const { config, creativePlan } = project;
+
+  // ====== 第1步：从群演仓库匹配候选角色 ======
+  onProgress?.('🎭 正在从群演仓库中匹配候选角色...');
+
+  const allAgents = listCharacterAgents();
+  if (allAgents.length === 0) {
+    onProgress?.('⚠️ 群演仓库为空，回退到默认角色开发');
+    return generateCharactersDefault(projectId, onProgress);
+  }
+
+  // 用 LLM 从候选角色中智能匹配
+  const candidateSummary = allAgents.slice(0, 200).map(a =>
+    `[${a.id}] ${a.name}（${a.role}）| 来源：${a.source_novel} | 分类：${a.category} | 性格：${a.personality?.slice(0, 80)} | 描述：${a.description?.slice(0, 80)}`
+  ).join('\n');
+
+  const matchSystem = `你是一位专业的选角导演。请从候选角色库中，为以下剧本选择最合适的角色。
+
+选角原则：
+1. 角色的性格、背景要与剧本世界观和题材匹配
+2. 都市题材优先选现代背景角色，古装题材优先选古代背景角色，穿越题材可混选
+3. 需要有对立关系的角色（正派vs反派）
+4. 需要有感情线的角色组合
+5. 选择10-100个角色，优先选择描述丰富、性格鲜明的角色
+6. 至少选10个，最多100个
+
+输出严格JSON格式：
+{ "selectedIds": ["id1", "id2", ...], "reason": "选角理由简述" }`;
+
+  const matchUser = `剧本信息：
+- 题材：${config.genres.join(' + ')}
+- 受众：${config.audience}
+- 基调：${config.tone}
+- 故事线：${creativePlan.storyLine}
+- 核心冲突：${creativePlan.coreConflict}
+- 时空背景：${creativePlan.setting.era}，${creativePlan.setting.location}
+
+候选角色库（共${allAgents.length}个）：
+${candidateSummary}`;
+
+  const matchResult = await llmJSON<{ selectedIds: string[]; reason: string }>(projectId, 'match_pool_agents', matchSystem, matchUser, 'parse');
+
+  let selectedAgents: CharacterAgentRow[];
+  if (matchResult.success && matchResult.data && matchResult.data.selectedIds && matchResult.data.selectedIds.length >= 10) {
+    const idSet = new Set(matchResult.data.selectedIds.slice(0, 100));
+    selectedAgents = allAgents.filter(a => idSet.has(a.id));
+    onProgress?.(`✅ 选中 ${selectedAgents.length} 位候选角色（${matchResult.data.reason}）`);
+  } else {
+    // 降级：按 category 匹配
+    const genreKeywords = config.genres.join(' ');
+    selectedAgents = allAgents.filter(a =>
+      a.category && genreKeywords.includes(a.category) ||
+      a.source_novel && genreKeywords.includes(a.source_novel)
+    ).slice(0, 50);
+    if (selectedAgents.length < 10) selectedAgents = allAgents.slice(0, Math.min(30, allAgents.length));
+    onProgress?.(`⚠️ 智能匹配失败，按分类选中 ${selectedAgents.length} 位候选角色`);
+  }
+
+  // ====== 第2步：世界观模拟 - 并发多轮互动，实时推送 ======
+  onProgress?.(`🌍 将 ${selectedAgents.length} 位角色投入世界观中模拟互动...`);
+
+  // 构建角色档案
+  const buildProfile = (a: CharacterAgentRow) =>
+    `【${a.name}】（${a.role === 'protagonist' ? '主角型' : '配角型'}）\n性格：${a.personality}\n描述：${a.description}\n说话风格：${a.system_prompt?.match(/说话风格[：:](.*?)(?:\n|$)/)?.[1] || '未知'}\n背景：${a.system_prompt?.match(/身份背景[：:](.*?)(?:\n|$)/)?.[1] || a.description?.slice(0, 50)}`;
+
+  const worldSetting = `时代：${creativePlan.setting.era}\n地点：${creativePlan.setting.location}\n社会环境：${creativePlan.setting.socialEnv}\n阶层关系：${creativePlan.setting.classRelation}\n核心冲突：${creativePlan.coreConflict}\n故事线：${creativePlan.storyLine}`;
+
+  // 将角色分成多组（每组5-8人），并发模拟
+  const groupSize = Math.max(5, Math.min(8, Math.ceil(selectedAgents.length / 4)));
+  const groups: CharacterAgentRow[][] = [];
+  for (let i = 0; i < selectedAgents.length; i += groupSize) {
+    groups.push(selectedAgents.slice(i, i + groupSize));
+  }
+
+  type SimInteraction = { participants: string[]; type: string; description: string; tension: number; storyPotential: string };
+  type RoundResult = { interactions: SimInteraction[]; narrative: string };
+
+  // 收集所有角色名（用于前端气泡图）
+  const allCharNames = selectedAgents.map(a => a.name);
+
+  // [SIM] 推送开始事件，包含所有角色信息
+  onProgress?.(`[SIM]${JSON.stringify({
+    type: 'start',
+    totalRounds: groups.length,
+    totalAgents: selectedAgents.length,
+    world: `${creativePlan.setting.era}·${creativePlan.setting.location}`,
+    characters: allCharNames,
+  })}`);
+
+  // 并发执行所有轮次模拟
+  const roundPromises = groups.map((group, round) => {
+    const roundNum = round + 1;
+    // 推送本轮开始
+    onProgress?.(`[SIM]${JSON.stringify({
+      type: 'round_start', round: roundNum, total: groups.length,
+      characters: group.map(a => a.name),
+    })}`);
+
+    const roundSystem = `你是一位全知全能的世界观监控者，正在观察一群角色在新世界中的互动。
+
+世界观设定：
+${worldSetting}
+
+你的任务：
+1. 以第三人称叙事视角，生动描述这组角色进入世界后的互动场景
+2. 每个角色都应该像真实活着的人一样行动，有自己的欲望、恐惧和选择
+3. 描述他们的对话、冲突、合作或暧昧关系
+4. 注意角色之间的化学反应和戏剧张力
+5. 为每个互动事件标注时间线阶段（初遇/发展/转折/高潮），确保事件有时间先后逻辑
+
+输出严格JSON格式：
+{
+  "narrative": "这组角色互动的叙事描述（300-500字，生动有画面感，包含对话和动作）",
+  "interactions": [
+    {
+      "participants": ["角色A", "角色B"],
+      "type": "冲突/合作/暧昧/对抗/依赖/利用",
+      "description": "互动描述（50字以上）",
+      "tension": 1-10,
+      "storyPotential": "这段关系能产生什么样的故事",
+      "timeline": "初遇/发展/转折/高潮"
+    }
+  ]
+}`;
+
+    const roundUser = `本轮进入世界的角色（第${roundNum}组，共${groups.length}组）：\n\n${group.map(buildProfile).join('\n\n')}\n\n请模拟这组角色在世界中的互动，注意标注时间线阶段。`;
+
+    return llmJSON<RoundResult & { interactions: Array<SimInteraction & { timeline?: string }> }>(
+      projectId, `world_sim_round_${roundNum}`, roundSystem, roundUser, 'generate'
+    ).then(result => {
+      if (result.success && result.data) {
+        // 推送本轮结果
+        const narrative = result.data.narrative || '';
+        const interactions = result.data.interactions || [];
+        onProgress?.(`[SIM]${JSON.stringify({
+          type: 'round_result', round: roundNum, narrative,
+          interactions: interactions.map(i => ({
+            p: i.participants, t: i.type, d: i.description,
+            tension: i.tension, timeline: (i as any).timeline || '发展',
+          })),
+        })}`);
+        return result.data;
+      } else {
+        onProgress?.(`[SIM]${JSON.stringify({ type: 'round_fail', round: roundNum })}`);
+        return null;
+      }
+    });
+  });
+
+  // 等待所有并发轮次完成
+  const roundResults = await Promise.all(roundPromises);
+  const allRoundResults = roundResults.filter((r): r is NonNullable<typeof r> => r !== null);
+
+  if (allRoundResults.length === 0) {
+    onProgress?.('⚠️ 世界模拟全部失败，回退到默认角色开发');
+    return generateCharactersDefault(projectId, onProgress);
+  }
+
+  // ====== 第2.5步：跨组交叉互动（让不同组的角色也产生关系） ======
+  onProgress?.(`[SIM]${JSON.stringify({ type: 'cross_start' })}`);
+  onProgress?.('🔗 正在模拟跨组角色交叉互动...');
+
+  // 从每组中选出张力最高的角色，组成交叉组
+  const topCharsPerGroup = allRoundResults.map(r => {
+    const charMentions = new Map<string, number>();
+    for (const inter of (r.interactions || [])) {
+      for (const p of inter.participants) {
+        charMentions.set(p, (charMentions.get(p) || 0) + inter.tension);
+      }
+    }
+    return [...charMentions.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(e => e[0]);
+  }).flat();
+
+  const crossAgents = selectedAgents.filter(a => topCharsPerGroup.includes(a.name));
+  let crossInteractions: SimInteraction[] = [];
+
+  if (crossAgents.length >= 4) {
+    const crossSystem = `你是一位全知全能的世界观监控者。这些角色来自不同的社交圈，现在他们在同一个世界中相遇了。
+
+世界观设定：
+${worldSetting}
+
+之前各组的互动概要：
+${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`).join('\n')}
+
+你的任务：模拟这些来自不同圈子的角色之间的交叉互动，重点关注跨圈子的冲突和联盟。
+
+输出严格JSON格式：
+{
+  "narrative": "跨组互动叙事（200-400字）",
+  "interactions": [
+    {
+      "participants": ["角色A", "角色B"],
+      "type": "冲突/合作/暧昧/对抗/依赖/利用",
+      "description": "互动描述",
+      "tension": 1-10,
+      "storyPotential": "故事潜力",
+      "timeline": "发展/转折/高潮"
+    }
+  ]
+}`;
+
+    const crossUser = `跨组交叉角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同圈子的角色之间的互动。`;
+
+    const crossResult = await llmJSON<RoundResult>(projectId, 'world_sim_cross', crossSystem, crossUser, 'generate');
+    if (crossResult.success && crossResult.data) {
+      crossInteractions = crossResult.data.interactions || [];
+      onProgress?.(`[SIM]${JSON.stringify({
+        type: 'cross_result',
+        narrative: crossResult.data.narrative || '',
+        interactions: crossInteractions.map(i => ({
+          p: i.participants, t: i.type, d: i.description,
+          tension: i.tension, timeline: (i as any).timeline || '转折',
+        })),
+      })}`);
+    }
+  }
+
+  onProgress?.(`[SIM]${JSON.stringify({ type: 'summarizing' })}`);
+  onProgress?.('🔮 正在汇总世界模拟结果...');
+
+  // 汇总模拟
+  const allInteractions = [...allRoundResults.flatMap(r => r.interactions || []), ...crossInteractions];
+  const allNarratives = allRoundResults.map((r, i) => `【第${i + 1}轮】${r.narrative}`).join('\n\n');
+
+  const summarySystem = `你是一位全知全能的世界观监控者。多轮角色互动模拟已完成，请汇总所有互动结果。
+
+输出严格JSON格式：
+{
+  "naturalAlliances": [["角色A", "角色B"]],
+  "naturalConflicts": [["角色C", "角色D"]],
+  "romancePotential": [{"pair": ["角色E", "角色F"], "chemistry": "化学反应描述"}],
+  "outcasts": ["不适合这个世界的角色名"],
+  "powerDynamics": "权力格局描述",
+  "emergentStory": "这群角色在一起会自然产生什么样的故事（200字以上）"
+}`;
+
+  const summaryUser = `世界观：${worldSetting}\n\n模拟叙事：\n${allNarratives}\n\n所有互动关系（共${allInteractions.length}组）：\n${allInteractions.map(i => `${i.participants.join(' ↔ ')}（${i.type}，张力${i.tension}/10）：${i.description}`).join('\n')}`;
+
+  const summaryResult = await llmJSON<{
+    naturalAlliances: string[][];
+    naturalConflicts: string[][];
+    romancePotential: Array<{ pair: string[]; chemistry: string }>;
+    outcasts: string[];
+    powerDynamics: string;
+    emergentStory: string;
+  }>(projectId, 'world_sim_summary', summarySystem, summaryUser, 'generate');
+
+  const simData = {
+    interactions: allInteractions,
+    naturalAlliances: summaryResult.data?.naturalAlliances || [],
+    naturalConflicts: summaryResult.data?.naturalConflicts || [],
+    romancePotential: summaryResult.data?.romancePotential || [],
+    outcasts: summaryResult.data?.outcasts || [],
+    powerDynamics: summaryResult.data?.powerDynamics || '',
+    emergentStory: summaryResult.data?.emergentStory || allNarratives.slice(0, 500),
+  };
+
+  onProgress?.(`[SIM]${JSON.stringify({
+    type: 'done', interactions: allInteractions.length,
+    alliances: simData.naturalAlliances.length,
+    conflicts: simData.naturalConflicts.length,
+    romances: simData.romancePotential.length,
+  })}`);
+  onProgress?.(`✅ 世界模拟完成 - ${allInteractions.length} 组互动关系`);
+
+  // ====== 第3步：全知Agent提取最终角色体系 ======
+  onProgress?.('👁️ 全知Agent正在从模拟结果中提取最终角色体系...');
+
+  const extractSystem = `你是一位全知全能的故事架构师。基于世界观模拟的结果，你需要从候选角色中提取最终的角色体系。
+
+要求：
+1. 选出6-10个最核心的角色，他们之间的关系最有戏剧张力
+2. 必须包含四层反派体系（小反派→中反派→大反派→可选隐藏反派）
+3. 必须有感情线角色组合
+4. 每个角色都要像真实活着的人，有自己的欲望、恐惧和选择
+5. 角色的性格和行为要基于原始角色档案，但可以根据新世界观做适当调整
+6. 排除那些与世界观格格不入的角色
+
+输出严格JSON格式（与标准角色设计格式一致）。`;
+
+  const extractUser = `世界观模拟结果：
+- 权力格局：${simData.powerDynamics}
+- 自然产生的故事：${simData.emergentStory}
+- 自然联盟：${simData.naturalAlliances?.map(a => a.join(' & ')).join('；') || '无'}
+- 自然冲突：${simData.naturalConflicts?.map(c => c.join(' vs ')).join('；') || '无'}
+- 感情线潜力：${simData.romancePotential?.map(r => `${r.pair.join(' ♥ ')}：${r.chemistry}`).join('；') || '无'}
+- 不适合的角色：${simData.outcasts?.join('、') || '无'}
+
+关键互动（按张力排序）：
+${(simData.interactions || []).sort((a, b) => b.tension - a.tension).slice(0, 15).map(i =>
+  `${i.participants.join(' ↔ ')}（${i.type}，张力${i.tension}/10）：${i.description}`
+).join('\n')}
+
+剧本要求：
+- 题材：${config.genres.join(' + ')}
+- 受众：${config.audience}
+- 基调：${config.tone}
+- 故事线：${creativePlan.storyLine}
+- 核心冲突：${creativePlan.coreConflict}
+- 总集数：${config.totalEpisodes}集
+
+候选角色原始档案：
+${selectedAgents.filter(a => !simData.outcasts?.includes(a.name)).map(a =>
+  `${a.name}：${a.personality}，${a.description?.slice(0, 100)}`
+).join('\n')}
+
+请从中提取6-10个最终角色，JSON格式：
+{
+  "characters": [
+    {
+      "id": "C01",
+      "name": "角色名",
+      "age": "年龄",
+      "appearance": "外貌特征",
+      "personality": ["性格关键词1", "性格关键词2"],
+      "publicIdentity": "公开身份",
+      "realIdentity": "真实身份",
+      "motivation": "核心动机",
+      "conflictPoint": "最大冲突点",
+      "satisfactionRole": "爽点功能",
+      "catchphrase": "口头禅",
+      "arc": "人物弧光",
+      "villainLayer": 0
+    }
+  ],
+  "relationships": [{"from": "角色A", "to": "角色B", "relation": "关系描述"}],
+  "romanceLine": [{"episode": 1, "event": "感情线节点"}],
+  "villainSystem": {"layer1": [], "layer2": [], "layer3": [], "layer4": []}
+}`;
+
+  const extractResult = await llmJSON<CharacterDesign>(projectId, 'extract_final_characters', extractSystem, extractUser, 'generate');
+  if (!extractResult.success || !extractResult.data) {
+    onProgress?.('⚠️ 角色提取失败，回退到默认角色开发');
+    return generateCharactersDefault(projectId, onProgress);
+  }
+
+  onProgress?.(`✅ 最终角色体系确定 - ${extractResult.data.characters?.length || 0} 位角色`);
+  return { success: true, project: updateScreenplay(projectId, { characterDesign: extractResult.data, status: 'characters_done' }) };
+}
+
+/** 默认角色开发（generateCharacters 的原始逻辑提取，用于降级回退） */
+async function generateCharactersDefault(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; project?: ScreenplayProject; error?: string }> {
+  const project = getScreenplay(projectId);
+  if (!project?.creativePlan) return { success: false, error: '请先生成创作方案' };
+  // 临时关闭 useCharacterPool 避免递归
+  const origConfig = project.config;
+  project.config = { ...origConfig, useCharacterPool: false };
+  const result = await generateCharacters(projectId, onProgress);
+  project.config = origConfig;
+  return result;
 }
 
 // ============================================================
