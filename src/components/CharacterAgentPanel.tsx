@@ -1,7 +1,8 @@
-// 群演仓库面板 - 展示从小说转漫剧提取的角色Agent，按来源小说分类
-import { useState, useEffect } from 'react';
+// 群演仓库面板 - 卡片式布局 + 多维度筛选（角色类型/标签/来源）
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { UserIcon, TrashIcon } from './Icons';
+import { UserIcon, TrashIcon, CloseIcon } from './Icons';
+import FilterBar from './FilterBar';
 
 interface CharacterAgentItem {
   id: string;
@@ -22,24 +23,27 @@ interface CharacterAgentDetail extends CharacterAgentItem {
   costumeDesc: string;
 }
 
+// 角色类型配置
+const ROLE_CONFIG: Record<string, { zh: string; color: string; border: string; bg: string }> = {
+  protagonist: { zh: '主角', color: 'text-yellow-400', border: 'border-yellow-500/20', bg: 'bg-yellow-500/10' },
+  supporting:  { zh: '配角', color: 'text-blue-400',   border: 'border-blue-500/20',   bg: 'bg-blue-500/10' },
+  minor:       { zh: '龙套', color: 'text-gray-400',   border: 'border-white/10',       bg: 'bg-white/5' },
+};
+
 export default function CharacterAgentPanel() {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
   const [agents, setAgents] = useState<CharacterAgentItem[]>([]);
-  const [grouped, setGrouped] = useState<Record<string, CharacterAgentItem[]>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterAgentDetail | null>(null);
   const [loading, setLoading] = useState(false);
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [filterRole, setFilterRole] = useState<string | null>(null);
+  const [filterTag, setFilterTag] = useState<string | null>(null);
+  const [filterNovel, setFilterNovel] = useState<string | null>(null);
 
   const fetchAgents = () => {
     fetch('/api/character-agents').then(r => r.json()).then(d => {
       if (d?.agents) setAgents(d.agents);
-      if (d?.grouped) {
-        setGrouped(d.grouped);
-        // 默认展开所有分组
-        setExpandedGroups(new Set(Object.keys(d.grouped)));
-      }
     }).catch(() => {});
   };
 
@@ -59,34 +63,45 @@ export default function CharacterAgentPanel() {
   const handleDelete = async (id: string) => {
     await fetch(`/api/character-agents/${id}`, { method: 'DELETE' });
     setAgents(prev => prev.filter(a => a.id !== id));
-    // 更新分组
-    setGrouped(prev => {
-      const next = { ...prev };
-      for (const key of Object.keys(next)) {
-        next[key] = next[key].filter(a => a.id !== id);
-        if (next[key].length === 0) delete next[key];
-      }
-      return next;
-    });
     if (selectedId === id) { setSelectedId(null); setDetail(null); }
   };
 
-  const toggleGroup = (key: string) => {
-    setExpandedGroups(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
+  const roleLabel = (role: string) => isZh ? (ROLE_CONFIG[role]?.zh || role) : role;
+  const roleStyle = (role: string) => ROLE_CONFIG[role] || ROLE_CONFIG.minor;
+
+  // 动态提取筛选维度
+  const roleOptions = useMemo(() => {
+    const map = new Map<string, number>();
+    agents.forEach(a => { if (a.role) map.set(a.role, (map.get(a.role) || 0) + 1); });
+    return Array.from(map, ([key, count]) => ({
+      key, label: isZh ? (ROLE_CONFIG[key]?.zh || key) : key, count,
+    }));
+  }, [agents, isZh]);
+
+  const tagOptions = useMemo(() => {
+    const map = new Map<string, number>();
+    agents.forEach(a => a.tags?.forEach(t => map.set(t, (map.get(t) || 0) + 1)));
+    return Array.from(map, ([key, count]) => ({ key, label: key, count }))
+      .sort((a, b) => b.count - a.count).slice(0, 15);
+  }, [agents]);
+
+  const novelOptions = useMemo(() => {
+    const map = new Map<string, number>();
+    agents.forEach(a => { if (a.sourceNovel) map.set(a.sourceNovel, (map.get(a.sourceNovel) || 0) + 1); });
+    return Array.from(map, ([key, count]) => ({ key, label: `📖 ${key}`, count }));
+  }, [agents]);
+
+  const filteredAgents = useMemo(() => {
+    return agents.filter(a => {
+      if (filterRole && a.role !== filterRole) return false;
+      if (filterTag && !a.tags?.includes(filterTag)) return false;
+      if (filterNovel && a.sourceNovel !== filterNovel) return false;
+      return true;
     });
-  };
+  }, [agents, filterRole, filterTag, filterNovel]);
 
-  const roleLabel = (role: string) => {
-    if (!isZh) return role;
-    return role === 'protagonist' ? '主角' : role === 'supporting' ? '配角' : '龙套';
-  };
-
-  const roleColor = (role: string) => {
-    return role === 'protagonist' ? 'text-yellow-400 bg-yellow-500/10' : role === 'supporting' ? 'text-blue-400 bg-blue-500/10' : 'text-gray-400 bg-white/5';
-  };
+  const hasFilter = filterRole || filterTag || filterNovel;
+  const clearFilters = () => { setFilterRole(null); setFilterTag(null); setFilterNovel(null); };
 
   if (agents.length === 0) {
     return (
@@ -100,150 +115,226 @@ export default function CharacterAgentPanel() {
     );
   }
 
-  const groupKeys = Object.keys(grouped);
-
   return (
     <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">
-      <div className="max-w-4xl mx-auto px-6 py-10 space-y-6">
-        <div className="flex items-center gap-2 mb-4 text-gray-400">
-          <span className="text-lg">🎭</span>
-          <span className="text-sm font-medium">{isZh ? '群演仓库' : 'Cast Agents'}</span>
-          <span className="text-xs bg-white/5 px-2 py-0.5 rounded-full text-gray-500">{agents.length}</span>
+      <div className="max-w-[1400px] mx-auto px-6 md:px-10 py-8 space-y-6">
+        {/* 筛选区域 */}
+        <div className="bg-[#131313] rounded-2xl border border-white/5 p-4 space-y-3">
+          {roleOptions.length > 0 && (
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider w-12 flex-shrink-0">{isZh ? '类型' : 'Role'}</span>
+              <FilterBar items={roleOptions} active={filterRole} onSelect={setFilterRole} allLabel={isZh ? '全部' : 'All'} />
+            </div>
+          )}
+          {tagOptions.length > 0 && (
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider w-12 flex-shrink-0">{isZh ? '特点' : 'Tags'}</span>
+              <FilterBar items={tagOptions} active={filterTag} onSelect={setFilterTag} allLabel={isZh ? '全部' : 'All'} />
+            </div>
+          )}
+          {novelOptions.length > 1 && (
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider w-12 flex-shrink-0">{isZh ? '来源' : 'Source'}</span>
+              <FilterBar items={novelOptions} active={filterNovel} onSelect={setFilterNovel} allLabel={isZh ? '全部' : 'All'} />
+            </div>
+          )}
+          <div className="flex items-center justify-between pt-1">
+            <span className="text-[10px] text-gray-600">
+              {filteredAgents.length === agents.length
+                ? `${agents.length} ${isZh ? '个角色' : 'characters'}`
+                : `${filteredAgents.length} / ${agents.length} ${isZh ? '个角色' : 'characters'}`}
+            </span>
+            {hasFilter && (
+              <button onClick={clearFilters} className="text-[10px] text-gray-500 hover:text-green-400 transition-colors">
+                {isZh ? '清除筛选' : 'Clear filters'}
+              </button>
+            )}
+          </div>
         </div>
 
-        {groupKeys.map(novelName => {
-          const groupAgents = grouped[novelName] || [];
-          const isExpanded = expandedGroups.has(novelName);
-          return (
-            <div key={novelName} className="rounded-2xl border border-white/5 overflow-hidden">
-              {/* 分组标题 */}
-              <button
-                onClick={() => toggleGroup(novelName)}
-                className="w-full flex items-center gap-3 px-5 py-4 bg-[#111] hover:bg-[#161616] transition-colors text-left"
-              >
-                <span className="text-base">📖</span>
-                <span className="text-sm font-bold text-gray-200 flex-1">{novelName}</span>
-                <span className="text-xs text-gray-500 bg-white/5 px-2 py-0.5 rounded-full">{groupAgents.length} {isZh ? '个角色' : 'chars'}</span>
-                <svg className={`w-4 h-4 text-gray-500 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
+        {/* 角色卡片网格 */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+          {filteredAgents.map(a => {
+            const rs = roleStyle(a.role);
+            const mainImg = a.profileImages?.main;
+            return (
+              <div key={a.id} onClick={() => handleSelect(a.id)}
+                className={`group/card relative rounded-2xl border overflow-hidden cursor-pointer transition-all duration-300 hover:translate-y-[-2px] ${
+                  selectedId === a.id ? 'border-green-500/30 shadow-xl shadow-green-900/10' : 'border-white/5 hover:border-white/15 hover:shadow-xl hover:shadow-black/50'
+                }`}>
+                <div className="aspect-[3/4] bg-[#111] relative overflow-hidden">
+                  {mainImg ? (
+                    <img src={mainImg} alt={a.name} className="w-full h-full object-cover transition-transform duration-500 group-hover/card:scale-105" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-[#1a1a1a] to-[#111]">
+                      <UserIcon className="w-12 h-12 text-gray-700" />
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
+                  <div className="absolute top-2.5 left-2.5">
+                    <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${rs.color} ${rs.bg} ${rs.border} border backdrop-blur-sm`}>
+                      {roleLabel(a.role)}
+                    </span>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); handleDelete(a.id); }}
+                    className="absolute top-2.5 right-2.5 w-6 h-6 rounded-full bg-black/50 hover:bg-red-500/80 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover/card:opacity-100 transition-all border border-white/10"
+                    title={isZh ? '删除' : 'Delete'}>
+                    <TrashIcon className="w-2.5 h-2.5 text-white" />
+                  </button>
+                  <div className="absolute bottom-0 left-0 right-0 p-3">
+                    <h3 className="text-sm font-bold text-white mb-0.5 truncate">{a.name}</h3>
+                    <p className="text-[10px] text-gray-300/70 line-clamp-2 leading-relaxed">{a.personality || a.description}</p>
+                    {a.tags?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {a.tags.slice(0, 2).map((tag, i) => (
+                          <span key={i} className="text-[8px] px-1.5 py-0.5 rounded bg-white/10 text-gray-300 backdrop-blur-sm">{tag}</span>
+                        ))}
+                        {a.tags.length > 2 && <span className="text-[8px] text-gray-500">+{a.tags.length - 2}</span>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="px-3 py-2 bg-[#131313] flex items-center justify-between">
+                  <span className="text-[9px] text-gray-500 truncate flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-green-500/50 flex-shrink-0" />
+                    {a.sourceNovel}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {filteredAgents.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-20">
+            <p className="text-sm text-gray-500 mb-2">{isZh ? '没有匹配的角色' : 'No matching characters'}</p>
+            <button onClick={clearFilters} className="text-xs text-green-400 hover:text-green-300 transition-colors">
+              {isZh ? '清除筛选' : 'Clear filters'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* 详情侧滑面板 */}
+      {selectedId && (
+        <div className="fixed inset-0 z-[100] flex justify-end animate-fade-in" onClick={() => { setSelectedId(null); setDetail(null); }}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative w-full max-w-lg bg-[#111] border-l border-white/10 shadow-2xl overflow-y-auto custom-scrollbar animate-slide-in-right"
+            onClick={e => e.stopPropagation()}>
+            <div className="sticky top-0 z-10 bg-[#111]/95 backdrop-blur-md border-b border-white/5 px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-lg">🎭</span>
+                <span className="text-sm font-bold text-white">{isZh ? '角色详情' : 'Character Details'}</span>
+              </div>
+              <button onClick={() => { setSelectedId(null); setDetail(null); }}
+                className="p-2 rounded-xl hover:bg-white/10 text-gray-400 hover:text-white transition-colors">
+                <CloseIcon className="w-5 h-5" />
               </button>
-
-              {isExpanded && (
-                <div className="divide-y divide-white/5">
-                  {groupAgents.map(a => (
-                    <div key={a.id} className={`transition-all duration-300 ${selectedId === a.id ? 'bg-[#161616]' : 'bg-[#0d0d0d]'}`}>
-                      <button onClick={() => handleSelect(a.id)}
-                        className="w-full flex items-center gap-4 px-5 py-4 text-left transition-colors hover:bg-white/[0.02]">
-                        {/* 角色头像 */}
-                        <div className="w-11 h-11 rounded-xl overflow-hidden flex-shrink-0 bg-[#1a1a1a]">
-                          {a.profileImages?.main ? (
-                            <img src={a.profileImages.main} alt={a.name} className="w-full h-full object-cover" />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <UserIcon className="w-5 h-5 text-gray-600" />
-                            </div>
-                          )}
+            </div>
+            {loading ? (
+              <div className="flex items-center justify-center py-20">
+                <div className="w-6 h-6 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
+              </div>
+            ) : detail ? (
+              <div className="space-y-5">
+                {detail.profileImages?.main && (
+                  <div className="relative aspect-[3/4] max-h-[360px] overflow-hidden">
+                    <img src={detail.profileImages.main} alt={detail.name} className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 bg-gradient-to-t from-[#111] via-transparent to-transparent" />
+                    <div className="absolute bottom-4 left-6 right-6">
+                      <div className="flex items-center gap-2 mb-1">
+                        <h2 className="text-xl font-bold text-white">{detail.name}</h2>
+                        <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold ${roleStyle(detail.role).color} ${roleStyle(detail.role).bg} ${roleStyle(detail.role).border} border`}>
+                          {roleLabel(detail.role)}
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-300/80">{detail.sourceNovel}</p>
+                    </div>
+                  </div>
+                )}
+                <div className="px-6 space-y-5">
+                  {!detail.profileImages?.main && (
+                    <div className="flex items-center gap-3 pt-2">
+                      <div className="w-14 h-14 rounded-2xl bg-[#1a1a1a] flex items-center justify-center">
+                        <UserIcon className="w-7 h-7 text-gray-600" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-lg font-bold text-white">{detail.name}</h2>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-lg font-bold ${roleStyle(detail.role).color} ${roleStyle(detail.role).bg} ${roleStyle(detail.role).border} border`}>
+                            {roleLabel(detail.role)}
+                          </span>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                            <h3 className={`text-sm font-bold truncate ${selectedId === a.id ? 'text-white' : 'text-gray-300'}`}>{a.name}</h3>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${roleColor(a.role)}`}>{roleLabel(a.role)}</span>
-                          </div>
-                          <p className="text-xs text-gray-500 truncate">{a.personality || a.description}</p>
+                        <p className="text-xs text-gray-500">{detail.sourceNovel}</p>
+                      </div>
+                    </div>
+                  )}
+                  <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
+                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '角色描述' : 'Description'}</p>
+                    <p className="text-sm text-gray-300 leading-relaxed">{detail.description}</p>
+                  </div>
+                  {(detail.personality || detail.costumeDesc) && (
+                    <div className="grid grid-cols-1 gap-4">
+                      {detail.personality && (
+                        <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
+                          <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '性格特质' : 'Personality'}</p>
+                          <p className="text-xs text-gray-400 leading-relaxed">{detail.personality}</p>
                         </div>
-                      </button>
-
-                      {/* 展开详情 */}
-                      {selectedId === a.id && (
-                        <div className="px-5 pb-5 pt-2 animate-fade-in">
-                          <div className="border-t border-white/5 pt-4 space-y-4">
-                            {loading ? (
-                              <div className="flex items-center gap-2 text-sm text-gray-500 py-4">
-                                <div className="w-4 h-4 border-2 border-green-500 border-t-transparent rounded-full animate-spin" />
-                                {isZh ? '加载详情...' : 'Loading...'}
-                              </div>
-                            ) : detail ? (
-                              <>
-                                {/* 角色描述 */}
-                                <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
-                                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '角色描述' : 'Description'}</p>
-                                  <p className="text-sm text-gray-300 leading-relaxed">{detail.description}</p>
-                                </div>
-
-                                {/* 性格 & 视觉 */}
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                  {detail.personality && (
-                                    <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
-                                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '性格特质' : 'Personality'}</p>
-                                      <p className="text-xs text-gray-400 leading-relaxed">{detail.personality}</p>
-                                    </div>
-                                  )}
-                                  {detail.costumeDesc && (
-                                    <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
-                                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '服化道' : 'Costume'}</p>
-                                      <p className="text-xs text-gray-400 leading-relaxed">{detail.costumeDesc}</p>
-                                    </div>
-                                  )}
-                                </div>
-
-                                {/* 角色档案图 */}
-                                {detail.profileImages && Object.keys(detail.profileImages).length > 0 && (
-                                  <div>
-                                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '角色档案图' : 'Profile Images'}</p>
-                                    <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-                                      {Object.entries(detail.profileImages).map(([key, url]) => (
-                                        url && typeof url === 'string' && (
-                                          <img key={key} src={url} alt={key} className="w-20 h-20 rounded-lg object-cover border border-white/10 flex-shrink-0" />
-                                        )
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-
-                                {/* System Prompt */}
-                                <div>
-                                  <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '角色Agent提示词' : 'Character Agent Prompt'}</p>
-                                  <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5 font-mono text-xs text-gray-400 max-h-48 overflow-y-auto custom-scrollbar leading-relaxed whitespace-pre-wrap">
-                                    {detail.systemPrompt}
-                                  </div>
-                                </div>
-
-                                {/* 标签 */}
-                                {detail.tags?.length > 0 && (
-                                  <div className="flex flex-wrap gap-2">
-                                    {detail.tags.map((tag, i) => (
-                                      <span key={i} className="text-[10px] px-2 py-1 rounded-full bg-white/5 text-gray-400 border border-white/5">{tag}</span>
-                                    ))}
-                                  </div>
-                                )}
-
-                                {/* 操作按钮 */}
-                                <div className="flex gap-3 pt-2">
-                                  <button onClick={() => {
-                                    navigator.clipboard.writeText(detail.systemPrompt);
-                                  }}
-                                    className="flex-1 py-2.5 rounded-xl bg-white/5 text-gray-300 hover:bg-white/10 hover:text-white transition-colors text-xs font-medium flex items-center justify-center gap-2">
-                                    <span>📋</span> {isZh ? '复制提示词' : 'Copy Prompt'}
-                                  </button>
-                                  <button onClick={() => handleDelete(a.id)}
-                                    className="px-6 py-2.5 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors text-xs font-medium flex items-center gap-2">
-                                    <TrashIcon className="w-3.5 h-3.5" /> {isZh ? '删除' : 'Delete'}
-                                  </button>
-                                </div>
-                              </>
-                            ) : null}
-                          </div>
+                      )}
+                      {detail.costumeDesc && (
+                        <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5">
+                          <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '服化道' : 'Costume'}</p>
+                          <p className="text-xs text-gray-400 leading-relaxed">{detail.costumeDesc}</p>
                         </div>
                       )}
                     </div>
-                  ))}
+                  )}
+                  {detail.profileImages && Object.keys(detail.profileImages).length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">{isZh ? '角色档案图' : 'Profile Images'}</p>
+                      <div className="grid grid-cols-4 gap-2">
+                        {Object.entries(detail.profileImages).map(([key, url]) => (
+                          url && typeof url === 'string' && (
+                            <div key={key} className="relative group/img aspect-square rounded-xl overflow-hidden bg-[#0a0a0a] border border-white/5">
+                              <img src={url} alt={key} className="w-full h-full object-cover transition-transform duration-300 group-hover/img:scale-110" />
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/img:opacity-100 transition-opacity flex items-end p-1.5">
+                                <span className="text-[9px] text-white/80 bg-black/50 px-1.5 py-0.5 rounded backdrop-blur-sm">{key}</span>
+                              </div>
+                            </div>
+                          )
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {detail.tags?.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {detail.tags.map((tag, i) => (
+                        <span key={i} className="text-[10px] px-2.5 py-1 rounded-full bg-white/5 text-gray-400 border border-white/5">{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                  <div>
+                    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">{isZh ? '角色Agent提示词' : 'Character Agent Prompt'}</p>
+                    <div className="bg-[#0a0a0a] rounded-xl p-4 border border-white/5 font-mono text-xs text-gray-400 max-h-48 overflow-y-auto custom-scrollbar leading-relaxed whitespace-pre-wrap">
+                      {detail.systemPrompt}
+                    </div>
+                  </div>
+                  <div className="flex gap-3 pt-2 sticky bottom-0 bg-[#111] py-4 border-t border-white/5">
+                    <button onClick={() => { navigator.clipboard.writeText(detail.systemPrompt); }}
+                      className="flex-1 py-3 rounded-xl bg-green-600/20 text-green-400 hover:bg-green-600/30 transition-colors text-sm font-medium flex items-center justify-center gap-2 border border-green-500/20">
+                      <span>📋</span> {isZh ? '复制提示词' : 'Copy Prompt'}
+                    </button>
+                    <button onClick={() => handleDelete(detail.id)}
+                      className="px-6 py-3 rounded-xl bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors text-sm font-medium flex items-center gap-2 border border-red-500/20">
+                      <TrashIcon className="w-4 h-4" /> {isZh ? '删除' : 'Delete'}
+                    </button>
+                  </div>
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

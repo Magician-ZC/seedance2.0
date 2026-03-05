@@ -35,6 +35,7 @@ interface AgentFactoryProps {
   onMinimize?: () => void;
   onStatusChange?: (status: { step: string; stepLabel: string; loading: boolean; projectTitle?: string }) => void;
   hidden?: boolean;
+  resumeProjectId?: string | null;
 }
 type Step = 'upload' | 'dna' | 'agents' | 'evolving' | 'result';
 const STEPS: Step[] = ['upload', 'dna', 'agents', 'evolving', 'result'];
@@ -44,17 +45,19 @@ const STEP_LABELS: Record<Step, { zh: string; en: string }> = {
   result: { zh: '最终结果', en: 'Result' },
 };
 
-function useTaskProgress(taskId: string | null, onDone: () => void) {
+function useTaskProgress(taskId: string | null, onDone: (signal?: string) => void, reconnectKey?: number) {
   const [logs, setLogs] = useState<string[]>([]);
   const [error, setError] = useState('');
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
   useEffect(() => {
-    if (!taskId) return;
+    // taskId 变化时始终清除旧日志
     setLogs([]); setError('');
+    if (!taskId) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
     let done = false;
+    let lastRefresh = 0;
     ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId }));
     ws.onmessage = (evt) => {
       try {
@@ -65,15 +68,21 @@ function useTaskProgress(taskId: string | null, onDone: () => void) {
           const errorText = msg.data?.error || msg.error;
           if (status === 'processing' && progressText) {
             setLogs(prev => [...prev, progressText]);
+            // 每隔5秒最多刷新一次项目数据，让 EvolutionDisplay 实时更新
+            const now = Date.now();
+            if (now - lastRefresh > 5000) {
+              lastRefresh = now;
+              onDoneRef.current('refresh');
+            }
           } else if (status === 'done') { done = true; setLogs(prev => [...prev, '✅ 完成']); onDoneRef.current(); ws.close(); }
           else if (status === 'error') { setError(errorText || '处理失败'); onDoneRef.current(); ws.close(); }
         }
       } catch { /* ignore */ }
     };
-    ws.onerror = () => setError('WebSocket 连接失败');
-    ws.onclose = () => { if (!done) { /* 连接意外断开，也触发刷新 */ onDoneRef.current(); } };
+    ws.onerror = () => { /* WebSocket 错误不清除 taskId，等重连 */ };
+    ws.onclose = () => { if (!done) { /* 连接断开，刷新项目数据 */ onDoneRef.current('refresh'); } };
     return () => { done = true; ws.close(); };
-  }, [taskId]);
+  }, [taskId, reconnectKey]);
   return { logs, error };
 }
 
@@ -327,7 +336,7 @@ function EvolutionDisplay({ project, isZh, loading, onRunFull, onStop }: { proje
   );
 }
 
-export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidden }: AgentFactoryProps) {
+export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidden, resumeProjectId }: AgentFactoryProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
   const [step, setStep] = useState<Step>('upload');
@@ -348,11 +357,13 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
   const [selectedModelIdx, setSelectedModelIdx] = useState<number>(-1);
   const [globalNsfwEnabled, setGlobalNsfwEnabled] = useState(false);
   const [projectNsfw, setProjectNsfw] = useState(false);
+  // WebSocket 重连 key：从 hidden 恢复时递增，触发 useTaskProgress 重新连接
+  const [wsReconnectKey, setWsReconnectKey] = useState(0);
 
   // 组件挂载时检查未完成项目 & 加载模型列表
   useEffect(() => {
     fetch('/api/factory/list').then(r => r.json()).then(data => {
-      if (data?.projects?.length > 0) setExistingProjects(data.projects);
+      if (data?.projects?.length > 0) setExistingProjects(data.projects.filter((p: { status: string }) => p.status !== 'completed'));
     }).catch(() => {});
     // 加载可用模型 & NSFW 状态
     Promise.all([fetch('/api/llm-config'), fetch('/api/llm-config/extra'), fetch('/api/nsfw')])
@@ -376,8 +387,31 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
       }).catch(() => {});
   }, []);
 
+  // 从后台恢复到前台且在 upload 步骤时，刷新项目列表
+  useEffect(() => {
+    if (!hidden && step === 'upload' && !project) {
+      fetch('/api/factory/list').then(r => r.json()).then(data => {
+        if (data?.projects) setExistingProjects(data.projects.filter((p: { status: string }) => p.status !== 'completed'));
+      }).catch(() => {});
+    }
+    // 从后台恢复且有进行中的任务时，重新连接 WebSocket
+    if (!hidden && taskId) {
+      setWsReconnectKey(k => k + 1);
+    }
+  }, [hidden]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 外部传入 resumeProjectId 时自动恢复对应项目
+  useEffect(() => {
+    if (resumeProjectId && !hidden && resumeProjectId !== project?.id) {
+      resumeProject(resumeProjectId);
+    }
+  }, [resumeProjectId, hidden]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const resumeProject = async (id: string) => {
+    // 切换项目时先清除旧任务，触发日志清空
+    setTaskId(null);
     setLoading(true); setError('');
+    let keepLoading = false;
     try {
       const res = await fetch(`/api/factory/${id}`);
       const data = await res.json();
@@ -394,9 +428,14 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
         if (p.status === 'parsed' && p.totalAgents > 0) target = 'agents';
         setStep(target);
         setExistingProjects([]);
+        // 如果项目正在进化中，重新连接 WebSocket 接收进度
+        if (p.status === 'evolving') {
+          setTaskId(`factory_full_${id}`);
+          keepLoading = true; // finally 中不清除 loading
+        }
       }
     } catch (err) { setError((err as Error).message); }
-    finally { setLoading(false); }
+    finally { if (!keepLoading) setLoading(false); }
   };
 
   const refreshProject = useCallback(async () => {
@@ -408,8 +447,15 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
     } catch { /* ignore */ }
   }, [project?.id]);
 
-  const handleTaskDone = useCallback(() => { setTaskId(null); setLoading(false); refreshProject(); }, [refreshProject]);
-  const { logs, error: wsError } = useTaskProgress(taskId, handleTaskDone);
+  const handleTaskDone = useCallback((signal?: string) => {
+    if (signal === 'refresh') {
+      // 中间刷新：只拉取最新项目数据，不清除 taskId
+      refreshProject();
+      return;
+    }
+    setTaskId(null); setLoading(false); refreshProject();
+  }, [refreshProject]);
+  const { logs, error: wsError } = useTaskProgress(taskId, handleTaskDone, wsReconnectKey);
 
   // 通知父组件当前状态（用于后台运行浮动指示器）
   useEffect(() => {
@@ -535,10 +581,26 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
           })}
         </div>
 
-        <button onClick={onMinimize || onClose}
-          className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
-          {isZh ? '后台运行' : 'Run in Background'}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* 当已有项目时，显示"项目列表"按钮，可切换/新建项目 */}
+          {project && step !== 'upload' && (
+            <button onClick={() => {
+              // 回到项目列表，重新拉取未完成项目
+              fetch('/api/factory/list').then(r => r.json()).then(data => {
+                if (data?.projects) setExistingProjects(data.projects.filter((p: { status: string }) => p.status !== 'completed'));
+              }).catch(() => {});
+              setProject(null); setStep('upload'); setTaskId(null); setLoading(false);
+              setError(''); setSavedAgent(null); setNovelText('');
+            }}
+              className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors flex items-center gap-1.5">
+              📂 {isZh ? '项目列表' : 'Projects'}
+            </button>
+          )}
+          <button onClick={onMinimize || onClose}
+            className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
+            {isZh ? '后台运行' : 'Run in Background'}
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar bg-gradient-to-b from-[#0a0a0a] to-[#111]">

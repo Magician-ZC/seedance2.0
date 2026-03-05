@@ -7,6 +7,9 @@ class WsManager {
   private wss: WebSocketServer | null = null;
   // taskId -> Set<WebSocket>
   private subscribers = new Map<string, Set<WebSocket>>();
+  // 消息缓冲：taskId -> 最近的消息列表（解决订阅竞态问题）
+  private messageBuffer = new Map<string, string[]>();
+  private static MAX_BUFFER_SIZE = 50;
 
   init(server: Server): void {
     this.wss = new WebSocketServer({ server, path: '/ws' });
@@ -38,6 +41,14 @@ class WsManager {
       this.subscribers.set(taskId, new Set());
     }
     this.subscribers.get(taskId)!.add(ws);
+
+    // 发送缓冲的历史消息，解决订阅竞态问题
+    const buffered = this.messageBuffer.get(taskId);
+    if (buffered && buffered.length > 0 && ws.readyState === WebSocket.OPEN) {
+      for (const payload of buffered) {
+        ws.send(payload);
+      }
+    }
   }
 
   private unsubscribe(taskId: string, ws: WebSocket): void {
@@ -46,9 +57,6 @@ class WsManager {
 
   // 广播任务状态更新
   broadcast(taskId: string, task: TaskInfo): void {
-    const subs = this.subscribers.get(taskId);
-    if (!subs || subs.size === 0) return;
-
     const elapsed = Math.floor((Date.now() - task.startTime) / 1000);
     let msg: WsMessage;
 
@@ -61,17 +69,33 @@ class WsManager {
     }
 
     const payload = JSON.stringify(msg);
-    for (const ws of subs) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(payload);
+
+    // 缓冲消息（即使还没有订阅者也要缓冲，解决竞态问题）
+    if (!this.messageBuffer.has(taskId)) {
+      this.messageBuffer.set(taskId, []);
+    }
+    const buffer = this.messageBuffer.get(taskId)!;
+    buffer.push(payload);
+    if (buffer.length > WsManager.MAX_BUFFER_SIZE) {
+      buffer.splice(0, buffer.length - WsManager.MAX_BUFFER_SIZE);
+    }
+
+    // 广播给已订阅的客户端
+    const subs = this.subscribers.get(taskId);
+    if (subs && subs.size > 0) {
+      for (const ws of subs) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(payload);
+        }
       }
     }
 
-    // 任务完成后延迟清理订阅
+    // 任务完成后延迟清理订阅和缓冲
     if (task.status === 'done' || task.status === 'error') {
       setTimeout(() => {
         this.subscribers.delete(taskId);
-      }, 5000);
+        this.messageBuffer.delete(taskId);
+      }, 10000);
     }
   }
 }

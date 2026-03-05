@@ -84,6 +84,13 @@ interface ReviewScore {
   issues: Array<{ severity: string; description: string; suggestion: string }>;
 }
 
+interface SubmissionMaterials {
+  episodeOutline: string;
+  ecard: string;
+  characterBios: string;
+  scriptSynopsis: string;
+}
+
 interface ScreenplayProject {
   id: string;
   status: string;
@@ -95,6 +102,7 @@ interface ScreenplayProject {
   reviews: Record<number, ReviewScore>;
   selectedTitle?: string;
   simulationLogs?: string[];
+  submissionMaterials?: SubmissionMaterials;
   createdAt: number;
   updatedAt: number;
 }
@@ -110,8 +118,8 @@ interface ScreenplayCreatorProps {
   hidden?: boolean;
 }
 
-type Step = 'config' | 'plan' | 'characters' | 'directory' | 'writing' | 'review' | 'export';
-const STEPS: Step[] = ['config', 'plan', 'characters', 'directory', 'writing', 'review', 'export'];
+type Step = 'config' | 'plan' | 'characters' | 'directory' | 'writing' | 'review' | 'submission';
+const STEPS: Step[] = ['config', 'plan', 'characters', 'directory', 'writing', 'review', 'submission'];
 
 const STEP_LABELS: Record<Step, { zh: string; en: string }> = {
   config: { zh: '选题定位', en: 'Setup' },
@@ -120,7 +128,7 @@ const STEP_LABELS: Record<Step, { zh: string; en: string }> = {
   directory: { zh: '分集目录', en: 'Directory' },
   writing: { zh: '分集撰写', en: 'Writing' },
   review: { zh: '质量自检', en: 'Review' },
-  export: { zh: '导出', en: 'Export' },
+  submission: { zh: '投稿', en: 'Submit' },
 };
 
 const TONES = ['爽燃', '甜虐', '搞笑', '暗黑', '温情', '甜宠'];
@@ -142,8 +150,9 @@ function useTaskProgress(taskId: string | null, onDone: (signal?: string) => voi
   onDoneRef.current = onDone;
 
   useEffect(() => {
-    if (!taskId) return;
+    // taskId 变化时始终清除旧日志
     setLogs([]); setError('');
+    if (!taskId) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
     let done = false;
@@ -270,7 +279,7 @@ function SimulationPanel({ logs }: { logs: string[] }) {
   const events = parseSimEvents(logs);
   const [selectedChar, setSelectedChar] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<string | null>(null);
-  const graphRef = useRef<any>(); // eslint-disable-line @typescript-eslint/no-explicit-any
+  const graphRef = useRef<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any
 
   if (events.length === 0) return null;
 
@@ -529,8 +538,9 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   // 分集撰写
   const [writingRange, setWritingRange] = useState({ start: 1, end: 5 });
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
-  const [_reviewingEp, setReviewingEp] = useState<number | null>(null);
-  const [exportContent, setExportContent] = useState('');
+  const [reviewingEp, setReviewingEp] = useState<number | null>(null);
+  const [submissionData, setSubmissionData] = useState<SubmissionMaterials | null>(null);
+  const [submissionTab, setSubmissionTab] = useState<'outline' | 'ecard' | 'bios' | 'synopsis'>('outline');
   const [existingProjects, setExistingProjects] = useState<ScreenplayProject[]>([]);
   // 一键优化
   const [reviewAllTaskId, setReviewAllTaskId] = useState<string | null>(null);
@@ -607,14 +617,40 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           setProject(p);
           const statusStepMap: Record<string, Step> = {
             config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-            directory_done: 'directory', writing: 'writing', review: 'review', exported: 'export',
+            directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
           };
           setStep(statusStepMap[p.status] || 'config');
+          if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
           setExistingProjects([]);
         }
       }).catch(() => {});
     }
   }, []);
+
+  // 当 resumeProjectId 从外部变化时（点击不同项目卡片），重新加载对应项目
+  const prevResumeIdRef = useRef(resumeProjectId);
+  useEffect(() => {
+    if (resumeProjectId && resumeProjectId !== prevResumeIdRef.current) {
+      prevResumeIdRef.current = resumeProjectId;
+      // 切换项目时清除旧任务状态
+      setTaskId(null); setLoading(false);
+      fetch(`/api/screenplay/${resumeProjectId}`).then(r => r.json()).then(d => {
+        if (d?.project) {
+          const p = normalizeProject(d.project);
+          setProject(p);
+          const statusStepMap: Record<string, Step> = {
+            config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
+            directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
+          };
+          setStep(statusStepMap[p.status] || 'config');
+          if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
+          else setSubmissionData(null);
+          setExistingProjects([]);
+          setError('');
+        }
+      }).catch(() => {});
+    }
+  }, [resumeProjectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 用 ref 保持最新 project.id，避免 useCallback 闭包过期
   const projectIdRef = useRef<string | undefined>(project?.id);
@@ -662,9 +698,10 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     setProject(normalizeProject(p));
     const statusStepMap: Record<string, Step> = {
       config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'export',
+      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
     };
     setStep(statusStepMap[p.status] || 'config');
+    if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
     setExistingProjects([]);
   };
 
@@ -841,14 +878,21 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     return () => { closed = true; ws.close(); };
   }, [reviewAllTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleExport = async () => {
+  // 生成投稿材料
+  const handleSubmission = async (forceRegenerate = false) => {
     if (!project) return;
+    // 如果已有投稿材料且非强制重新生成，直接展示
+    if (project.submissionMaterials && !forceRegenerate) {
+      setSubmissionData(project.submissionMaterials);
+      setStep('submission');
+      return;
+    }
     setLoading(true); setError('');
     try {
-      const res = await fetch(`/api/screenplay/${project.id}/export`, { method: 'POST' });
+      const res = await fetch(`/api/screenplay/${project.id}/submission`, { method: 'POST' });
       const data = await res.json();
-      if (data?.content) { setExportContent(data.content); setStep('export'); }
-      else setError(data?.error || '导出失败');
+      if (data?.materials) { setSubmissionData(data.materials); setStep('submission'); await refreshProject(); }
+      else setError(data?.error || '投稿材料生成失败');
     } catch (err) { setError((err as Error).message); }
     finally { setLoading(false); }
   };
@@ -862,12 +906,25 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     await refreshProject();
   };
 
-  const handleDownloadExport = () => {
+  // 下载单项投稿材料
+  const handleDownloadMaterial = (content: string, suffix: string) => {
     const title = project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title || '剧本';
-    const blob = new Blob([exportContent], { type: 'text/markdown;charset=utf-8' });
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `${title}-完整剧本.md`; a.click();
+    a.href = url; a.download = `${title}-${suffix}.md`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // 一键下载全部投稿材料
+  const handleDownloadAll = () => {
+    if (!submissionData) return;
+    const title = project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title || '剧本';
+    const all = [submissionData.episodeOutline, submissionData.ecard, submissionData.characterBios, submissionData.scriptSynopsis].join('\n\n---\n\n');
+    const blob = new Blob([all], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${title}-投稿包.md`; a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -876,7 +933,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     if (!project) return;
     const statusMap: Record<string, Step> = {
       config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'export',
+      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
     };
     const targetStep = statusMap[project.status];
     if (targetStep && STEPS.indexOf(targetStep) > STEPS.indexOf(step)) setStep(targetStep);
@@ -928,10 +985,26 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           })}
         </div>
 
-        <button onClick={onMinimize || onClose}
-          className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
-          {isZh ? '后台运行' : 'Run in Background'}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* 当已有项目时，显示"项目列表"按钮，可切换/新建项目 */}
+          {project && step !== 'config' && (
+            <button onClick={() => {
+              // 回到项目列表，重新拉取未完成项目
+              fetch('/api/screenplay/list').then(r => r.json()).then(d => {
+                if (d?.projects) setExistingProjects(d.projects.filter((p: ScreenplayProject) => p.status !== 'exported'));
+              }).catch(() => {});
+              setProject(null); setStep('config'); setTaskId(null); setLoading(false);
+              setError(''); setSubmissionData(null);
+            }}
+              className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors flex items-center gap-1.5">
+              📂 {isZh ? '项目列表' : 'Projects'}
+            </button>
+          )}
+          <button onClick={onMinimize || onClose}
+            className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors">
+            {isZh ? '后台运行' : 'Run in Background'}
+          </button>
+        </div>
       </header>
 
       {/* Content */}
@@ -1563,9 +1636,9 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                   className="px-6 py-3 rounded-xl bg-[#1a1a1a] border border-white/10 text-white font-medium hover:bg-[#222] transition-colors">
                   {isZh ? '进入质量自检' : 'Quality Review'}
                 </button>
-                <button onClick={handleExport}
+                <button onClick={() => handleSubmission()}
                   className="px-8 py-3 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all">
-                  {isZh ? '导出剧本' : 'Export'}
+                  {isZh ? '生成投稿包' : 'Generate Submission'}
                 </button>
               </div>
             </div>
@@ -1599,20 +1672,39 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
               )}
 
               <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">
-                {project?.episodes.map(ep => {
-                  const review = project.reviews[ep.number];
+                {/* 优先使用分集目录（完整集数列表），回退到已撰写集 */}
+                {(project?.episodeDirectory || project?.episodes)?.map(item => {
+                  const epNum = item.number;
+                  if (epNum == null) return null;
+                  const hasScript = project!.episodes.some(e => e.number === epNum);
+                  const review = project!.reviews[epNum];
                   const score = review?.total || 0;
                   const color = score >= 45 ? 'text-green-400' : score >= 35 ? 'text-yellow-400' : score > 0 ? 'text-red-400' : 'text-gray-600';
                   return (
-                    <div key={ep.number} onClick={() => review && setReviewDetailEp(ep.number)}
-                      className={`p-4 rounded-xl bg-[#161616] border border-white/5 hover:border-white/20 transition-all cursor-pointer group relative`}>
-                      <div className="text-xs text-gray-500 mb-1">EP.{ep.number}</div>
-                      <div className={`text-2xl font-bold ${color}`}>{score > 0 ? score : '-'}</div>
-                      {score > 0 && <div className="text-[10px] text-gray-600 mt-1">点击查看详情</div>}
-                      {!review && (
-                        <button onClick={(e) => { e.stopPropagation(); handleReview(ep.number); }}
+                    <div key={epNum} onClick={() => review && setReviewDetailEp(epNum)}
+                      className={`p-4 rounded-xl border transition-all cursor-pointer group relative ${
+                        hasScript ? 'bg-[#161616] border-white/5 hover:border-white/20' : 'bg-[#0e0e0e] border-white/3 opacity-50'
+                      }`}>
+                      <div className="text-xs text-gray-500 mb-1">EP.{epNum}</div>
+                      <div className={`text-2xl font-bold ${hasScript ? color : 'text-gray-700'}`}>
+                        {score > 0 ? score : hasScript ? '-' : '·'}
+                      </div>
+                      {score > 0 && <div className="text-[10px] text-gray-600 mt-1">{isZh ? '点击查看详情' : 'View details'}</div>}
+                      {!hasScript && <div className="text-[10px] text-gray-700 mt-1">{isZh ? '未撰写' : 'Not written'}</div>}
+                      {/* 已撰写但未评审：显示单集自检按钮 */}
+                      {hasScript && !review && (
+                        <button onClick={(e) => { e.stopPropagation(); handleReview(epNum); }}
                           className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl text-xs text-white font-medium">
-                          {isZh ? '单集自检' : 'Review'}
+                          {reviewingEp === epNum ? (isZh ? '自检中...' : 'Reviewing...') : (isZh ? '单集自检' : 'Review')}
+                        </button>
+                      )}
+                      {/* 已评审：hover 显示重新自检按钮 */}
+                      {hasScript && review && (
+                        <button onClick={(e) => { e.stopPropagation(); handleReview(epNum); }}
+                          disabled={reviewingEp === epNum}
+                          className="absolute top-1 right-1 w-6 h-6 flex items-center justify-center rounded-lg bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-white hover:bg-white/10"
+                          title={isZh ? '重新自检' : 'Re-review'}>
+                          {reviewingEp === epNum ? <span className="animate-spin text-[10px]">⏳</span> : <span className="text-xs">↻</span>}
                         </button>
                       )}
                     </div>
@@ -1620,34 +1712,115 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                 })}
               </div>
 
+              {/* 下一步按钮 */}
+              {project?.episodes?.some(ep => project.reviews[ep.number]) && (
+                <div className="flex justify-end pt-4">
+                  <button onClick={() => { handleSubmission(); }}
+                    className="px-8 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02] flex items-center gap-2">
+                    <CheckIcon className="w-4 h-4" />
+                    {isZh ? '下一步：投稿 →' : 'Next: Submit →'}
+                  </button>
+                </div>
+              )}
+
             </div>
           )}
 
-          {/* Step: 导出 */}
-          {step === 'export' && (
-            <div className="flex flex-col items-center justify-center py-20 animate-fade-in">
-              <div className="w-24 h-24 bg-green-500/20 rounded-full flex items-center justify-center mb-6 animate-pulse-glow">
-                <CheckIcon className="w-10 h-10 text-green-400" />
-              </div>
-              <h2 className="text-3xl font-bold text-white mb-4">{isZh ? '创作完成！' : 'All Done!'}</h2>
-              <p className="text-gray-400 mb-10 text-center max-w-md">{isZh ? '你的剧本已准备就绪，支持导出 Markdown 格式或直接进入制作流程。' : 'Your screenplay is ready.'}</p>
-              
-              <div className="flex gap-4">
-                <button onClick={handleDownloadExport}
-                  className="px-8 py-4 rounded-xl bg-[#1a1a1a] border border-white/10 hover:bg-[#222] text-white font-bold transition-all flex items-center gap-2">
-                  <DownloadIcon className="w-5 h-5" />
-                  {isZh ? '下载 Markdown' : 'Download .md'}
-                </button>
-                <button onClick={onClose}
-                  className="px-8 py-4 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all flex items-center gap-2">
-                  <FilmIcon className="w-5 h-5" />
-                  {isZh ? '去制作视频' : 'Make Video'}
-                </button>
+          {/* Step: 投稿 */}
+          {step === 'submission' && (
+            <div className="space-y-6 animate-fade-in">
+              {/* 头部 */}
+              <div className="flex items-center justify-between bg-[#161616] p-6 rounded-2xl border border-white/5">
+                <div>
+                  <h2 className="text-xl font-bold text-white mb-1">{isZh ? '📦 投稿材料' : '📦 Submission Pack'}</h2>
+                  <p className="text-sm text-gray-500">{isZh ? '一键生成平台投稿所需的全部材料' : 'Generate all materials for platform submission'}</p>
+                </div>
+                <div className="flex gap-3">
+                  {!submissionData && (
+                    <button onClick={() => handleSubmission()} disabled={loading}
+                      className="px-6 py-2.5 rounded-xl bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white font-bold transition-all flex items-center gap-2">
+                      <SparkleIcon className="w-4 h-4" />
+                      {loading ? (isZh ? '生成中...' : 'Generating...') : (isZh ? '一键生成投稿包' : 'Generate All')}
+                    </button>
+                  )}
+                  {submissionData && (
+                    <>
+                      <button onClick={() => handleSubmission(true)} disabled={loading}
+                        className="px-5 py-2.5 rounded-xl bg-[#1a1a1a] border border-white/10 hover:bg-[#222] text-white font-medium transition-all flex items-center gap-2 disabled:opacity-50">
+                        <SparkleIcon className="w-4 h-4" />
+                        {loading ? (isZh ? '生成中...' : 'Regenerating...') : (isZh ? '重新生成' : 'Regenerate')}
+                      </button>
+                      <button onClick={handleDownloadAll}
+                        className="px-5 py-2.5 rounded-xl bg-[#1a1a1a] border border-white/10 hover:bg-[#222] text-white font-medium transition-all flex items-center gap-2">
+                        <DownloadIcon className="w-4 h-4" />
+                        {isZh ? '下载全部' : 'Download All'}
+                      </button>
+                      <button onClick={onClose}
+                        className="px-5 py-2.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold transition-all flex items-center gap-2">
+                        <FilmIcon className="w-4 h-4" />
+                        {isZh ? '去制作视频' : 'Make Video'}
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
 
-              <div className="mt-12 w-full max-w-3xl bg-[#161616] rounded-2xl border border-white/5 p-6 max-h-[300px] overflow-y-auto custom-scrollbar">
-                <pre className="text-xs text-gray-500 font-mono whitespace-pre-wrap">{exportContent}</pre>
-              </div>
+              {/* Tab 切换 */}
+              {submissionData && (() => {
+                const tabs: Array<{ key: typeof submissionTab; label: string; icon: string }> = [
+                  { key: 'outline', label: isZh ? '集纲' : 'Episode Outline', icon: '📋' },
+                  { key: 'ecard', label: 'E-card', icon: '🎴' },
+                  { key: 'bios', label: isZh ? '人物小传' : 'Character Bios', icon: '👤' },
+                  { key: 'synopsis', label: isZh ? '剧本大纲' : 'Synopsis', icon: '📖' },
+                ];
+                const contentMap: Record<typeof submissionTab, { content: string; suffix: string }> = {
+                  outline: { content: submissionData.episodeOutline, suffix: '集纲' },
+                  ecard: { content: submissionData.ecard, suffix: 'E-card' },
+                  bios: { content: submissionData.characterBios, suffix: '人物小传' },
+                  synopsis: { content: submissionData.scriptSynopsis, suffix: '剧本大纲' },
+                };
+                const current = contentMap[submissionTab];
+                return (
+                  <>
+                    <div className="flex gap-2 bg-[#111] p-1.5 rounded-xl border border-white/5">
+                      {tabs.map(t => (
+                        <button key={t.key} onClick={() => setSubmissionTab(t.key)}
+                          className={`flex-1 py-2.5 px-4 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-1.5 ${
+                            submissionTab === t.key ? 'bg-white/10 text-white shadow-sm' : 'text-gray-500 hover:text-gray-300 hover:bg-white/5'
+                          }`}>
+                          <span>{t.icon}</span>
+                          <span>{t.label}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* 内容预览 + 下载 */}
+                    <div className="bg-[#161616] rounded-2xl border border-white/5 overflow-hidden">
+                      <div className="flex items-center justify-between px-5 py-3 border-b border-white/5">
+                        <span className="text-sm text-gray-400">{tabs.find(t => t.key === submissionTab)?.icon} {tabs.find(t => t.key === submissionTab)?.label}</span>
+                        <button onClick={() => handleDownloadMaterial(current.content, current.suffix)}
+                          className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
+                          <DownloadIcon className="w-3 h-3" />
+                          {isZh ? '下载' : 'Download'}
+                        </button>
+                      </div>
+                      <div className="p-6 max-h-[50vh] overflow-y-auto custom-scrollbar">
+                        <pre className="text-sm text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">{current.content}</pre>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {/* 未生成时的占位 */}
+              {!submissionData && !loading && (
+                <div className="flex flex-col items-center justify-center py-20 text-gray-500">
+                  <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-4">
+                    <BookIcon className="w-8 h-8 text-gray-600" />
+                  </div>
+                  <p className="text-sm">{isZh ? '点击上方按钮生成投稿材料' : 'Click the button above to generate submission materials'}</p>
+                </div>
+              )}
             </div>
           )}
         </div>

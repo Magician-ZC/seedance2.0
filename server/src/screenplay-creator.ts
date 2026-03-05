@@ -174,6 +174,14 @@ export interface ReviewScore {
   issues: Array<{ severity: '严重' | '建议' | '微调'; description: string; suggestion: string }>;
 }
 
+// 投稿材料
+export interface SubmissionMaterials {
+  episodeOutline: string;     // 集纲：每集一行摘要
+  ecard: string;              // E-card：项目卡片信息
+  characterBios: string;      // 人物小传：每人约300字
+  scriptSynopsis: string;     // 剧本大纲：一段话卖点简介
+}
+
 // 剧本项目完整数据
 export interface ScreenplayProject {
   id: string;
@@ -186,6 +194,7 @@ export interface ScreenplayProject {
   reviews: Record<number, ReviewScore>;
   selectedTitle?: string;
   simulationLogs?: string[];  // 世界观模拟 [SIM] 日志，持久化用于回看和Agent进化
+  submissionMaterials?: SubmissionMaterials;  // 投稿材料
   createdAt: number;
   updatedAt: number;
 }
@@ -209,6 +218,10 @@ export function loadScreenplayProjectsFromDB(): void {
   for (const row of rows) {
     try {
       const project = JSON.parse(row.data as string) as ScreenplayProject;
+      // 确保 episodes 中每个元素都有有效的 number 字段
+      if (Array.isArray(project.episodes)) {
+        project.episodes = project.episodes.filter(e => e && typeof e.number === 'number');
+      }
       screenplayProjects.set(project.id, project);
     } catch { /* 跳过损坏数据 */ }
   }
@@ -1275,57 +1288,47 @@ export async function generateEpisode(
   // 如果配置了Agent，使用Agent的systemPrompt作为基础
   const agentPrompt = config.agentId ? getAgentById(config.agentId)?.system_prompt : null;
 
+  // 通用格式和质量要求（两个分支共用，避免重复）
+  const formatBlock = isDomestic ? `
+- 场景头格式：内景/外景 · 地点 · 日/夜
+- 镜头标记：△ 全景/中景/近景/特写
+- 配乐标记：♪ 音乐描述
+- 台词格式：**角色名**（语气/动作指示）："台词"
+` : `
+- 场景头格式：INT./EXT. LOCATION - DAY/NIGHT
+- 镜头标记：WIDE SHOT/MEDIUM SHOT/CLOSE-UP
+- 配乐标记：♪ Music cue
+- 台词格式：**CHARACTER** (direction): "dialogue"
+`;
+
+  const qualityBlock = `## 质量要求（严格执行，微短剧行业标准：1分钟≈250-300字）
+- 每集3-5个场次
+- 场景描写（description字段）：每个场景50-80字的镜头指示，用2-3个镜头段落（如△全景→△中景→△特写），简洁有画面感，重点写人物动作和关键视觉元素，不要写小说式的大段环境描写
+- 台词对话（dialogues数组）：每个场景4-6轮对话，这是微短剧的核心驱动力。每句台词15-30字，要有冲突感和潜台词，带简短的语气/动作指示（如"冷笑"、"猛地转身"）
+- 每集总字数600-900字（对应1-3分钟屏幕时间），台词占60-70%，场景描写占30-40%
+- 至少使用2种景别
+- 节奏要快，每个场景都要推进剧情或制造冲突，禁止无意义的过渡场景
+- 结尾必须有悬念钩子（类型：${dirItem.hookType}）
+${isFirstEpisode ? '- 第1集前10秒必须抓住观众（直接进入冲突，禁止大段旁白）' : ''}
+${dirItem.mark === '💰' ? '- 付费卡点集：结尾必须制造最强悬念' : ''}`;
+
   const systemPrompt = agentPrompt
     ? `${agentPrompt}
 
 ## 当前任务：撰写第${episodeNumber}集完整剧本
 
 ## 格式要求（${isDomestic ? '国内' : '海外'}模式）
-${isDomestic ? `
-- 场景头格式：内景/外景 · 地点 · 日/夜
-- 镜头标记：△ 全景/中景/近景/特写
-- 配乐标记：♪ 音乐描述
-- 台词格式：**角色名**（语气/动作指示）："台词"
-` : `
-- 场景头格式：INT./EXT. LOCATION - DAY/NIGHT
-- 镜头标记：WIDE SHOT/MEDIUM SHOT/CLOSE-UP
-- 配乐标记：♪ Music cue
-- 台词格式：**CHARACTER** (direction): "dialogue"
-`}
+${formatBlock}
 
-## 质量要求
-- 每集3-5个场次
-- 每集800字以上
-- 至少使用3种景别
-- 台词带语气或动作指示
-- 结尾必须有悬念钩子（类型：${dirItem.hookType}）
-${isFirstEpisode ? '- 第1集前30秒必须抓住观众（直接进入冲突，禁止大段旁白）' : ''}
-${dirItem.mark === '💰' ? '- 付费卡点集：结尾必须制造最强悬念' : ''}
+${qualityBlock}
 
 请输出严格的 JSON 格式。`
     : `你是一位专业的微短剧编剧。请撰写第${episodeNumber}集的完整剧本。
 
 ## 格式要求（${isDomestic ? '国内' : '海外'}模式）
-${isDomestic ? `
-- 场景头格式：内景/外景 · 地点 · 日/夜
-- 镜头标记：△ 全景/中景/近景/特写
-- 配乐标记：♪ 音乐描述
-- 台词格式：**角色名**（语气/动作指示）："台词"
-` : `
-- 场景头格式：INT./EXT. LOCATION - DAY/NIGHT
-- 镜头标记：WIDE SHOT/MEDIUM SHOT/CLOSE-UP
-- 配乐标记：♪ Music cue
-- 台词格式：**CHARACTER** (direction): "dialogue"
-`}
+${formatBlock}
 
-## 质量要求
-- 每集3-5个场次
-- 每集800字以上
-- 至少使用3种景别
-- 台词带语气或动作指示
-- 结尾必须有悬念钩子（类型：${dirItem.hookType}）
-${isFirstEpisode ? '- 第1集前30秒必须抓住观众（直接进入冲突，禁止大段旁白）' : ''}
-${dirItem.mark === '💰' ? '- 付费卡点集：结尾必须制造最强悬念' : ''}
+${qualityBlock}
 
 请输出严格的 JSON 格式。`;
 
@@ -1367,9 +1370,13 @@ ${simContext}
       "sceneNumber": 1,
       "location": "内景 · 客厅 · 日",
       "characters": ["角色A", "角色B"],
-      "description": "△ （全景）场景描写...\\n△ （中景）人物动作...\\n△ （特写）关键细节...",
+      "description": "△ 全景：昏暗客厅，电视蓝光映墙，茶几散落揉皱的文件和冷咖啡。\\n△ 中景：角色A猛地站起，手机屏亮着未读消息，脚步不自觉后退。\\n△ 特写：角色A手指微颤，指甲掐进掌心，眼眶泛红强忍泪水。",
       "dialogues": [
-        {"character": "角色A", "direction": "冷笑", "line": "台词内容"}
+        {"character": "角色A", "direction": "冷笑", "line": "你以为这样就能瞒过所有人？"},
+        {"character": "角色B", "direction": "拍桌站起", "line": "真相迟早大白，我不需要瞒任何人。"},
+        {"character": "角色A", "direction": "逼近一步，压低声音", "line": "你确定你能承受真相的代价？"},
+        {"character": "角色B", "direction": "后退，眼神闪烁", "line": "你在威胁我？"},
+        {"character": "角色A", "direction": "转身，轻笑", "line": "选错了边，就没有回头路了。"}
       ],
       "musicCue": "♪ 紧张的弦乐"
     }
@@ -1562,7 +1569,22 @@ ${episodeJSON}
 - 场景数量可以微调但不要大幅增减
 - 保持原有的钩子类型和节奏标记
 
+## 质量硬性要求（严格执行，微短剧行业标准：1分钟≈250-300字）
+- 每集3-5个场次
+- 场景描写（description字段）：每个场景50-80字的镜头指示，用2-3个镜头段落（如△全景→△中景→△特写），简洁有画面感，重点写人物动作和关键视觉元素
+- 台词对话（dialogues数组）：每个场景4-6轮对话，这是微短剧的核心驱动力。每句台词15-30字，要有冲突感和潜台词，带简短的语气/动作指示
+- 每集总字数600-900字（对应1-3分钟屏幕时间），台词占60-70%，场景描写占30-40%
+- 至少使用2种景别
+- 节奏要快，每个场景都要推进剧情或制造冲突，禁止无意义的过渡场景
+- 结尾必须有悬念钩子
+- ⚠️ 改写后的字数不得少于原剧本，只能增加不能缩减
+
 请输出完整的改写后剧本，严格 JSON 格式。`;
+
+  // 统计原剧本的场景数和台词数，作为改写的底线要求
+  const origSceneCount = episode.scenes?.length || 0;
+  const origDialogueCount = episode.scenes?.reduce((sum, s) => sum + (s.dialogues?.length || 0), 0) || 0;
+  const origDescLength = episode.scenes?.reduce((sum, s) => sum + (s.description?.length || 0), 0) || 0;
 
   const rewriteUserPrompt = `原剧本：
 ${episodeJSON}
@@ -1573,25 +1595,34 @@ ${dimensionFeedback}
 具体问题：
 ${issuesList}
 
+⚠️ 原剧本统计：${origSceneCount}个场景、${origDialogueCount}轮台词、场景描写共${origDescLength}字
+⚠️ 改写后必须保持：场景数≥${origSceneCount}、台词轮数≥${origDialogueCount}、场景描写总字数≥${origDescLength}
+
 请根据以上审核意见改写优化这集剧本，输出完整 JSON：
 {
   "number": ${episodeNumber},
   "title": "集标题",
-  "keywords": ["关键词"],
+  "keywords": ["关键词1", "关键词2", "关键词3"],
   "satisfactionType": "爽点类型",
-  "previousRecap": "前情提要",
+  "previousRecap": "前情提要1-2句",
   "scenes": [
     {
       "sceneNumber": 1,
       "location": "内景/外景 · 地点 · 日/夜",
-      "characters": ["角色名"],
-      "description": "场景描写（含镜头指示 △）",
-      "dialogues": [{"character": "角色名", "direction": "表演指示", "line": "台词"}],
-      "musicCue": "音乐提示"
+      "characters": ["角色A", "角色B"],
+      "description": "△（全景）昏暗客厅，电视蓝光映墙，茶几散落揉皱的文件和冷咖啡。\\n△（中景）角色A猛地站起，手机屏亮着未读消息，脚步不自觉后退。\\n△（特写）角色A手指微颤，指甲掐进掌心，眼眶泛红强忍泪水。",
+      "dialogues": [
+        {"character": "角色A", "direction": "冷笑", "line": "你以为这样就能瞒过所有人？"},
+        {"character": "角色B", "direction": "拍桌站起", "line": "真相迟早大白，我不需要瞒任何人。"},
+        {"character": "角色A", "direction": "逼近一步，压低声音", "line": "你确定你能承受真相的代价？"},
+        {"character": "角色B", "direction": "后退，眼神闪烁", "line": "你在威胁我？"},
+        {"character": "角色A", "direction": "转身，轻笑", "line": "选错了边，就没有回头路了。"}
+      ],
+      "musicCue": "♪ 紧张的弦乐"
     }
   ],
-  "endHook": "本集钩子",
-  "nextPreview": "下集预告",
+  "endHook": "🎣 本集钩子描述",
+  "nextPreview": "📺 下集预告一句话",
   "phase": "${episode.phase}",
   "hookType": "${episode.hookType}",
   "mark": "${episode.mark || ''}"
@@ -1604,6 +1635,16 @@ ${issuesList}
     rewritten.phase = episode.phase;
     rewritten.hookType = episode.hookType;
     rewritten.mark = episode.mark;
+
+    // 字数缩水检查：改写后的台词数和场景描写不能大幅缩水（允许10%浮动）
+    const newDialogueCount = rewritten.scenes?.reduce((sum, s) => sum + (s.dialogues?.length || 0), 0) || 0;
+    const newDescLength = rewritten.scenes?.reduce((sum, s) => sum + (s.description?.length || 0), 0) || 0;
+    const shrunk = newDialogueCount < origDialogueCount * 0.7 || newDescLength < origDescLength * 0.7;
+    if (shrunk) {
+      console.log(`[screenplay] 第${episodeNumber}集改写缩水: 台词${origDialogueCount}→${newDialogueCount}, 描写${origDescLength}→${newDescLength}字 ❌ 拒绝`);
+      // 缩水严重 → 保留原剧本
+      return { success: true, review };
+    }
 
     // 对改写后的剧本重新评分
     const reReviewResult = await llmJSON<ReviewScore>(projectId, `re_review_${episodeNumber}`, reviewSystemPrompt,
@@ -1629,15 +1670,22 @@ ${issuesList}
           retryEp.phase = episode.phase;
           retryEp.hookType = episode.hookType;
           retryEp.mark = episode.mark;
-          // 重试版本再评分
-          const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
-            reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)), 'evaluate');
-          if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
-            const episodes = project.episodes.map(e => e.number === episodeNumber ? retryEp : e);
-            const reviews = { ...project.reviews, [episodeNumber]: retryReview.data };
-            updateScreenplay(projectId, { episodes, reviews });
-            console.log(`[screenplay] 第${episodeNumber}集重试优化: ${review.total} → ${retryReview.data.total} ✅ 采纳`);
-            return { success: true, review: retryReview.data };
+          // 重试版本字数缩水检查
+          const retryDialogues = retryEp.scenes?.reduce((sum, s) => sum + (s.dialogues?.length || 0), 0) || 0;
+          const retryDescLen = retryEp.scenes?.reduce((sum, s) => sum + (s.description?.length || 0), 0) || 0;
+          if (retryDialogues < origDialogueCount * 0.7 || retryDescLen < origDescLength * 0.7) {
+            console.log(`[screenplay] 第${episodeNumber}集重试改写缩水: 台词${origDialogueCount}→${retryDialogues}, 描写${origDescLength}→${retryDescLen}字 ❌ 拒绝`);
+          } else {
+            // 重试版本再评分
+            const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
+              reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)), 'evaluate');
+            if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
+              const episodes = project.episodes.map(e => e.number === episodeNumber ? retryEp : e);
+              const reviews = { ...project.reviews, [episodeNumber]: retryReview.data };
+              updateScreenplay(projectId, { episodes, reviews });
+              console.log(`[screenplay] 第${episodeNumber}集重试优化: ${review.total} → ${retryReview.data.total} ✅ 采纳`);
+              return { success: true, review: retryReview.data };
+            }
           }
         }
         // 重试也失败或分数仍下降 → 保留原剧本，保留原评分
@@ -1719,6 +1767,132 @@ export function exportScreenplay(projectId: string): { success: boolean; content
 
   updateScreenplay(projectId, { status: 'exported' });
   return { success: true, content: md };
+}
+
+// ============================================================
+// 生成投稿材料（集纲 / E-card / 人物小传 / 剧本大纲）
+// ============================================================
+
+export async function generateSubmissionMaterials(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; materials?: SubmissionMaterials; error?: string }> {
+  const project = getScreenplay(projectId);
+  if (!project) return { success: false, error: '项目不存在' };
+
+  const { config, creativePlan, characterDesign, episodeDirectory, episodes } = project;
+  const title = project.selectedTitle || creativePlan?.titleOptions?.[0]?.title || '未命名剧本';
+
+  // ---- 1. 集纲：从已有 episodeDirectory 直接组装 ----
+  onProgress?.('正在生成集纲...');
+  let episodeOutline = `# ${title} · 集纲\n\n`;
+  if (episodeDirectory?.length) {
+    for (const ep of episodeDirectory) {
+      const mark = ep.mark ? ` ${ep.mark}` : '';
+      episodeOutline += `第${ep.number}集「${ep.title}」${mark}：${ep.summary}\n`;
+    }
+  } else if (episodes.length) {
+    for (const ep of episodes) {
+      episodeOutline += `第${ep.number}集「${ep.title}」：${ep.scenes.map(s => s.description).join('；')}\n`;
+    }
+  }
+
+  // ---- 2. E-card：从 config + creativePlan 组装 ----
+  onProgress?.('正在生成 E-card...');
+  const genres = config.genres.join(' / ');
+  const epCount = config.totalEpisodes;
+  const storyLine = creativePlan?.storyLine || '';
+  const coreConflict = creativePlan?.coreConflict || '';
+  const setting = creativePlan?.setting;
+  const topSatisfaction = creativePlan?.satisfactionMatrix
+    ? Object.entries(creativePlan.satisfactionMatrix).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k).join('、')
+    : '';
+
+  let ecard = `# ${title} · E-card\n\n`;
+  ecard += `| 项目 | 内容 |\n|------|------|\n`;
+  ecard += `| 剧名 | ${title} |\n`;
+  ecard += `| 类型 | ${genres} |\n`;
+  ecard += `| 集数 | ${epCount}集 |\n`;
+  ecard += `| 单集时长 | 约1-3分钟 |\n`;
+  ecard += `| 受众 | ${config.audience} |\n`;
+  ecard += `| 基调 | ${config.tone} |\n`;
+  if (setting) ecard += `| 时空背景 | ${setting.era} · ${setting.location} |\n`;
+  ecard += `| 故事线 | ${storyLine} |\n`;
+  ecard += `| 核心冲突 | ${coreConflict} |\n`;
+  if (topSatisfaction) ecard += `| 核心爽点 | ${topSatisfaction} |\n`;
+  ecard += `| 结局类型 | ${config.endingType} |\n`;
+
+  // ---- 3. 人物小传：需要 LLM 生成 ----
+  onProgress?.('正在生成人物小传...');
+  let characterBios = `# ${title} · 人物小传\n\n`;
+  if (characterDesign?.characters?.length) {
+    const charNames = characterDesign.characters.map(c => c.name);
+    const charSummaries = characterDesign.characters.map(c =>
+      `${c.name}（${c.age}岁，${c.publicIdentity}）：性格${c.personality.join('、')}，外貌${c.appearance}，动机：${c.motivation}，人物弧光：${c.arc}，口头禅：${c.catchphrase}，真实身份：${c.realIdentity}，冲突点：${c.conflictPoint}`
+    ).join('\n');
+
+    const bioResult = await llmText(projectId, 'submission_bios',
+      `你是一位专业的短剧策划编辑。请根据角色资料，为每个角色撰写约300字的人物小传。
+要求：
+- 每个角色独立一段，以"【角色名】"开头
+- 包含：名称、角色定位、外貌形象描写、性格特点、核心故事线/人物弧光
+- 语言生动有画面感，适合投稿给平台方审阅
+- 不要用列表格式，用流畅的叙述体
+- 【严格约束】必须且只能使用以下角色名：${charNames.join('、')}。禁止自创角色名或修改角色名`,
+      `剧名：${title}\n类型：${genres}\n故事线：${storyLine}\n\n角色资料：\n${charSummaries}`
+    );
+    if (bioResult.success && bioResult.content) {
+      characterBios += bioResult.content;
+    } else {
+      // 降级：用已有数据拼接
+      for (const c of characterDesign.characters) {
+        characterBios += `【${c.name}】${c.age}岁，${c.publicIdentity}。${c.appearance}。性格${c.personality.join('、')}。${c.motivation}。${c.arc}\n\n`;
+      }
+    }
+  }
+
+  // ---- 4. 剧本大纲：需要 LLM 生成 ----
+  onProgress?.('正在生成剧本大纲...');
+  let scriptSynopsis = `# ${title} · 剧本大纲\n\n`;
+  const threeActs = creativePlan?.threeActs;
+  const ending = creativePlan?.endingDesign;
+
+  // 提取角色名列表供大纲使用
+  const allCharNames = characterDesign?.characters?.map(c => c.name) || [];
+
+  const synopsisContext = [
+    `剧名：${title}`,
+    `类型：${genres}，${config.audience}`,
+    allCharNames.length ? `角色名（必须使用这些名字）：${allCharNames.join('、')}` : '',
+    `故事线：${storyLine}`,
+    `核心冲突：${coreConflict}`,
+    threeActs ? `三幕结构：第一幕${threeActs.act1.coreEvents.join('、')}；第二幕冲突${threeActs.act2.conflicts.join('、')}，转折${threeActs.act2.turningPoints.join('、')}；第三幕${threeActs.act3.climax}` : '',
+    ending ? `结局：${ending.mainLine}，感情线${ending.romanceLine}` : '',
+    topSatisfaction ? `核心爽点：${topSatisfaction}` : '',
+  ].filter(Boolean).join('\n');
+
+  const synopsisResult = await llmText(projectId, 'submission_synopsis',
+    `你是一位专业的短剧策划编辑。请撰写一段剧本大纲/项目简介，用于投稿给短剧平台。
+要求：
+- 300-500字，一段话讲清楚整个故事
+- 突出亮点、爽点、反转等吸引人的元素
+- 风格类似小说简介/网文简介，有悬念感和吸引力
+- 结尾留一个钩子，让审稿人想看完整剧本
+- 不要分段，不要用标题，就是一整段流畅的文字
+- 【严格约束】文中提到的所有角色必须使用用户提供的角色名，禁止自创或修改任何角色名`,
+    synopsisContext
+  );
+  if (synopsisResult.success && synopsisResult.content) {
+    scriptSynopsis += synopsisResult.content;
+  } else {
+    // 降级
+    scriptSynopsis += `${storyLine} ${coreConflict}`;
+  }
+
+  const materials: SubmissionMaterials = { episodeOutline, ecard, characterBios, scriptSynopsis };
+  updateScreenplay(projectId, { submissionMaterials: materials, status: 'exported' });
+  onProgress?.('投稿材料生成完成');
+  return { success: true, materials };
 }
 
 // ============================================================

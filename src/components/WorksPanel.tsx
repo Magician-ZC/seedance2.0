@@ -45,6 +45,7 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
   const [dramaProjects, setDramaProjects] = useState<DramaProjectItem[]>([]);
   const [screenplayProjects, setScreenplayProjects] = useState<ScreenplayProjectItem[]>([]);
   const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; title: string; type?: 'drama' | 'screenplay' } | null>(null);
+  const [factoryActiveCount, setFactoryActiveCount] = useState(0);
 
   const loadProjects = () => {
     fetch('/api/drama/list').then(r => r.json()).then(data => {
@@ -79,6 +80,10 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
           };
         }));
       }
+    }).catch(() => {});
+    // 加载创作工厂活跃项目数
+    fetch('/api/factory/list').then(r => r.json()).then(data => {
+      if (data?.projects) setFactoryActiveCount(data.projects.filter((p: { status: string }) => p.status !== 'completed').length);
     }).catch(() => {});
   };
 
@@ -158,6 +163,11 @@ export default function WorksPanel({ onNewProject, onOpenNovelToDrama, onOpenVid
             >
               <SparkleIcon className="w-4 h-4 text-purple-400" />
               {isZh ? '创作工厂' : 'Agent Factory'}
+              {factoryActiveCount > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-purple-500/20 text-purple-400 border border-purple-500/20">
+                  {factoryActiveCount}
+                </span>
+              )}
             </button>
             <button
               onClick={onOpenNovelToDrama}

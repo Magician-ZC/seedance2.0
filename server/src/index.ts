@@ -33,7 +33,7 @@ import {
   createScreenplay, getScreenplay, updateScreenplay, listScreenplays, removeScreenplay,
   generateCreativePlan, generateCharacters, generateDirectory,
   generateEpisode, generateEpisodeBatch, retryFailedEpisodes, reviewEpisode, exportScreenplay, getGenreList,
-  loadScreenplayProjectsFromDB, analyzeReferenceNovel,
+  loadScreenplayProjectsFromDB, analyzeReferenceNovel, generateSubmissionMaterials,
 } from './screenplay-creator.js';
 import {
   createFactory, getFactory, updateFactory, listFactories, removeFactory,
@@ -1417,7 +1417,9 @@ app.post('/api/screenplay/:id/review-all', (req, res) => {
   // 后台并发执行每集自检+改写
   (async () => {
     const CONCURRENCY = 5;
-    const total = project.episodes.length;
+    // 过滤掉 number 无效的 episode
+    const validEpisodes = project.episodes.filter(ep => typeof ep.number === 'number');
+    const total = validEpisodes.length;
     let done = 0;
     const errors: string[] = [];
     const currentEps = new Set<number>(); // 当前正在优化的集号
@@ -1430,7 +1432,7 @@ app.post('/api/screenplay/:id/review-all', (req, res) => {
       wsManager.broadcast(taskId, task);
     };
 
-    const tasks_list = project.episodes.map(ep => async () => {
+    const tasks_list = validEpisodes.map(ep => async () => {
       currentEps.add(ep.number);
       broadcastProgress(`正在优化: ${Array.from(currentEps).map(n => `第${n}集`).join('、')} (${done}/${total})`);
       try {
@@ -1472,6 +1474,19 @@ app.post('/api/screenplay/:id/export', (_req, res) => {
   const result = exportScreenplay(_req.params.id);
   if (!result.success) return res.status(500).json({ error: result.error });
   res.json({ content: result.content });
+});
+
+// POST /api/screenplay/:id/submission - 生成投稿材料
+app.post('/api/screenplay/:id/submission', async (req, res) => {
+  try {
+    const result = await generateSubmissionMaterials(req.params.id, (msg) => {
+      wsManager.broadcast('screenplay_progress', { projectId: req.params.id, message: msg });
+    });
+    if (!result.success) return res.status(500).json({ error: result.error });
+    res.json({ materials: result.materials });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // PATCH /api/screenplay/:id - 更新剧本项目（通用）
