@@ -542,7 +542,11 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   const [submissionData, setSubmissionData] = useState<SubmissionMaterials | null>(null);
   const [submissionTab, setSubmissionTab] = useState<'outline' | 'ecard' | 'bios' | 'synopsis'>('outline');
   const [existingProjects, setExistingProjects] = useState<ScreenplayProject[]>([]);
-  // 一键优化
+  // 一键优化（按项目隔离）
+  const reviewAllMapRef = useRef<Map<string, {
+    taskId: string; progress: string; done: number; total: number; currentEps: number[];
+    error: string; preScores: Record<number, number>;
+  }>>(new Map());
   const [reviewAllTaskId, setReviewAllTaskId] = useState<string | null>(null);
   const [_reviewAllCurrentEp, setReviewAllCurrentEp] = useState<number[]>([]);
   const [reviewAllProgress, setReviewAllProgress] = useState('');
@@ -633,7 +637,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     if (resumeProjectId && resumeProjectId !== prevResumeIdRef.current) {
       prevResumeIdRef.current = resumeProjectId;
       // 切换项目时清除旧任务状态
-      setTaskId(null); setLoading(false);
+      setTaskId(null); setLoading(false); saveAndRestoreReviewState(resumeProjectId);
       fetch(`/api/screenplay/${resumeProjectId}`).then(r => r.json()).then(d => {
         if (d?.project) {
           const p = normalizeProject(d.project);
@@ -694,7 +698,40 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   }, [step, loading, taskId, reviewAllTaskId, project?.selectedTitle, project?.creativePlan?.titleOptions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 恢复已有项目
+  // 保存当前项目的优化状态到 Map，恢复目标项目的状态
+  const saveAndRestoreReviewState = (targetProjectId?: string) => {
+    // 保存当前项目状态
+    const curId = projectIdRef.current;
+    if (curId && reviewAllTaskId) {
+      reviewAllMapRef.current.set(curId, {
+        taskId: reviewAllTaskId, progress: reviewAllProgress,
+        done: reviewAllDone, total: reviewAllTotal, currentEps: _reviewAllCurrentEp,
+        error: _reviewAllError, preScores: _preReviewScores,
+      });
+    }
+    // 恢复目标项目状态
+    const saved = targetProjectId ? reviewAllMapRef.current.get(targetProjectId) : undefined;
+    if (saved) {
+      setReviewAllTaskId(saved.taskId);
+      setReviewAllProgress(saved.progress);
+      setReviewAllDone(saved.done);
+      setReviewAllTotal(saved.total);
+      setReviewAllCurrentEp(saved.currentEps);
+      setReviewAllError(saved.error);
+      setPreReviewScores(saved.preScores);
+    } else {
+      setReviewAllTaskId(null);
+      setReviewAllCurrentEp([]);
+      setReviewAllProgress('');
+      setReviewAllError('');
+      setReviewAllDone(0);
+      setReviewAllTotal(0);
+      setPreReviewScores({});
+    }
+  };
+
   const resumeProject = (p: ScreenplayProject) => {
+    saveAndRestoreReviewState(p.id);
     setProject(normalizeProject(p));
     const statusStepMap: Record<string, Step> = {
       config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
@@ -804,7 +841,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   };
 
   // 一键优化：批量自检+改写所有集
-  const handleReviewAll = async () => {
+  const handleReviewAll = async (skipReviewed = false) => {
     if (!project) return;
     setError('');
     // 记录优化前的旧分数
@@ -818,65 +855,143 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     setReviewAllProgress('');
     setReviewAllError('');
     setReviewAllDone(0);
-    setReviewAllTotal(project.episodes.length);
+    // 断点续传时，total 只算未评审的集数
+    const unreviewedCount = skipReviewed
+      ? project.episodes.filter(ep => !project.reviews[ep.number]).length
+      : project.episodes.length;
+    setReviewAllTotal(unreviewedCount);
     try {
-      const res = await fetch(`/api/screenplay/${project.id}/review-all`, { method: 'POST' });
+      const res = await fetch(`/api/screenplay/${project.id}/review-all`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skipReviewed }),
+      });
       const data = await res.json();
-      if (data?.async && data.taskId) setReviewAllTaskId(data.taskId);
+      if (data?.async && data.taskId) {
+        setReviewAllTaskId(data.taskId);
+        reviewAllMapRef.current.set(project.id, {
+          taskId: data.taskId, progress: '', done: 0, total: unreviewedCount,
+          currentEps: [], error: '', preScores: oldScores,
+        });
+      }
       else if (data?.error) setError(data.error);
     } catch (err) { setError((err as Error).message); }
   };
 
-  // 一键优化 WebSocket 进度监听
-  useEffect(() => {
-    if (!reviewAllTaskId) return;
+  // 一键优化 WebSocket 进度监听（支持多项目并行，不随切换断开）
+  const reviewWsMapRef = useRef<Map<string, WebSocket>>(new Map());
+
+  // 启动对某个 taskId 的 WebSocket 监听
+  const startReviewWs = useCallback((taskId: string) => {
+    if (reviewWsMapRef.current.has(taskId)) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    let closed = false;
 
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId: reviewAllTaskId }));
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'subscribe', taskId }));
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
-        if (msg.taskId !== reviewAllTaskId) return;
+        if (msg.taskId !== taskId) return;
         const status = msg.data?.status || msg.status;
         const progressRaw = msg.data?.progress || msg.progress;
         const errorText = msg.data?.error || msg.error;
 
-        // 尝试解析结构化进度
         let parsed: { msg?: string; currentEps?: number[]; currentEp?: number | null; done?: number; total?: number; completedEp?: number; score?: number } | null = null;
         try { parsed = JSON.parse(progressRaw); } catch { /* plain string fallback */ }
 
+        // 更新 Map 中的状态（无论当前显示哪个项目）
+        const mapEntry = Array.from(reviewAllMapRef.current.entries()).find(([, v]) => v.taskId === taskId);
+        const pid = mapEntry?.[0];
+
         if (status === 'processing') {
-          if (parsed) {
-            setReviewAllProgress(parsed.msg || '');
-            setReviewAllCurrentEp(parsed.currentEps ?? (parsed.currentEp != null ? [parsed.currentEp] : []));
-            if (typeof parsed.done === 'number') setReviewAllDone(parsed.done);
-            if (typeof parsed.total === 'number') setReviewAllTotal(parsed.total);
-            // 每集完成后刷新项目数据获取最新分数
-            if (parsed.completedEp) refreshProject();
-          } else {
-            setReviewAllProgress(progressRaw || '');
+          if (pid && parsed) {
+            const entry = reviewAllMapRef.current.get(pid)!;
+            entry.progress = parsed.msg || '';
+            entry.currentEps = parsed.currentEps ?? (parsed.currentEp != null ? [parsed.currentEp] : []);
+            if (typeof parsed.done === 'number') entry.done = parsed.done;
+            if (typeof parsed.total === 'number') entry.total = parsed.total;
+          }
+          // 如果是当前项目，更新 UI state
+          if (pid === projectIdRef.current) {
+            if (parsed) {
+              setReviewAllProgress(parsed.msg || '');
+              setReviewAllCurrentEp(parsed.currentEps ?? (parsed.currentEp != null ? [parsed.currentEp] : []));
+              if (typeof parsed.done === 'number') setReviewAllDone(parsed.done);
+              if (typeof parsed.total === 'number') setReviewAllTotal(parsed.total);
+              if (parsed.completedEp) refreshProject();
+            } else {
+              setReviewAllProgress(progressRaw || '');
+            }
           }
         } else if (status === 'done') {
-          if (parsed) setReviewAllProgress(parsed.msg || '');
-          setReviewAllCurrentEp([]);
-          setReviewAllTaskId(null);
-          refreshProject();
+          if (pid) reviewAllMapRef.current.delete(pid);
+          reviewWsMapRef.current.delete(taskId);
+          if (pid === projectIdRef.current) {
+            if (parsed) setReviewAllProgress(parsed.msg || '');
+            setReviewAllCurrentEp([]);
+            setReviewAllTaskId(null);
+            refreshProject();
+          }
           ws.close();
         } else if (status === 'error') {
-          setReviewAllError(errorText || '优化失败');
-          setReviewAllCurrentEp([]);
-          setReviewAllTaskId(null);
+          if (pid) reviewAllMapRef.current.delete(pid);
+          reviewWsMapRef.current.delete(taskId);
+          if (pid === projectIdRef.current) {
+            setReviewAllError(errorText || '优化失败');
+            setReviewAllCurrentEp([]);
+            setReviewAllTaskId(null);
+          }
           ws.close();
         }
       } catch { /* ignore */ }
     };
-    ws.onerror = () => { setReviewAllError('WebSocket 连接失败'); setReviewAllTaskId(null); };
-    ws.onclose = () => { if (!closed) { closed = true; } };
+    ws.onerror = () => {
+      reviewWsMapRef.current.delete(taskId);
+    };
+    ws.onclose = () => {
+      reviewWsMapRef.current.delete(taskId);
+      // 如果任务仍在 Map 中（未完成），延迟重连
+      const stillRunning = Array.from(reviewAllMapRef.current.values()).some(v => v.taskId === taskId);
+      if (stillRunning) {
+        setTimeout(() => startReviewWs(taskId), 2000);
+      }
+    };
 
-    return () => { closed = true; ws.close(); };
-  }, [reviewAllTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+    reviewWsMapRef.current.set(taskId, ws);
+  }, [refreshProject]);
+
+  // 当 reviewAllTaskId 变化时启动 WS（新任务触发）
+  useEffect(() => {
+    if (reviewAllTaskId) startReviewWs(reviewAllTaskId);
+  }, [reviewAllTaskId, startReviewWs]);
+
+  // 检查后端是否有正在运行的 review-all 任务（恢复断开的进度）
+  const checkReviewStatus = useCallback(async (pid: string) => {
+    // 如果前端已经有该项目的 taskId，不需要检查
+    if (reviewAllMapRef.current.has(pid)) return;
+    try {
+      const res = await fetch(`/api/screenplay/${pid}/review-status`);
+      const data = await res.json();
+      if (data?.running && data.taskId) {
+        // 恢复状态
+        const state = { taskId: data.taskId, progress: data.msg || '', done: data.done || 0, total: data.total || 0, currentEps: [] as number[], error: '', preScores: {} as Record<number, number> };
+        reviewAllMapRef.current.set(pid, state);
+        if (pid === projectIdRef.current) {
+          setReviewAllTaskId(data.taskId);
+          setReviewAllProgress(data.msg || '');
+          setReviewAllDone(data.done || 0);
+          setReviewAllTotal(data.total || 0);
+        }
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  // 进入 review 步骤或从后台恢复时，检查是否有正在运行的任务
+  useEffect(() => {
+    if (step === 'review' && project?.id && !reviewAllTaskId) {
+      checkReviewStatus(project.id);
+    }
+  }, [step, project?.id, hidden]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 生成投稿材料
   const handleSubmission = async (forceRegenerate = false) => {
@@ -916,11 +1031,20 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     URL.revokeObjectURL(url);
   };
 
-  // 一键下载全部投稿材料
-  const handleDownloadAll = () => {
-    if (!submissionData) return;
-    const title = project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title || '剧本';
-    const all = [submissionData.episodeOutline, submissionData.ecard, submissionData.characterBios, submissionData.scriptSynopsis].join('\n\n---\n\n');
+  // 一键下载全部投稿材料（含完整分集剧本）
+  const handleDownloadAll = async () => {
+    if (!submissionData || !project) return;
+    const title = project.selectedTitle || project.creativePlan?.titleOptions?.[0]?.title || '剧本';
+    const parts = [submissionData.episodeOutline, submissionData.ecard, submissionData.characterBios, submissionData.scriptSynopsis];
+
+    // 获取完整分集剧本
+    try {
+      const res = await fetch(`/api/screenplay/${project.id}/export`, { method: 'POST' });
+      const data = await res.json();
+      if (data?.content) parts.push(data.content);
+    } catch { /* 降级：不含分集剧本 */ }
+
+    const all = parts.join('\n\n---\n\n');
     const blob = new Blob([all], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -994,7 +1118,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                 if (d?.projects) setExistingProjects(d.projects.filter((p: ScreenplayProject) => p.status !== 'exported'));
               }).catch(() => {});
               setProject(null); setStep('config'); setTaskId(null); setLoading(false);
-              setError(''); setSubmissionData(null);
+              setError(''); setSubmissionData(null); saveAndRestoreReviewState();
             }}
               className="px-4 py-2 rounded-xl text-xs font-medium bg-[#1a1a1a] border border-white/10 text-gray-400 hover:text-white hover:bg-[#222] transition-colors flex items-center gap-1.5">
               📂 {isZh ? '项目列表' : 'Projects'}
@@ -1652,11 +1776,27 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                   <h2 className="text-xl font-bold text-white mb-1">{isZh ? 'AI 质量自检' : 'AI Quality Review'}</h2>
                   <p className="text-sm text-gray-500">{isZh ? '从节奏、爽点、台词等多维度评估并优化剧本' : 'Evaluate and optimize script from multiple dimensions'}</p>
                 </div>
-                <button onClick={handleReviewAll} disabled={!!reviewAllTaskId || !project?.episodes?.length}
-                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold shadow-lg shadow-purple-900/20 transition-all flex items-center gap-2">
-                  <SparkleIcon className="w-4 h-4" />
-                  {reviewAllTaskId ? (isZh ? '正在优化...' : 'Optimizing...') : (isZh ? '一键全剧优化' : 'Optimize All')}
-                </button>
+                <div className="flex items-center gap-2">
+                  {(() => {
+                    const reviewedCount = project?.episodes?.filter(ep => project.reviews[ep.number])?.length || 0;
+                    const totalEps = project?.episodes?.length || 0;
+                    const hasPartial = reviewedCount > 0 && reviewedCount < totalEps;
+                    return <>
+                      {hasPartial && !reviewAllTaskId && (
+                        <button onClick={() => handleReviewAll(true)} disabled={!!reviewAllTaskId}
+                          className="px-4 py-3 rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-bold shadow-lg transition-all flex items-center gap-2 text-sm">
+                          <span>▶</span>
+                          {isZh ? `继续优化 (${totalEps - reviewedCount}集)` : `Continue (${totalEps - reviewedCount})`}
+                        </button>
+                      )}
+                      <button onClick={() => handleReviewAll(false)} disabled={!!reviewAllTaskId || !totalEps}
+                        className="px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold shadow-lg shadow-purple-900/20 transition-all flex items-center gap-2">
+                        <SparkleIcon className="w-4 h-4" />
+                        {reviewAllTaskId ? (isZh ? '正在优化...' : 'Optimizing...') : (isZh ? '一键全剧优化' : 'Optimize All')}
+                      </button>
+                    </>;
+                  })()}
+                </div>
               </div>
 
               {reviewAllTaskId && reviewAllTotal > 0 && (

@@ -128,18 +128,78 @@ export async function initDB(): Promise<void> {
     updated_at INTEGER
   )`);
 
+  // 角斗场 ELO 积分表
+  db.run(`CREATE TABLE IF NOT EXISTS arena_elo (
+    screenplay_id TEXT PRIMARY KEY,
+    elo INTEGER DEFAULT 1200,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    draws INTEGER DEFAULT 0,
+    updated_at INTEGER
+  )`);
+
+  // 角斗场评分记录表
+  db.run(`CREATE TABLE IF NOT EXISTS arena_scores (
+    id TEXT PRIMARY KEY,
+    screenplay_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    role_scores TEXT NOT NULL,
+    final_score TEXT NOT NULL,
+    skipped_roles TEXT DEFAULT '[]',
+    created_at INTEGER
+  )`);
+
+  // 角斗场对战记录表
+  db.run(`CREATE TABLE IF NOT EXISTS arena_battles (
+    id TEXT PRIMARY KEY,
+    screenplay_id_a TEXT NOT NULL,
+    screenplay_id_b TEXT NOT NULL,
+    dimension_results TEXT NOT NULL,
+    final_verdict TEXT NOT NULL,
+    improvement_suggestions TEXT,
+    elo_change_a INTEGER NOT NULL,
+    elo_change_b INTEGER NOT NULL,
+    created_at INTEGER
+  )`);
+
+  // 角斗场锦标赛表
+  db.run(`CREATE TABLE IF NOT EXISTS arena_tournaments (
+    id TEXT PRIMARY KEY,
+    format TEXT NOT NULL,
+    screenplay_ids TEXT NOT NULL,
+    bracket TEXT NOT NULL,
+    results TEXT DEFAULT '{}',
+    champion_id TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at INTEGER,
+    completed_at INTEGER
+  )`);
+
+  // 角斗场进化记录表
+  db.run(`CREATE TABLE IF NOT EXISTS arena_evolutions (
+    id TEXT PRIMARY KEY,
+    source_screenplay_id TEXT NOT NULL,
+    target_screenplay_id TEXT NOT NULL,
+    winner_screenplay_id TEXT NOT NULL,
+    battle_id TEXT NOT NULL,
+    absorbed_elements TEXT NOT NULL,
+    evolution_type TEXT NOT NULL,
+    generation INTEGER DEFAULT 1,
+    created_at INTEGER
+  )`);
+
   saveDB();
 }
 
 // 保存数据库到文件
-function saveDB(): void {
+export function saveDB(): void {
   if (!db) return;
   const data = db.export();
   fs.writeFileSync(DB_FILE, Buffer.from(data));
 }
 
 // 获取数据库实例
-function getDB(): Database {
+export function getDB(): Database {
   if (!db) throw new Error('数据库未初始化，请先调用 initDB()');
   return db;
 }

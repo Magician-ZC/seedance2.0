@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-export type NavTab = 'works' | 'materials' | 'characters' | 'authorAgents' | 'characterAgents';
+export type NavTab = 'works' | 'materials' | 'characters' | 'arena' | 'authorAgents' | 'characterAgents';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -58,11 +58,27 @@ function TheaterIcon({ className }: { className?: string }) {
   );
 }
 
+function SwordsIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M14.5 17.5L3 6V3h3l11.5 11.5" />
+      <path d="M13 19l6-6" />
+      <path d="M16 16l4 4" />
+      <path d="M19 21l2-2" />
+      <path d="M9.5 6.5L21 18v3h-3L6.5 9.5" />
+      <path d="M11 5l-6 6" />
+      <path d="M8 8L4 4" />
+      <path d="M5 3L3 5" />
+    </svg>
+  );
+}
+
 // 顶级导航项
 const TOP_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
   { key: 'works', icon: GridIcon, labelZh: '我的作品', labelEn: 'My Works' },
   { key: 'materials', icon: FolderIcon, labelZh: '素材', labelEn: 'Materials' },
   { key: 'characters', icon: UsersIcon, labelZh: '角色', labelEn: 'Characters' },
+  { key: 'arena', icon: SwordsIcon, labelZh: '角斗场', labelEn: 'Arena' },
 ];
 
 // Agent仓库子菜单

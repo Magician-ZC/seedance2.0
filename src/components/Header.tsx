@@ -19,6 +19,7 @@ export default function Header({ activeTab, onOpenSettings, onOpenSensitiveWords
       case 'authorAgents': return isZh ? '作者仓库' : 'Author Agents';
       case 'characterAgents': return isZh ? '群演仓库' : 'Cast Agents';
       case 'characters': return isZh ? '角色' : 'Characters';
+      case 'arena': return isZh ? '角斗场' : 'Arena';
       default: return '';
     }
   };

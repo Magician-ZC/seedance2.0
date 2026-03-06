@@ -1492,34 +1492,23 @@ export async function reviewEpisode(
   const episode = project.episodes.find(e => e.number === episodeNumber);
   if (!episode) return { success: false, error: `第${episodeNumber}集尚未撰写` };
 
-  // 第一步：审核打分
-  const reviewSystemPrompt = `你是一位专业的微短剧质量审核员。请对以下剧本进行五维度质量评分。
+  // 构建前后集上下文摘要，用于连贯性评估和改写
+  const prevEp = project.episodes.find(e => e.number === episodeNumber - 1);
+  const nextEp = project.episodes.find(e => e.number === episodeNumber + 1);
+  const adjacentContext = [
+    prevEp ? `【前一集 EP.${prevEp.number}】${prevEp.title}\n结尾钩子：${prevEp.endHook || '无'}\n最后场景角色：${prevEp.scenes?.slice(-1)[0]?.characters?.join('、') || '未知'}\n最后台词：${prevEp.scenes?.slice(-1)[0]?.dialogues?.slice(-1)[0]?.line || '无'}` : null,
+    nextEp ? `【后一集 EP.${nextEp.number}】${nextEp.title}\n开头提要：${nextEp.previousRecap || '无'}\n首场景角色：${nextEp.scenes?.[0]?.characters?.join('、') || '未知'}` : null,
+  ].filter(Boolean).join('\n\n');
 
-## 评分维度（每项1-10分）
-1. 节奏：开场是否够快、有无拖沓段落、紧张-舒缓交替是否合理
-2. 爽点：数量是否足够、强度是否达标、类型是否多样
-3. 台词：有无废话、角色区分度、是否口语化自然
-4. 格式：场景头完整性、景别标注、音乐提示、特殊标记
-5. 连贯性：与前后集是否矛盾、角色行为是否一致、伏笔是否延续
+  // 构建评分用的 userPrompt（抽取为函数，避免 string replace）
+  const buildReviewUserPrompt = (epData: EpisodeScript) => `请审核以下第${episodeNumber}集剧本：
 
-## 评级标准
-- 45-50：卓越，可直接投入拍摄
-- 38-44：优良，微调后可用
-- 30-37：合格，需要修改特定问题
-- 25-29：需改进，存在结构性问题
-- <25：需重写
+${JSON.stringify(epData, null, 2)}
 
-请输出严格的 JSON 格式。`;
-
-  const episodeJSON = JSON.stringify(episode, null, 2);
-
-  const reviewUserPrompt = `请审核以下第${episodeNumber}集剧本：
-
-${episodeJSON}
-
-所属阶段：${episode.phase}
-钩子类型：${episode.hookType}
-标记：${episode.mark || '常规'}
+所属阶段：${epData.phase}
+钩子类型：${epData.hookType}
+标记：${epData.mark || '常规'}
+${adjacentContext ? `\n## 前后集上下文（用于评估连贯性）\n${adjacentContext}` : ''}
 
 请输出审核结果，JSON 格式：
 {
@@ -1541,7 +1530,26 @@ ${episodeJSON}
 - 每集的评分应该有明显差异，反映各集的实际质量差距
 - issues 中至少包含2条具体可操作的改进建议`;
 
-  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, reviewUserPrompt, 'evaluate');
+  // 第一步：审核打分
+  const reviewSystemPrompt = `你是一位专业的微短剧质量审核员。请对以下剧本进行五维度质量评分。
+
+## 评分维度（每项1-10分）
+1. 节奏：开场是否够快、有无拖沓段落、紧张-舒缓交替是否合理
+2. 爽点：数量是否足够、强度是否达标、类型是否多样
+3. 台词：有无废话、角色区分度、是否口语化自然
+4. 格式：场景头完整性、景别标注、音乐提示、特殊标记
+5. 连贯性：与前后集是否矛盾、角色行为是否一致、伏笔是否延续
+
+## 评级标准
+- 45-50：卓越，可直接投入拍摄
+- 38-44：优良，微调后可用
+- 30-37：合格，需要修改特定问题
+- 25-29：需改进，存在结构性问题
+- <25：需重写
+
+请输出严格的 JSON 格式。`;
+
+  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, buildReviewUserPrompt(episode), 'evaluate');
   if (!reviewResult.success || !reviewResult.data) return { success: false, error: reviewResult.error || '自检失败' };
 
   const review = reviewResult.data;
@@ -1568,6 +1576,7 @@ ${episodeJSON}
 - 不要改变剧情走向和关键情节点
 - 场景数量可以微调但不要大幅增减
 - 保持原有的钩子类型和节奏标记
+- 必须保持与前后集的剧情连贯性
 
 ## 质量硬性要求（严格执行，微短剧行业标准：1分钟≈250-300字）
 - 每集3-5个场次
@@ -1582,6 +1591,7 @@ ${episodeJSON}
 请输出完整的改写后剧本，严格 JSON 格式。`;
 
   // 统计原剧本的场景数和台词数，作为改写的底线要求
+  const episodeJSON = JSON.stringify(episode, null, 2);
   const origSceneCount = episode.scenes?.length || 0;
   const origDialogueCount = episode.scenes?.reduce((sum, s) => sum + (s.dialogues?.length || 0), 0) || 0;
   const origDescLength = episode.scenes?.reduce((sum, s) => sum + (s.description?.length || 0), 0) || 0;
@@ -1594,6 +1604,7 @@ ${dimensionFeedback}
 
 具体问题：
 ${issuesList}
+${adjacentContext ? `\n## 前后集上下文（改写时必须保持衔接）\n${adjacentContext}` : ''}
 
 ⚠️ 原剧本统计：${origSceneCount}个场景、${origDialogueCount}轮台词、场景描写共${origDescLength}字
 ⚠️ 改写后必须保持：场景数≥${origSceneCount}、台词轮数≥${origDialogueCount}、场景描写总字数≥${origDescLength}
@@ -1636,26 +1647,26 @@ ${issuesList}
     rewritten.hookType = episode.hookType;
     rewritten.mark = episode.mark;
 
-    // 字数缩水检查：改写后的台词数和场景描写不能大幅缩水（允许10%浮动）
+    // 字数缩水检查：改写后的台词数和场景描写不能大幅缩水（允许30%浮动）
     const newDialogueCount = rewritten.scenes?.reduce((sum, s) => sum + (s.dialogues?.length || 0), 0) || 0;
     const newDescLength = rewritten.scenes?.reduce((sum, s) => sum + (s.description?.length || 0), 0) || 0;
     const shrunk = newDialogueCount < origDialogueCount * 0.7 || newDescLength < origDescLength * 0.7;
     if (shrunk) {
       console.log(`[screenplay] 第${episodeNumber}集改写缩水: 台词${origDialogueCount}→${newDialogueCount}, 描写${origDescLength}→${newDescLength}字 ❌ 拒绝`);
-      // 缩水严重 → 保留原剧本
       return { success: true, review };
     }
 
-    // 对改写后的剧本重新评分
+    // 对改写后的剧本重新评分（使用 buildReviewUserPrompt 避免 string replace 问题）
     const reReviewResult = await llmJSON<ReviewScore>(projectId, `re_review_${episodeNumber}`, reviewSystemPrompt,
-      reviewUserPrompt.replace(episodeJSON, JSON.stringify(rewritten, null, 2)), 'evaluate');
+      buildReviewUserPrompt(rewritten), 'evaluate');
 
     if (reReviewResult.success && reReviewResult.data) {
       const newReview = reReviewResult.data;
       if (newReview.total >= review.total) {
-        // 分数不低于原分 → 采纳改写
-        const episodes = project.episodes.map(e => e.number === episodeNumber ? rewritten : e);
-        const reviews = { ...project.reviews, [episodeNumber]: newReview };
+        // 分数不低于原分 → 采纳改写+新评分
+        const updatedProject = getScreenplay(projectId)!;
+        const episodes = updatedProject.episodes.map(e => e.number === episodeNumber ? rewritten : e);
+        const reviews = { ...updatedProject.reviews, [episodeNumber]: newReview };
         updateScreenplay(projectId, { episodes, reviews });
         console.log(`[screenplay] 第${episodeNumber}集优化: ${review.total} → ${newReview.total} ✅ 采纳`);
         return { success: true, review: newReview };
@@ -1678,10 +1689,11 @@ ${issuesList}
           } else {
             // 重试版本再评分
             const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
-              reviewUserPrompt.replace(episodeJSON, JSON.stringify(retryEp, null, 2)), 'evaluate');
+              buildReviewUserPrompt(retryEp), 'evaluate');
             if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
-              const episodes = project.episodes.map(e => e.number === episodeNumber ? retryEp : e);
-              const reviews = { ...project.reviews, [episodeNumber]: retryReview.data };
+              const updatedProject2 = getScreenplay(projectId)!;
+              const episodes = updatedProject2.episodes.map(e => e.number === episodeNumber ? retryEp : e);
+              const reviews = { ...updatedProject2.reviews, [episodeNumber]: retryReview.data };
               updateScreenplay(projectId, { episodes, reviews });
               console.log(`[screenplay] 第${episodeNumber}集重试优化: ${review.total} → ${retryReview.data.total} ✅ 采纳`);
               return { success: true, review: retryReview.data };

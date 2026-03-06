@@ -39,8 +39,9 @@ import {
   createFactory, getFactory, updateFactory, listFactories, removeFactory,
   parseNovelDNA, generateInitialAgents, runEvolutionRound, mutateAndBreed,
   runFullEvolution, exportFinalAgent, requestStop, restoreFactories,
-  buildFactoryCharacterPrompt, type FactoryProtagonist,
+  buildFactoryCharacterPrompt, retryProtagonistExtraction, type FactoryProtagonist,
 } from './agent-factory.js';
+import arenaRoutes from './arena-routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -52,6 +53,9 @@ app.use(express.json({ limit: '50mb' }));
 
 // 静态文件服务：本地角色图片
 app.use('/api/images', express.static(path.join(__dirname, '../../data/images')));
+
+// 角斗场 API 路由
+app.use('/api/arena', arenaRoutes);
 
 // 启动时加载敏感词库
 loadWords();
@@ -1406,6 +1410,9 @@ app.post('/api/screenplay/:id/review-all', (req, res) => {
   if (!project) return res.status(404).json({ error: '项目不存在' });
   if (!project.episodes?.length) return res.status(400).json({ error: '暂无剧集' });
 
+  // skipReviewed=true 时跳过已有评审的集（断点续传）
+  const skipReviewed = req.body?.skipReviewed === true;
+
   const taskId = `sp_review_all_${projectId}_${Date.now()}`;
   const task: TaskInfo = {
     id: taskId, status: 'processing', progress: '准备批量自检...',
@@ -1414,31 +1421,47 @@ app.post('/api/screenplay/:id/review-all', (req, res) => {
   tasks.set(taskId, task);
   res.json({ async: true, taskId });
 
-  // 后台并发执行每集自检+改写
+  // 后台顺序执行每集自检+改写
   (async () => {
-    const CONCURRENCY = 5;
-    // 过滤掉 number 无效的 episode
-    const validEpisodes = project.episodes.filter(ep => typeof ep.number === 'number');
-    const total = validEpisodes.length;
+    // 过滤掉 number 无效的 episode，按集号排序确保顺序优化（保持前后集连贯性）
+    const validEpisodes = project.episodes
+      .filter(ep => typeof ep.number === 'number')
+      .sort((a, b) => a.number - b.number);
+
+    // 断点续传：跳过已有评审记录的集
+    const toReview = skipReviewed
+      ? validEpisodes.filter(ep => !project.reviews[ep.number])
+      : validEpisodes;
+    const total = toReview.length;
+    const skipped = validEpisodes.length - total;
     let done = 0;
     const errors: string[] = [];
-    const currentEps = new Set<number>(); // 当前正在优化的集号
+
+    if (skipped > 0) {
+      console.log(`[screenplay] review-all 断点续传: 跳过 ${skipped} 集已评审，待优化 ${total} 集`);
+    }
 
     const broadcastProgress = (msg: string, completedEp?: number, score?: number) => {
       task.progress = JSON.stringify({
-        msg, currentEps: Array.from(currentEps), done, total,
+        msg, currentEps: [], done, total,
         ...(completedEp != null ? { completedEp, score } : {}),
       });
       wsManager.broadcast(taskId, task);
     };
 
-    const tasks_list = validEpisodes.map(ep => async () => {
-      currentEps.add(ep.number);
-      broadcastProgress(`正在优化: ${Array.from(currentEps).map(n => `第${n}集`).join('、')} (${done}/${total})`);
+    if (total === 0) {
+      task.status = 'done';
+      task.progress = JSON.stringify({ msg: '所有集均已评审，无需优化', currentEps: [], done: 0, total: 0 });
+      wsManager.broadcast(taskId, task);
+      return;
+    }
+
+    // 顺序执行：按集号依次优化，确保每集改写时能看到前面已优化的版本
+    for (const ep of toReview) {
+      broadcastProgress(`正在优化第${ep.number}集 (${done}/${total})${skipped > 0 ? ` [已跳过${skipped}集]` : ''}...`);
       try {
         const result = await reviewEpisode(projectId, ep.number);
         done++;
-        currentEps.delete(ep.number);
         const score = result.review?.total;
         broadcastProgress(
           `第${ep.number}集完成 (${done}/${total})${score ? ` 评分:${score}/50` : ''}`,
@@ -1447,26 +1470,30 @@ app.post('/api/screenplay/:id/review-all', (req, res) => {
       } catch (err) {
         errors.push(`第${ep.number}集: ${(err as Error).message}`);
         done++;
-        currentEps.delete(ep.number);
         broadcastProgress(`第${ep.number}集失败 (${done}/${total})`);
       }
-    });
-
-    // 并发控制器（同 agent-factory runWithConcurrency 模式）
-    const executing = new Set<Promise<void>>();
-    for (let i = 0; i < tasks_list.length; i++) {
-      const p = tasks_list[i]().then(() => { executing.delete(p); });
-      executing.add(p);
-      if (executing.size >= CONCURRENCY) await Promise.race(executing);
     }
-    await Promise.all(executing);
 
     task.status = 'done';
     task.progress = JSON.stringify({ msg: errors.length > 0
       ? `完成 ${total - errors.length}/${total} 集，${errors.length} 集失败`
-      : `全部 ${total} 集自检优化完成`, currentEps: [], done: total, total });
+      : `全部 ${total} 集自检优化完成${skipped > 0 ? `（跳过${skipped}集已评审）` : ''}`, currentEps: [], done: total, total });
     wsManager.broadcast(taskId, task);
   })();
+});
+
+// GET /api/screenplay/:id/review-status - 查询是否有正在运行的 review-all 任务
+app.get('/api/screenplay/:id/review-status', (req, res) => {
+  const projectId = req.params.id;
+  const prefix = `sp_review_all_${projectId}_`;
+  for (const [id, task] of tasks) {
+    if (id.startsWith(prefix) && task.status === 'processing') {
+      let progress: any = {};
+      try { progress = JSON.parse(task.progress); } catch {}
+      return res.json({ running: true, taskId: id, done: progress.done || 0, total: progress.total || 0, msg: progress.msg || '' });
+    }
+  }
+  res.json({ running: false });
 });
 
 // POST /api/screenplay/:id/export - 导出剧本
@@ -1478,9 +1505,11 @@ app.post('/api/screenplay/:id/export', (_req, res) => {
 
 // POST /api/screenplay/:id/submission - 生成投稿材料
 app.post('/api/screenplay/:id/submission', async (req, res) => {
+  const taskId = `submission_${req.params.id}_${Date.now()}`;
   try {
     const result = await generateSubmissionMaterials(req.params.id, (msg) => {
-      wsManager.broadcast('screenplay_progress', { projectId: req.params.id, message: msg });
+      const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+      wsManager.broadcast(taskId, task);
     });
     if (!result.success) return res.status(500).json({ error: result.error });
     res.json({ materials: result.materials });
@@ -1598,6 +1627,13 @@ app.post('/api/factory/:id/parse', async (req, res) => {
     };
     wsManager.broadcast(taskId, task);
   });
+});
+
+// POST /api/factory/:id/retry-protagonists - 重试主角提取
+app.post('/api/factory/:id/retry-protagonists', async (req, res) => {
+  const result = await retryProtagonistExtraction(req.params.id);
+  if (!result.success) return res.status(500).json({ error: result.error });
+  res.json({ success: true, protagonists: result.protagonists });
 });
 
 // POST /api/factory/:id/generate-agents - 生成初代Agent群

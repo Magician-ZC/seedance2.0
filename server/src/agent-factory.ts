@@ -62,6 +62,7 @@ export interface WritingAgent {
   id: string;
   generation: number;
   parentId?: string;
+  persona?: string;           // 写作人格 ID
   systemPrompt: string;
   styleDirective: string;
   techniqueWeights: Record<string, number>;
@@ -303,11 +304,73 @@ async function runWithConcurrency<T>(tasks: Array<() => Promise<T>>, concurrency
   return results.filter((r): r is T => r !== undefined);
 }
 
-// 技巧维度（融合 screenplay-creator 知识库的维度）
+// 技巧维度（扩展为16维，覆盖更多写作风格差异）
 const TECHNIQUE_DIMENSIONS = [
+  // 核心叙事
   'hook_strength', 'dialogue_ratio', 'description_density', 'pacing_speed',
-  'emotion_intensity', 'conflict_density', 'humor_level', 'suspense_buildup',
-  'character_depth', 'scene_transition',
+  'emotion_intensity', 'conflict_density', 'suspense_buildup', 'scene_transition',
+  // 深度维度
+  'character_depth', 'humor_level', 'foreshadow_density', 'metaphor_richness',
+  // 结构维度
+  'timeline_complexity', 'pov_switching', 'cliffhanger_intensity', 'worldbuilding_depth',
+];
+
+// 写作人格模板（每个 Agent 分配一种，决定其核心创作哲学）
+const WRITER_PERSONAS: Array<{
+  id: string;
+  name: string;
+  philosophy: string;
+  strengths: string[];
+  weightBias: Record<string, [number, number]>; // [min, max] 偏好范围
+}> = [
+  {
+    id: 'suspense_master', name: '悬疑大师',
+    philosophy: '每一句话都是伏笔，每一个场景都在编织谜网。读者永远猜不到下一步。',
+    strengths: ['层层递进的悬念', '反转设计', '线索埋藏与回收', '不可靠叙述'],
+    weightBias: { suspense_buildup: [0.7, 1.0], foreshadow_density: [0.6, 1.0], hook_strength: [0.7, 1.0], pacing_speed: [0.3, 0.6] },
+  },
+  {
+    id: 'emotion_weaver', name: '情感编织者',
+    philosophy: '故事的本质是情感共鸣。角色的每一次心跳、每一滴泪都要让读者感同身受。',
+    strengths: ['细腻的心理描写', '情感递进', '共情触发', '角色关系张力'],
+    weightBias: { emotion_intensity: [0.7, 1.0], character_depth: [0.7, 1.0], description_density: [0.5, 0.8], dialogue_ratio: [0.4, 0.7] },
+  },
+  {
+    id: 'rhythm_bomber', name: '节奏轰炸机',
+    philosophy: '快、准、狠。每一段都是信息弹，每一章都是过山车。读者根本停不下来。',
+    strengths: ['极速节奏', '密集爽点', '短句冲击', '零废话叙事'],
+    weightBias: { pacing_speed: [0.8, 1.0], conflict_density: [0.7, 1.0], hook_strength: [0.7, 1.0], description_density: [0.1, 0.3] },
+  },
+  {
+    id: 'dialogue_king', name: '对白之王',
+    philosophy: '好的对白自己会演戏。角色开口的瞬间，性格、冲突、潜台词全部到位。',
+    strengths: ['角色语言辨识度', '潜台词设计', '对话推进剧情', '口语化表达'],
+    weightBias: { dialogue_ratio: [0.7, 1.0], character_depth: [0.5, 0.8], humor_level: [0.3, 0.7], description_density: [0.1, 0.4] },
+  },
+  {
+    id: 'world_architect', name: '世界建筑师',
+    philosophy: '沉浸感来自细节。一个完整的世界观能让读者忘记自己在读小说。',
+    strengths: ['环境氛围营造', '世界观细节', '感官描写', '空间叙事'],
+    weightBias: { worldbuilding_depth: [0.7, 1.0], description_density: [0.6, 0.9], metaphor_richness: [0.5, 0.8], pacing_speed: [0.2, 0.5] },
+  },
+  {
+    id: 'conflict_engine', name: '冲突引擎',
+    philosophy: '没有冲突就没有故事。人与人、人与命运、人与自我——冲突无处不在。',
+    strengths: ['多层冲突叠加', '矛盾升级', '道德困境', '立场对立'],
+    weightBias: { conflict_density: [0.8, 1.0], emotion_intensity: [0.5, 0.8], hook_strength: [0.6, 0.9], humor_level: [0.0, 0.3] },
+  },
+  {
+    id: 'humor_assassin', name: '幽默刺客',
+    philosophy: '笑着笑着就哭了。用轻松的笔触写沉重的故事，反差才是最大的杀伤力。',
+    strengths: ['反差幽默', '吐槽式叙事', '黑色幽默', '轻松中藏刀'],
+    weightBias: { humor_level: [0.6, 1.0], dialogue_ratio: [0.5, 0.8], pacing_speed: [0.5, 0.8], emotion_intensity: [0.3, 0.6] },
+  },
+  {
+    id: 'structure_innovator', name: '结构革新者',
+    philosophy: '打破线性叙事的枷锁。时间线交错、视角切换、非线性结构让故事更有层次。',
+    strengths: ['非线性叙事', '多视角切换', '时间线操控', '结构性悬念'],
+    weightBias: { timeline_complexity: [0.7, 1.0], pov_switching: [0.6, 1.0], scene_transition: [0.7, 1.0], foreshadow_density: [0.5, 0.8] },
+  },
 ];
 
 
@@ -535,7 +598,17 @@ ${sampleText}
 
 请提取所有主角和重要配角的详细档案。`;
 
-  const result = await llmJSON<{ protagonists: FactoryProtagonist[] }>(projectId, 'extract_protagonists', system, user, 'parse');
+  const result = await (async () => {
+    for (let retry = 0; retry < 3; retry++) {
+      if (retry > 0) {
+        emitProgress(onProgress, `🎭 主角提取第${retry + 1}次重试（等待${retry * 3}s）...`);
+        await new Promise(r => setTimeout(r, retry * 3000));
+      }
+      const r = await llmJSON<{ protagonists: FactoryProtagonist[] }>(projectId, `extract_protagonists${retry > 0 ? `_retry${retry}` : ''}`, system, user, 'parse');
+      if (r.success && r.data?.protagonists?.length) return r;
+    }
+    return { success: false, data: undefined, error: '3次重试均失败' };
+  })();
   if (!result.success || !result.data?.protagonists?.length) {
     emitProgress(onProgress, `⚠️ 主角提取失败: ${result.error || '未返回有效数据'}`);
     return [];
@@ -550,6 +623,27 @@ ${sampleText}
   return valid;
 }
 
+/** 重试主角提取（DNA已解析但主角提取失败时调用） */
+export async function retryProtagonistExtraction(
+  projectId: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; protagonists?: FactoryProtagonist[]; error?: string }> {
+  const project = getFactory(projectId);
+  if (!project?.novelDNA) return { success: false, error: '请先完成DNA解析' };
+  if (!project.chapters?.length) return { success: false, error: '缺少章节数据' };
+
+  emitProgress(onProgress, '🎭 重新提取主角档案...');
+  const protagonists = await extractProtagonistsFromChapters(projectId, project.chapters, project.novelDNA, onProgress);
+  if (protagonists.length > 0) {
+    project.novelDNA.protagonists = protagonists;
+    updateFactory(projectId, { novelDNA: project.novelDNA });
+    emitProgress(onProgress, `✅ 提取到 ${protagonists.length} 位主角：${protagonists.map(p => p.name).join('、')}`);
+    return { success: true, protagonists };
+  }
+  emitProgress(onProgress, '❌ 主角提取仍然失败');
+  return { success: false, error: '主角提取失败' };
+}
+
 // ============================================================
 // 步骤2: 生成初代Agent群
 // ============================================================
@@ -562,26 +656,37 @@ export async function generateInitialAgents(
   if (!project?.novelDNA) return { success: false, error: '请先解析小说DNA' };
 
   const { novelDNA, agentsPerGeneration } = project;
-  emitProgress(onProgress, `正在生成 ${agentsPerGeneration} 个初代Agent（${TECHNIQUE_DIMENSIONS.length}个技巧维度）...`);
+  emitProgress(onProgress, `正在生成 ${agentsPerGeneration} 个初代Agent（${WRITER_PERSONAS.length}种人格 × ${TECHNIQUE_DIMENSIONS.length}维技巧）...`);
 
   // 短暂延迟，等待前端 WebSocket 订阅就绪
   await new Promise(r => setTimeout(r, 500));
 
   const agents: WritingAgent[] = [];
   for (let i = 0; i < agentsPerGeneration; i++) {
+    // 均匀分配人格，确保每种人格都有代表
+    const persona = WRITER_PERSONAS[i % WRITER_PERSONAS.length];
     const weights: Record<string, number> = {};
     for (const dim of TECHNIQUE_DIMENSIONS) {
-      weights[dim] = Math.round((0.1 + Math.random() * 0.9) * 100) / 100;
+      const bias = persona.weightBias[dim];
+      if (bias) {
+        // 人格偏好范围内随机 + 小幅噪声
+        const base = bias[0] + Math.random() * (bias[1] - bias[0]);
+        weights[dim] = Math.round(Math.max(0.05, Math.min(1.0, base + (Math.random() - 0.5) * 0.15)) * 100) / 100;
+      } else {
+        // 非偏好维度：完全随机
+        weights[dim] = Math.round((0.1 + Math.random() * 0.9) * 100) / 100;
+      }
     }
-    const styleDirective = buildStyleDirective(novelDNA, weights);
+    const styleDirective = buildStyleDirective(novelDNA, weights, persona);
     agents.push({
       id: `gen0_${String(i).padStart(3, '0')}`,
       generation: 0,
-      systemPrompt: buildAgentSystemPrompt(novelDNA, styleDirective),
+      persona: persona.id,
+      systemPrompt: buildAgentSystemPrompt(novelDNA, styleDirective, persona),
       styleDirective,
       techniqueWeights: weights,
       scoreHistory: [],
-      mutationLog: ['初始随机生成'],
+      mutationLog: [`初始生成 [${persona.name}]`],
     });
     if ((i + 1) % 20 === 0 || i === agentsPerGeneration - 1) {
       emitProgress(onProgress, `Agent生成进度: ${i + 1}/${agentsPerGeneration}`);
@@ -591,7 +696,7 @@ export async function generateInitialAgents(
   }
 
   updateFactory(projectId, { agents, currentGeneration: 0 });
-  emitProgress(onProgress, `✅ ${agentsPerGeneration} 个初代Agent生成完成`);
+  emitProgress(onProgress, `✅ ${agentsPerGeneration} 个初代Agent生成完成（${WRITER_PERSONAS.length}种写作人格）`);
   return { success: true };
 }
 
@@ -965,18 +1070,21 @@ function buildStoryStages(chapters: ChapterContent[], targetStages: number = 8):
   }
   return stages;
 }
-/** 构建分批采样索引：将全书均匀分成多批，每批采样 perBatch 章 */
+/** 构建分批采样索引：保证20%覆盖率，每批8章，动态计算批次数 */
 function buildBatchSampleIndices(totalChapters: number, perBatch: number): number[][] {
   if (totalChapters <= perBatch) return [[...Array(totalChapters).keys()]];
-  // 目标：覆盖全书，每批均匀采样
-  // 批次数 = ceil(totalChapters / 间隔)，但限制最多10批避免太多LLM调用
-  const maxBatches = Math.min(10, Math.ceil(totalChapters / perBatch));
-  const step = totalChapters / (maxBatches * perBatch);
+  const COVERAGE = 0.2;
+  const BATCH_SIZE = 8;
+  const totalSamples = Math.max(perBatch, Math.ceil(totalChapters * COVERAGE));
+  const maxBatches = Math.ceil(totalSamples / BATCH_SIZE);
+  const step = totalChapters / totalSamples;
   const batches: number[][] = [];
   for (let b = 0; b < maxBatches; b++) {
     const batch: number[] = [];
-    for (let j = 0; j < perBatch; j++) {
-      const idx = Math.min(Math.floor((b * perBatch + j) * step), totalChapters - 1);
+    for (let j = 0; j < BATCH_SIZE; j++) {
+      const sampleIdx = b * BATCH_SIZE + j;
+      if (sampleIdx >= totalSamples) break;
+      const idx = Math.min(Math.floor(sampleIdx * step), totalChapters - 1);
       if (!batch.includes(idx)) batch.push(idx);
     }
     if (batch.length > 0) batches.push(batch);
@@ -985,46 +1093,118 @@ function buildBatchSampleIndices(totalChapters: number, perBatch: number): numbe
 }
 
 /** 构建风格指令（基于技巧权重） */
-function buildStyleDirective(dna: NovelDNA, weights: Record<string, number>): string {
+function buildStyleDirective(dna: NovelDNA, weights: Record<string, number>, persona?: typeof WRITER_PERSONAS[number]): string {
   const rules: string[] = [];
   const w = weights;
 
-  if (w.hook_strength > 0.7) rules.push('每个场景结尾必须有强力钩子');
-  else if (w.hook_strength > 0.4) rules.push('适度使用悬念钩子');
-  else rules.push('钩子使用克制，注重自然推进');
+  // 辅助：根据权重生成连续强度描述
+  const intensity = (val: number, low: string, mid: string, high: string, extreme: string) =>
+    val >= 0.85 ? extreme : val >= 0.6 ? high : val >= 0.35 ? mid : low;
 
-  if (w.dialogue_ratio > 0.7) rules.push('大量对话推进剧情，对话占比60%以上');
-  else if (w.dialogue_ratio > 0.4) rules.push('对话与叙述均衡');
-  else rules.push('以叙述为主，对话精炼');
+  // 核心叙事维度
+  rules.push(intensity(w.hook_strength,
+    '钩子使用克制，注重自然推进',
+    '适度使用悬念钩子，关键节点设置',
+    '每个场景结尾设置钩子，保持吸引力',
+    '极强钩子密度，每段结尾都要让读者欲罢不能'));
 
-  if (w.description_density > 0.7) rules.push('浓密的环境和心理描写');
-  else if (w.description_density > 0.4) rules.push('适度描写，重点场景详写');
-  else rules.push('描写简洁利落');
+  rules.push(intensity(w.dialogue_ratio,
+    '以叙述为主，对话精炼点睛',
+    '对话与叙述均衡，各占一半',
+    '大量对话推进剧情，对话占比60%以上',
+    '几乎全对话驱动，用角色之口讲述一切'));
 
-  if (w.pacing_speed > 0.7) rules.push('极快节奏，每段都有信息量');
-  else if (w.pacing_speed > 0.4) rules.push('节奏张弛有度');
-  else rules.push('慢节奏铺陈，注重氛围');
+  rules.push(intensity(w.description_density,
+    '描写极简利落，一笔带过',
+    '适度描写，重点场景详写',
+    '浓密的环境和心理描写，营造沉浸感',
+    '极致描写密度，每个场景都是一幅画'));
 
-  if (w.emotion_intensity > 0.7) rules.push('情感浓烈，角色情绪外放');
-  else if (w.emotion_intensity > 0.4) rules.push('情感适度，关键时刻爆发');
-  else rules.push('情感内敛克制');
+  rules.push(intensity(w.pacing_speed,
+    '慢节奏铺陈，注重氛围和细节积累',
+    '节奏张弛有度，快慢交替',
+    '快节奏推进，每段都有信息量',
+    '极速节奏，零废话，信息密度拉满'));
 
-  if (w.conflict_density > 0.7) rules.push('冲突密集，每个场景都有张力');
-  else if (w.conflict_density > 0.4) rules.push('冲突节奏合理');
-  else rules.push('冲突缓慢积累');
+  rules.push(intensity(w.emotion_intensity,
+    '情感内敛克制，留白给读者',
+    '情感适度，关键时刻爆发',
+    '情感浓烈，角色情绪外放',
+    '极致情感冲击，每个转折都要直击心脏'));
 
-  if (w.humor_level > 0.5) rules.push('适当加入幽默元素');
-  if (w.suspense_buildup > 0.7) rules.push('层层递进的悬念铺垫');
-  if (w.character_depth > 0.7) rules.push('深入刻画角色内心');
-  if (w.scene_transition > 0.7) rules.push('场景切换流畅自然');
+  rules.push(intensity(w.conflict_density,
+    '冲突缓慢积累，暗流涌动',
+    '冲突节奏合理，有张有弛',
+    '冲突密集，每个场景都有张力',
+    '冲突无处不在，多层矛盾同时爆发'));
 
-  return rules.join('。\n');
+  rules.push(intensity(w.suspense_buildup,
+    '悬念轻描淡写',
+    '适度悬念铺垫',
+    '层层递进的悬念铺垫',
+    '精密的悬念网络，每条线索都指向不同方向'));
+
+  rules.push(intensity(w.scene_transition,
+    '场景切换直接跳切',
+    '场景过渡自然',
+    '场景切换流畅，有过渡设计',
+    '电影级场景转换，蒙太奇式衔接'));
+
+  // 深度维度
+  rules.push(intensity(w.character_depth,
+    '角色功能化，服务剧情',
+    '角色有基本立体感',
+    '深入刻画角色内心，展现多面性',
+    '角色心理解剖级刻画，每个人都有完整的内心世界'));
+
+  if (w.humor_level > 0.35) {
+    rules.push(intensity(w.humor_level, '', '偶尔加入幽默调剂', '幽默元素贯穿，用笑点缓解紧张', '吐槽式叙事风格，笑中带泪'));
+  }
+
+  if (w.foreshadow_density > 0.35) {
+    rules.push(intensity(w.foreshadow_density, '', '关键处埋设伏笔', '密集伏笔网络，前后呼应', '每一个细节都是伏笔，草蛇灰线绵延千里'));
+  }
+
+  if (w.metaphor_richness > 0.35) {
+    rules.push(intensity(w.metaphor_richness, '', '适当使用修辞', '丰富的比喻和意象', '文学性修辞密集，意象层叠'));
+  }
+
+  // 结构维度
+  if (w.timeline_complexity > 0.5) {
+    rules.push(intensity(w.timeline_complexity, '', '', '使用倒叙或插叙丰富叙事层次', '多时间线交错叙事，过去与现在交织'));
+  }
+
+  if (w.pov_switching > 0.5) {
+    rules.push(intensity(w.pov_switching, '', '', '适时切换视角展现不同立场', '频繁视角切换，多角色内心独白交替'));
+  }
+
+  if (w.cliffhanger_intensity > 0.5) {
+    rules.push(intensity(w.cliffhanger_intensity, '', '', '章末悬念设计精巧', '每章结尾都是炸弹级悬念，让人无法停读'));
+  }
+
+  if (w.worldbuilding_depth > 0.5) {
+    rules.push(intensity(w.worldbuilding_depth, '', '', '注重世界观细节的自然融入', '沉浸式世界构建，用细节堆砌真实感'));
+  }
+
+  // 人格特色加成
+  if (persona) {
+    rules.push(`\n【创作哲学】${persona.philosophy}`);
+    rules.push(`【核心优势】${persona.strengths.join('、')}`);
+  }
+
+  return rules.filter(Boolean).join('。\n');
 }
 
 /** 构建Agent系统提示词 */
-function buildAgentSystemPrompt(dna: NovelDNA, styleDirective: string): string {
-  return `你是一位专业的网络小说作家，你的任务是模仿一部爆款小说的写作风格来创作内容。
+function buildAgentSystemPrompt(dna: NovelDNA, styleDirective: string, persona?: typeof WRITER_PERSONAS[number]): string {
+  const personaBlock = persona ? `
+## 你的写作人格：${persona.name}
+${persona.philosophy}
+你的核心优势：${persona.strengths.join('、')}
+` : '';
 
+  return `你是一位专业的网络小说作家，你的任务是模仿一部爆款小说的写作风格来创作内容。
+${personaBlock}
 ## 目标小说的写作DNA
 - 题材：${dna.genre} | 基调：${dna.tone}
 - 叙事风格：${dna.narrativeStyle}
@@ -1225,21 +1405,34 @@ async function analyzeElites(projectId: string, elites: WritingAgent[], dna: Nov
 /** 变异Agent */
 function mutateAgent(parent: WritingAgent, generation: number, index: number, dna: NovelDNA, _eliteAnalysis: string): WritingAgent {
   const newWeights = { ...parent.techniqueWeights };
+  // 确保新维度存在（兼容旧 Agent）
+  for (const dim of TECHNIQUE_DIMENSIONS) {
+    if (newWeights[dim] === undefined) newWeights[dim] = Math.round((0.1 + Math.random() * 0.9) * 100) / 100;
+  }
   const mutations: string[] = [];
   const dims = Object.keys(newWeights);
-  const mutateCount = 2 + Math.floor(Math.random() * 2);
+  const mutateCount = 2 + Math.floor(Math.random() * 3); // 2-4个维度变异
   const selectedDims = dims.sort(() => Math.random() - 0.5).slice(0, mutateCount);
 
   for (const dim of selectedDims) {
-    const delta = (Math.random() - 0.5) * 0.3;
+    const delta = (Math.random() - 0.5) * 0.35; // 稍大的变异幅度
     newWeights[dim] = Math.max(0.05, Math.min(1.0, Math.round((newWeights[dim] + delta) * 100) / 100));
     mutations.push(`${dim}: ${parent.techniqueWeights[dim]}→${newWeights[dim]}`);
   }
 
-  const styleDirective = buildStyleDirective(dna, newWeights);
+  // 10% 概率人格突变
+  let persona = WRITER_PERSONAS.find(p => p.id === parent.persona);
+  if (Math.random() < 0.1) {
+    const otherPersonas = WRITER_PERSONAS.filter(p => p.id !== parent.persona);
+    persona = otherPersonas[Math.floor(Math.random() * otherPersonas.length)];
+    mutations.push(`人格突变: ${parent.persona}→${persona.id}`);
+  }
+
+  const styleDirective = buildStyleDirective(dna, newWeights, persona);
   return {
     id: `gen${generation}_mut_${String(index).padStart(3, '0')}`, generation, parentId: parent.id,
-    systemPrompt: buildAgentSystemPrompt(dna, styleDirective), styleDirective, techniqueWeights: newWeights,
+    persona: persona?.id || parent.persona,
+    systemPrompt: buildAgentSystemPrompt(dna, styleDirective, persona), styleDirective, techniqueWeights: newWeights,
     scoreHistory: [], mutationLog: [...parent.mutationLog, `变异（第${generation}代）: ${mutations.join(', ')}`],
   };
 }
@@ -1247,14 +1440,21 @@ function mutateAgent(parent: WritingAgent, generation: number, index: number, dn
 /** 交叉两个Agent */
 function crossoverAgents(p1: WritingAgent, p2: WritingAgent, generation: number, index: number, dna: NovelDNA): WritingAgent {
   const newWeights: Record<string, number> = {};
-  for (const dim of Object.keys(p1.techniqueWeights)) {
-    const base = Math.random() > 0.5 ? p1.techniqueWeights[dim] : p2.techniqueWeights[dim];
-    newWeights[dim] = Math.max(0.05, Math.min(1.0, Math.round((base + (Math.random() - 0.5) * 0.1) * 100) / 100));
+  // 合并两个父代的所有维度
+  const allDims = new Set([...Object.keys(p1.techniqueWeights), ...Object.keys(p2.techniqueWeights), ...TECHNIQUE_DIMENSIONS]);
+  for (const dim of allDims) {
+    const v1 = p1.techniqueWeights[dim] ?? (0.1 + Math.random() * 0.9);
+    const v2 = p2.techniqueWeights[dim] ?? (0.1 + Math.random() * 0.9);
+    const base = Math.random() > 0.5 ? v1 : v2;
+    newWeights[dim] = Math.max(0.05, Math.min(1.0, Math.round((base + (Math.random() - 0.5) * 0.15) * 100) / 100));
   }
-  const styleDirective = buildStyleDirective(dna, newWeights);
+  // 随机继承一个父代的人格
+  const persona = WRITER_PERSONAS.find(p => p.id === (Math.random() > 0.5 ? p1.persona : p2.persona));
+  const styleDirective = buildStyleDirective(dna, newWeights, persona);
   return {
     id: `gen${generation}_cross_${String(index).padStart(3, '0')}`, generation, parentId: `${p1.id}×${p2.id}`,
-    systemPrompt: buildAgentSystemPrompt(dna, styleDirective), styleDirective, techniqueWeights: newWeights,
-    scoreHistory: [], mutationLog: [`交叉（第${generation}代）: ${p1.id} × ${p2.id}`],
+    persona: persona?.id,
+    systemPrompt: buildAgentSystemPrompt(dna, styleDirective, persona), styleDirective, techniqueWeights: newWeights,
+    scoreHistory: [], mutationLog: [`交叉（第${generation}代）: ${p1.id}[${p1.persona}] × ${p2.id}[${p2.persona}]`],
   };
 }

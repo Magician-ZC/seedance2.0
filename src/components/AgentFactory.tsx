@@ -86,7 +86,7 @@ function useTaskProgress(taskId: string | null, onDone: (signal?: string) => voi
   return { logs, error };
 }
 
-function DNADisplay({ dna, chapters, isZh }: { dna: NovelDNA; chapters: ChapterSummary[]; isZh: boolean }) {
+function DNADisplay({ dna, chapters, isZh, onRetryProtagonists, retryingProtagonists }: { dna: NovelDNA; chapters: ChapterSummary[]; isZh: boolean; onRetryProtagonists?: () => void; retryingProtagonists?: boolean }) {
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="p-6 rounded-2xl bg-[#111] border border-green-500/20 shadow-[0_0_20px_rgba(34,197,94,0.05)]">
@@ -154,7 +154,7 @@ function DNADisplay({ dna, chapters, isZh }: { dna: NovelDNA; chapters: ChapterS
       </div>
 
       {/* 主角档案 */}
-      {dna.protagonists && dna.protagonists.length > 0 && (
+      {dna.protagonists && dna.protagonists.length > 0 ? (
         <div className="p-6 rounded-2xl bg-[#111] border border-amber-500/20 shadow-[0_0_20px_rgba(245,158,11,0.05)]">
           <div className="flex items-center gap-3 mb-4">
             <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center">
@@ -184,6 +184,17 @@ function DNADisplay({ dna, chapters, isZh }: { dna: NovelDNA; chapters: ChapterS
               </div>
             ))}
           </div>
+        </div>
+      ) : (
+        <div className="p-6 rounded-2xl bg-[#111] border border-orange-500/20 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-lg">⚠️</span>
+            <span className="text-sm text-orange-400">{isZh ? '主角提取失败' : 'Protagonist extraction failed'}</span>
+          </div>
+          <button onClick={onRetryProtagonists} disabled={retryingProtagonists}
+            className="px-4 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-medium transition-colors">
+            {retryingProtagonists ? (isZh ? '提取中...' : 'Extracting...') : (isZh ? '重试提取主角' : 'Retry')}
+          </button>
         </div>
       )}
     </div>
@@ -359,6 +370,7 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
   const [projectNsfw, setProjectNsfw] = useState(false);
   // WebSocket 重连 key：从 hidden 恢复时递增，触发 useTaskProgress 重新连接
   const [wsReconnectKey, setWsReconnectKey] = useState(0);
+  const [retryingProtagonists, setRetryingProtagonists] = useState(false);
 
   // 组件挂载时检查未完成项目 & 加载模型列表
   useEffect(() => {
@@ -446,6 +458,18 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
       if (data?.project) setProject(data.project);
     } catch { /* ignore */ }
   }, [project?.id]);
+
+  const handleRetryProtagonists = async () => {
+    if (!project?.id) return;
+    setRetryingProtagonists(true);
+    try {
+      const res = await fetch(`/api/factory/${project.id}/retry-protagonists`, { method: 'POST' });
+      const data = await res.json();
+      if (data?.success) await refreshProject();
+      else setError(data?.error || '主角提取重试失败');
+    } catch (err) { setError((err as Error).message); }
+    finally { setRetryingProtagonists(false); }
+  };
 
   const handleTaskDone = useCallback((signal?: string) => {
     if (signal === 'refresh') {
@@ -755,7 +779,7 @@ export default function AgentFactory({ onClose, onMinimize, onStatusChange, hidd
                 </div>
               ) : (
                 <>
-                  <DNADisplay dna={project.novelDNA} chapters={project.chapters} isZh={isZh} />
+                  <DNADisplay dna={project.novelDNA} chapters={project.chapters} isZh={isZh} onRetryProtagonists={handleRetryProtagonists} retryingProtagonists={retryingProtagonists} />
                   <div className="flex justify-end pt-4">
                     <button onClick={() => setStep('agents')} 
                       className="px-8 py-3.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-[1.02]">

@@ -15,6 +15,7 @@ import GlobalMaterialsPanel from './components/GlobalMaterialsPanel';
 import GlobalCharactersPanel from './components/GlobalCharactersPanel';
 import AgentStorePanel from './components/AgentStorePanel';
 import CharacterAgentPanel from './components/CharacterAgentPanel';
+import ArenaPanel from './components/ArenaPanel';
 import BackgroundIndicator, { type BackgroundStatus } from './components/BackgroundIndicator';
 import './i18n';
 
@@ -156,6 +157,9 @@ export default function App() {
             )}
             {activeTab === 'characterAgents' && (
               <CharacterAgentPanel />
+            )}
+            {activeTab === 'arena' && (
+              <ArenaPanel />
             )}
           </div>
 
