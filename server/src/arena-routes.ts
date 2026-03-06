@@ -37,7 +37,8 @@ router.post('/score', async (req: Request, res: Response) => {
     const result = await scoreScreenplay(screenplayId, mode, roleKey);
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    console.error('[arena] /score 评分失败:', err);
+    res.status(500).json({ error: err.message || '评分服务内部错误' });
   }
 });
 

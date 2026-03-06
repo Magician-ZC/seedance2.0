@@ -1764,10 +1764,12 @@ export function exportScreenplay(projectId: string): { success: boolean; content
     for (const scene of ep.scenes) {
       md += `## 场次${scene.sceneNumber}\n\n`;
       md += `**场景：** ${scene.location}\n`;
-      md += `**出场人物：** ${scene.characters.join('、')}\n\n`;
+      md += `**出场人物：** ${Array.isArray(scene.characters) ? scene.characters.join('、') : (scene.characters || '')}\n\n`;
       md += `${scene.description}\n\n`;
-      for (const d of scene.dialogues) {
-        md += `**${d.character}**（${d.direction}）："${d.line}"\n\n`;
+      if (Array.isArray(scene.dialogues)) {
+        for (const d of scene.dialogues) {
+          md += `**${d.character}**（${d.direction}）："${d.line}"\n\n`;
+        }
       }
       if (scene.musicCue) md += `${scene.musicCue}\n\n`;
       md += `---\n\n`;

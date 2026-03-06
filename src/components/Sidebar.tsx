@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-export type NavTab = 'works' | 'materials' | 'characters' | 'arena' | 'authorAgents' | 'characterAgents';
+export type NavTab = 'works' | 'materials' | 'characters' | 'arena' | 'authorAgents' | 'characterAgents' | 'systemAgents';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -58,6 +58,14 @@ function TheaterIcon({ className }: { className?: string }) {
   );
 }
 
+function ShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  );
+}
+
 function SwordsIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
@@ -85,6 +93,7 @@ const TOP_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: s
 const AGENT_SUB_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
   { key: 'authorAgents', icon: PenIcon, labelZh: '作者仓库', labelEn: 'Author Agents' },
   { key: 'characterAgents', icon: TheaterIcon, labelZh: '群演仓库', labelEn: 'Cast Agents' },
+  { key: 'systemAgents', icon: ShieldIcon, labelZh: '系统Agent', labelEn: 'System Agents' },
 ];
 
 function BotIcon({ className }: { className?: string }) {
@@ -110,7 +119,7 @@ function ChevronIcon({ className, open }: { className?: string; open: boolean })
 export default function Sidebar({ activeTab, onTabChange }: SidebarProps) {
   const { i18n } = useTranslation();
   const isZh = i18n.language?.startsWith('zh');
-  const isAgentTab = activeTab === 'authorAgents' || activeTab === 'characterAgents';
+  const isAgentTab = activeTab === 'authorAgents' || activeTab === 'characterAgents' || activeTab === 'systemAgents';
   const [agentExpanded, setAgentExpanded] = useState(isAgentTab);
 
   const renderNavButton = (key: NavTab, Icon: typeof GridIcon, labelZh: string, labelEn: string, indent = false) => {

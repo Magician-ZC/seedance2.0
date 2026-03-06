@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import ForceGraph2D from 'react-force-graph-2d';
 import { CloseIcon, ArrowLeftIcon, SparkleIcon, CheckIcon, DownloadIcon, BookIcon, FilmIcon } from './Icons';
+import { createZipBlob } from '../utils/zip';
 
 // ============================================================
 // 类型定义（与后端对齐）
@@ -1021,35 +1022,71 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     await refreshProject();
   };
 
-  // 下载单项投稿材料
-  const handleDownloadMaterial = (content: string, suffix: string) => {
-    const title = project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title || '剧本';
-    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${title}-${suffix}.md`; a.click();
-    URL.revokeObjectURL(url);
+  // Markdown 转纯文本（去除 md 标记，保留可读格式）
+  const mdToPlainText = (md: string): string => {
+    return md
+      .replace(/^#{1,6}\s+/gm, '')           // 去除标题标记
+      .replace(/\*\*(.+?)\*\*/g, '$1')       // 去除粗体
+      .replace(/\*(.+?)\*/g, '$1')           // 去除斜体
+      .replace(/^\|.*\|$/gm, (line) => {     // 表格转为 key: value 格式
+        const cells = line.split('|').filter(c => c.trim());
+        if (cells.every(c => /^[-\s]+$/.test(c))) return ''; // 去除分隔行
+        if (cells.length === 2) return `${cells[0].trim()}：${cells[1].trim()}`;
+        return cells.map(c => c.trim()).join('  ');
+      })
+      .replace(/^>\s?/gm, '')                // 去除引用标记
+      .replace(/^---+$/gm, '')               // 去除分隔线
+      .replace(/\n{3,}/g, '\n\n')            // 压缩多余空行
+      .trim();
   };
 
-  // 一键下载全部投稿材料（含完整分集剧本）
+  // 触发文件下载的通用方法（兼容非 HTTPS 环境）
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    // 延迟释放，确保下载完成
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 1000);
+  };
+
+  // 下载单项投稿材料（纯文本格式）
+  const handleDownloadMaterial = (content: string, suffix: string) => {
+    const title = project?.selectedTitle || project?.creativePlan?.titleOptions?.[0]?.title || '剧本';
+    const plainText = mdToPlainText(content);
+    const blob = new Blob([plainText], { type: 'text/plain;charset=utf-8' });
+    triggerDownload(blob, `${title}-${suffix}.txt`);
+  };
+
+  // 一键下载全部投稿材料（ZIP 包含4个标签 + 分集剧本）
   const handleDownloadAll = async () => {
     if (!submissionData || !project) return;
     const title = project.selectedTitle || project.creativePlan?.titleOptions?.[0]?.title || '剧本';
-    const parts = [submissionData.episodeOutline, submissionData.ecard, submissionData.characterBios, submissionData.scriptSynopsis];
+
+    const files = [
+      { name: `${title}-集纲.txt`, text: mdToPlainText(submissionData.episodeOutline || '') },
+      { name: `${title}-E-card.txt`, text: mdToPlainText(submissionData.ecard || '') },
+      { name: `${title}-人物小传.txt`, text: mdToPlainText(submissionData.characterBios || '') },
+      { name: `${title}-剧本大纲.txt`, text: mdToPlainText(submissionData.scriptSynopsis || '') },
+    ];
 
     // 获取完整分集剧本
     try {
       const res = await fetch(`/api/screenplay/${project.id}/export`, { method: 'POST' });
       const data = await res.json();
-      if (data?.content) parts.push(data.content);
+      if (data?.content) {
+        files.push({ name: `${title}-分集剧本.txt`, text: mdToPlainText(data.content) });
+      }
     } catch { /* 降级：不含分集剧本 */ }
 
-    const all = parts.join('\n\n---\n\n');
-    const blob = new Blob([all], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `${title}-投稿包.md`; a.click();
-    URL.revokeObjectURL(url);
+    const zipBlob = createZipBlob(files);
+    triggerDownload(zipBlob, `${title}-投稿材料.zip`);
   };
 
   // 步骤导航（根据项目状态自动跳转）

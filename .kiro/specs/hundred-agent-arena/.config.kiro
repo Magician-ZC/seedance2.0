@@ -1,0 +1,3 @@
+name = "hundred-agent-arena"
+version = "2.0.0"
+description = "百Agent竞技创作模式 - 嵌入剧本创作流水线的漏斗式阶段竞争，50创作Agent+50评审Agent，群演仓库深度集成"

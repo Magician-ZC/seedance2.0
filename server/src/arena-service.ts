@@ -217,6 +217,29 @@ export const FALLBACK_WEIGHTS: Record<string, number> = {
 // Prompt 动态参数替换
 // ============================================================
 
+/** JSON 输出格式说明，追加到每个评审 prompt 末尾 */
+const JSON_FORMAT_INSTRUCTION = `
+
+请严格按以下 JSON 格式输出，不要输出任何其他内容：
+{
+  "scores": {
+    "plotStructure": <0-10>,
+    "characterization": <0-10>,
+    "dialogueQuality": <0-10>,
+    "pacing": <0-10>,
+    "creativity": <0-10>,
+    "commercialPotential": <0-10>
+  },
+  "comments": {
+    "plotStructure": "点评...",
+    "characterization": "点评...",
+    "dialogueQuality": "点评...",
+    "pacing": "点评...",
+    "creativity": "点评...",
+    "commercialPotential": "点评..."
+  }
+}`;
+
 /**
  * 获取指定评审角色的 System Prompt，支持动态参数替换
  * @param role 评审角色
@@ -238,7 +261,7 @@ export function getReviewPrompt(
     prompt = prompt.replace('{agentSystemPrompt}', agentSystemPrompt || '');
   }
 
-  return prompt;
+  return prompt + JSON_FORMAT_INSTRUCTION;
 }
 
 
@@ -352,23 +375,41 @@ export async function scoreScreenplay(
     const result = await chatCompletionJSON<LLMScoreResponse>(systemPrompt, content);
 
     if (!result.success || !result.data?.scores) {
+      console.warn(`[arena] 角色 ${role} LLM 调用失败:`, result.error || 'scores 为空');
       skippedRoles.push(role);
       continue;
     }
 
+    // 中文 key → 英文 key 映射（兼容 LLM 返回中文字段名）
+    const CN_KEY_MAP: Record<string, keyof DimensionScores> = {
+      '剧情结构': 'plotStructure', '人物塑造': 'characterization',
+      '对白质量': 'dialogueQuality', '节奏把控': 'pacing',
+      '创意新颖度': 'creativity', '商业潜力': 'commercialPotential',
+    };
+    const rawScores = result.data.scores as Record<string, number>;
+    const normalizedScores: Record<string, number> = {};
+    for (const [k, v] of Object.entries(rawScores)) {
+      normalizedScores[CN_KEY_MAP[k] || k] = v;
+    }
+    const rawComments = (result.data.comments || {}) as Record<string, string>;
+    const normalizedComments: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawComments)) {
+      normalizedComments[CN_KEY_MAP[k] || k] = v;
+    }
+
     // 解析并 clamp 分数
     const scores: DimensionScores = {
-      plotStructure: clampScore(result.data.scores.plotStructure),
-      characterization: clampScore(result.data.scores.characterization),
-      dialogueQuality: clampScore(result.data.scores.dialogueQuality),
-      pacing: clampScore(result.data.scores.pacing),
-      creativity: clampScore(result.data.scores.creativity),
-      commercialPotential: clampScore(result.data.scores.commercialPotential),
+      plotStructure: clampScore(normalizedScores.plotStructure),
+      characterization: clampScore(normalizedScores.characterization),
+      dialogueQuality: clampScore(normalizedScores.dialogueQuality),
+      pacing: clampScore(normalizedScores.pacing),
+      creativity: clampScore(normalizedScores.creativity),
+      commercialPotential: clampScore(normalizedScores.commercialPotential),
     };
 
     const comments = {} as Record<keyof DimensionScores, string>;
     for (const key of DIMENSION_KEYS) {
-      comments[key] = result.data.comments?.[key] || '';
+      comments[key] = normalizedComments[key] || '';
     }
 
     roleScores.push({ role, scores, comments, weight: 0 }); // weight 后续计算

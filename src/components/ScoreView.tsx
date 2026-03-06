@@ -56,12 +56,16 @@ export default function ScoreView({ screenplays, onBack }: ScoreViewProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
       const data: ArenaScoreResult = await res.json();
       setResult(data);
       setStep('result');
-    } catch {
-      setError(t('common.loading'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '评分请求失败';
+      setError(msg);
       setStep('mode');
     }
   };
