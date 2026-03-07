@@ -1,5 +1,5 @@
 .env
-.db
+*.db
 node_modules
 server/dist
 data/images
