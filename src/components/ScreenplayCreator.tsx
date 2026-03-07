@@ -9,6 +9,14 @@ import { createZipBlob } from '../utils/zip';
 // 类型定义（与后端对齐）
 // ============================================================
 
+interface ArenaConfig {
+  groupCount: number;
+  membersPerGroup: number;
+  strictness: 'standard' | 'strict' | 'extreme';
+  concurrency: number;
+  passScore: number;
+}
+
 interface ScreenplayConfig {
   genres: string[];
   audience: '男频' | '女频' | '全年龄';
@@ -22,6 +30,8 @@ interface ScreenplayConfig {
   referenceNovel?: string;
   useCharacterPool?: boolean;
   useTimeline?: boolean;
+  arenaMode?: boolean;
+  arenaConfig?: ArenaConfig;
 }
 
 interface CreativePlan {
@@ -528,6 +538,12 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   const [referenceNovel, setReferenceNovel] = useState('');
   const [useCharacterPool, setUseCharacterPool] = useState(false);
   const [useTimeline, setUseTimeline] = useState(false);
+  const [arenaMode, setArenaMode] = useState(false);
+  const [arenaStrictness, setArenaStrictness] = useState<'standard' | 'strict' | 'extreme'>('standard');
+  const [arenaConcurrency, setArenaConcurrency] = useState(5);
+  // 竞技结果状态
+  const [arenaCandidates, setArenaCandidates] = useState<Record<string, any[]>>({});
+  const [showAlternatives, setShowAlternatives] = useState(false);
   const novelFileRef = useRef<HTMLInputElement>(null);
 
   // 模型选择 & NSFW
@@ -751,6 +767,39 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   };
 
   // ============================================================
+  // 竞技模式：候选获取与选择
+  // ============================================================
+
+  const fetchArenaCandidates = async (stage: string) => {
+    if (!project?.id) return;
+    try {
+      const res = await fetch(`/api/screenplay/${project.id}/arena/candidates/${stage}`);
+      const data = await res.json();
+      if (data?.candidates) setArenaCandidates(prev => ({ ...prev, [stage]: data.candidates }));
+    } catch { /* ignore */ }
+  };
+
+  const handleArenaSelect = async (stage: string, candidateId: string) => {
+    if (!project?.id) return;
+    try {
+      await fetch(`/api/screenplay/${project.id}/arena/select`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage, candidateId }),
+      });
+      await fetchArenaCandidates(stage);
+      await refreshProject();
+    } catch { /* ignore */ }
+  };
+
+  // 竞技模式：自动加载当前步骤的候选
+  useEffect(() => {
+    if (!project?.config?.arenaMode || !project?.id) return;
+    const stageMap: Record<string, string> = { plan: 'creative_plan', characters: 'character', directory: 'directory', writing: 'episode' };
+    const stage = stageMap[step];
+    if (stage && !arenaCandidates[stage]) fetchArenaCandidates(stage);
+  }, [step, project?.id, project?.config?.arenaMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ============================================================
   // API 调用
   // ============================================================
 
@@ -760,10 +809,10 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     try {
       const res = await fetch('/api/screenplay/create', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, useCharacterPool: useCharacterPool || undefined, useTimeline: useTimeline || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined }),
+        body: JSON.stringify({ genres: selectedGenres, audience, tone, endingType, totalEpisodes, language: 'zh-CN', mode: 'domestic', customPrompt: customPrompt || undefined, agentId: selectedAgentId || undefined, referenceNovel: referenceNovel || undefined, useCharacterPool: useCharacterPool || undefined, useTimeline: useTimeline || undefined, fixedModel: selectedModelIdx >= 0 ? availableModels[selectedModelIdx]?.config : undefined, nsfw: (globalNsfwEnabled && projectNsfw) || undefined, arenaMode: arenaMode || undefined, arenaConfig: arenaMode ? { groupCount: 10, membersPerGroup: 4, strictness: arenaStrictness, concurrency: arenaConcurrency, passScore: arenaStrictness === 'extreme' ? 7.0 : arenaStrictness === 'strict' ? 6.0 : 5.5 } : undefined }),
       });
       const data = await res.json();
-      if (data?.project) { setProject(normalizeProject(data.project)); setStep('plan'); }
+      if (data?.project) { setProject(normalizeProject(data.project)); setStep('plan'); if (data.taskId) setTaskId(data.taskId); }
       else setError(data?.error || '创建失败');
     } catch (err) { setError((err as Error).message); }
     finally { setLoading(false); }
@@ -1395,6 +1444,43 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                     )}
                   </section>
 
+                  {/* 竞技模式开关 */}
+                  <section className="p-4 rounded-2xl bg-cyan-500/5 border border-cyan-500/20">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
+                          ⚔️ {isZh ? '竞技模式' : 'Arena Mode'}
+                        </span>
+                        <p className="text-[10px] text-gray-500 mt-1">{isZh ? '10大编剧风格各自带队竞争，百Agent漏斗式淘汰，优中选优' : '10 writing styles compete, 100 agents funnel selection'}</p>
+                      </div>
+                      <button onClick={() => setArenaMode(!arenaMode)}
+                        className={`relative w-10 h-5 rounded-full transition-colors ${arenaMode ? 'bg-cyan-500' : 'bg-white/10'}`}>
+                        <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${arenaMode ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                      </button>
+                    </div>
+                    {arenaMode && (
+                      <div className="mt-3 space-y-3">
+                        <p className="text-[10px] text-cyan-400/80">⚔️ {isZh ? '听花岛、倾故、麦芽传媒等10大编剧风格将各自带队竞争，经过创意方案→角色开发→分集目录→分集剧本四轮淘汰，最终产出Top 3精品剧本' : '10 master styles compete through 4 rounds of elimination'}</p>
+                        <div className="flex items-center gap-3">
+                          <label className="text-[10px] text-gray-400">{isZh ? '评审严格度' : 'Strictness'}</label>
+                          <div className="flex gap-1">
+                            {(['standard', 'strict', 'extreme'] as const).map(level => (
+                              <button key={level} onClick={() => setArenaStrictness(level)}
+                                className={`px-2 py-0.5 rounded text-[10px] transition-colors ${arenaStrictness === level ? 'bg-cyan-500/30 text-cyan-300 border border-cyan-500/50' : 'bg-white/5 text-gray-500 border border-white/10'}`}>
+                                {level === 'standard' ? (isZh ? '标准' : 'Standard') : level === 'strict' ? (isZh ? '严格' : 'Strict') : (isZh ? '极致' : 'Extreme')}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <label className="text-[10px] text-gray-400">{isZh ? '并发数' : 'Concurrency'}</label>
+                          <input type="number" min={1} max={20} value={arenaConcurrency} onChange={e => setArenaConcurrency(Math.max(1, Math.min(20, parseInt(e.target.value) || 5)))}
+                            className="w-16 px-2 py-0.5 rounded bg-[#161616] border border-white/10 text-gray-300 text-[10px] outline-none focus:border-cyan-500/30" />
+                        </div>
+                      </div>
+                    )}
+                  </section>
+
                   <section>
                     <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">{isZh ? '自定义要求' : 'Custom Prompt'}</label>
                     <textarea value={customPrompt} onChange={e => setCustomPrompt(e.target.value)}
@@ -1435,6 +1521,36 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           {/* Step: 创作方案 */}
           {step === 'plan' && (
             <div className="space-y-8 animate-fade-in">
+              {/* 竞技模式：Top 10 方案卡片 */}
+              {project?.config?.arenaMode && arenaCandidates['creative_plan']?.length > 0 && (
+                <div className="space-y-4 mb-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">⚔️</span>
+                    <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">{isZh ? '竞技结果：Top 10 创意方案' : 'Arena: Top 10 Plans'}</h3>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {arenaCandidates['creative_plan'].map((c: any, i: number) => (
+                      <div key={c.id} className={`p-4 rounded-xl border transition-all cursor-pointer ${c.selected ? 'bg-cyan-900/20 border-cyan-500/50' : 'bg-[#161616] border-white/5 hover:border-cyan-500/30'}`}
+                        onClick={() => handleArenaSelect('creative_plan', c.id)}>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-cyan-400">#{c.rank || i + 1}</span>
+                            <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 text-[10px]">{c.systemAgentName}</span>
+                          </div>
+                          <span className="text-sm font-bold text-white">{(c.score || 0).toFixed(1)}</span>
+                        </div>
+                        {c.content?.titleOptions?.[0] && (
+                          <div className="text-sm font-medium text-white mb-1">{c.content.titleOptions[0].title}</div>
+                        )}
+                        {c.content?.storyLine && (
+                          <p className="text-[11px] text-gray-400 line-clamp-2">{c.content.storyLine}</p>
+                        )}
+                        {c.selected && <div className="text-[10px] text-cyan-400 mt-2">✓ {isZh ? '已选择' : 'Selected'}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {!project?.creativePlan ? (
                 <div className="flex flex-col items-center justify-center py-20">
                   <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
@@ -1548,6 +1664,44 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           {/* Step: 角色开发 */}
           {step === 'characters' && (
             <div className="space-y-8 animate-fade-in">
+              {/* 竞技模式：最佳角色设计 */}
+              {project?.config?.arenaMode && arenaCandidates['character']?.length > 0 && (
+                <div className="mb-2">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">⚔️</span>
+                      <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">{isZh ? '竞技结果：最佳角色设计' : 'Arena: Best Characters'}</h3>
+                    </div>
+                    <button onClick={() => setShowAlternatives(!showAlternatives)}
+                      className="text-[10px] text-cyan-400 hover:text-cyan-300 transition-colors">
+                      {showAlternatives ? (isZh ? '收起候选' : 'Hide') : (isZh ? '查看其他候选' : 'Show Alternatives')}
+                    </button>
+                  </div>
+                  {showAlternatives && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+                      {arenaCandidates['character'].map((c: any, i: number) => (
+                        <div key={c.id} className={`p-3 rounded-xl border transition-all cursor-pointer ${c.selected ? 'bg-cyan-900/20 border-cyan-500/50' : 'bg-[#161616] border-white/5 hover:border-cyan-500/30'}`}
+                          onClick={() => handleArenaSelect('character', c.id)}>
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-cyan-400">#{c.rank || i + 1}</span>
+                              <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 text-[10px]">{c.systemAgentName}</span>
+                            </div>
+                            <span className="text-sm font-bold text-white">{(c.score || 0).toFixed(1)}</span>
+                          </div>
+                          {c.content?.characters && (
+                            <p className="text-[10px] text-gray-400">{c.content.characters.length} {isZh ? '个角色' : 'characters'}</p>
+                          )}
+                          {c.characterPoolIds?.length > 0 && (
+                            <span className="text-[9px] text-amber-400">🎭 {isZh ? `${c.characterPoolIds.length}个群演角色` : `${c.characterPoolIds.length} from pool`}</span>
+                          )}
+                          {c.selected && <div className="text-[10px] text-cyan-400 mt-1">✓ {isZh ? '已选择' : 'Selected'}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {!project?.characterDesign ? (
                 <div className="space-y-8">
                   <div className="flex flex-col items-center justify-center py-20">
@@ -1622,6 +1776,37 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           {/* Step: 分集目录 */}
           {step === 'directory' && (
             <div className="space-y-8 animate-fade-in">
+              {/* 竞技模式：Top 5 分集目录 */}
+              {project?.config?.arenaMode && arenaCandidates['directory']?.length > 0 && (
+                <div className="mb-2 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">⚔️</span>
+                    <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">{isZh ? '竞技结果：Top 5 分集目录' : 'Arena: Top 5 Directories'}</h3>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3">
+                    {arenaCandidates['directory'].map((c: any, i: number) => (
+                      <div key={c.id} className={`p-4 rounded-xl border transition-all cursor-pointer ${c.selected ? 'bg-cyan-900/20 border-cyan-500/50' : 'bg-[#161616] border-white/5 hover:border-cyan-500/30'}`}
+                        onClick={() => handleArenaSelect('directory', c.id)}>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-cyan-400">#{c.rank || i + 1}</span>
+                            <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 text-[10px]">{c.systemAgentName}</span>
+                          </div>
+                          <span className="text-sm font-bold text-white">{(c.score || 0).toFixed(1)}</span>
+                        </div>
+                        {Array.isArray(c.content) && (
+                          <div className="flex gap-3 text-[10px] text-gray-400">
+                            <span>{c.content.length} {isZh ? '集' : 'eps'}</span>
+                            <span>🔥 {c.content.filter((d: any) => d.mark === '🔥').length}</span>
+                            <span>💰 {c.content.filter((d: any) => d.mark === '💰').length}</span>
+                          </div>
+                        )}
+                        {c.selected && <div className="text-[10px] text-cyan-400 mt-1">✓ {isZh ? '已选择' : 'Selected'}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {!project?.episodeDirectory ? (
                 <div className="flex flex-col items-center justify-center py-20">
                   <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
@@ -1694,6 +1879,48 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           {/* Step: 分集撰写 */}
           {step === 'writing' && (
             <div className="space-y-8 animate-fade-in">
+              {/* 竞技模式：Top 3 剧本 */}
+              {project?.config?.arenaMode && arenaCandidates['episode']?.length > 0 && (
+                <div className="mb-2 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-lg">⚔️</span>
+                    <h3 className="text-sm font-bold text-cyan-400 uppercase tracking-wider">{isZh ? '竞技结果：Top 3 剧本' : 'Arena: Top 3 Screenplays'}</h3>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {arenaCandidates['episode'].map((c: any, i: number) => (
+                      <div key={c.id} className={`p-4 rounded-xl border transition-all cursor-pointer ${c.selected ? 'bg-cyan-900/20 border-cyan-500/50' : 'bg-[#161616] border-white/5 hover:border-cyan-500/30'}`}
+                        onClick={() => handleArenaSelect('episode', c.id)}>
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-lg font-bold ${i === 0 ? 'text-yellow-400' : i === 1 ? 'text-gray-300' : 'text-amber-600'}`}>
+                              {i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 text-[10px]">{c.systemAgentName}{isZh ? '风格出品' : ' Style'}</span>
+                          </div>
+                          <span className="text-lg font-bold text-white">{(c.score || 0).toFixed(1)}</span>
+                        </div>
+                        {c.directionScores && (
+                          <div className="space-y-1 mb-3">
+                            {(c.directionScores as any[]).slice(0, 5).map((ds: any) => (
+                              <div key={ds.directionId} className="flex items-center gap-2">
+                                <span className="text-[9px] text-gray-500 w-16 truncate">{ds.directionName}</span>
+                                <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden">
+                                  <div className="h-full bg-cyan-500/60 rounded-full" style={{ width: `${(ds.medianScore / 10) * 100}%` }} />
+                                </div>
+                                <span className="text-[9px] text-gray-400 w-6 text-right">{ds.medianScore?.toFixed(1)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {c.content?.episodes && (
+                          <p className="text-[10px] text-gray-400">{c.content.episodes.length} {isZh ? '集完整剧本' : 'episodes'}</p>
+                        )}
+                        {c.selected && <div className="text-[10px] text-cyan-400 mt-2">✓ {isZh ? '已选择为正式剧本' : 'Selected as final'}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* 控制栏 */}
               <div className="bg-[#161616] p-6 rounded-2xl border border-white/5 flex flex-wrap items-center justify-between gap-4">
                 <div>

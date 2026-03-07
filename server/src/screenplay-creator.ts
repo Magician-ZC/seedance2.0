@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { chatCompletionJSON, chatCompletion, getLLMConfig, getNextConfig, selectConfig, enhancePromptForNSFW, type LLMConfig, type TaskType } from './llm-service.js';
 import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProjectById, listScreenplayProjects as dbListScreenplayProjects, deleteScreenplayProject as dbDeleteScreenplayProject, listCharacterAgents, type CharacterAgentRow } from './db-service.js';
 import { splitNovelIntoChapters, splitTextIntoChunks } from './novel-to-drama.js';
+import type { ArenaConfig } from './arena-engine.js';
 
 // ============================================================
 // 类型定义
@@ -25,6 +26,8 @@ export interface ScreenplayConfig {
   useTimeline?: boolean;       // 是否启用跨时代时间线架构（仙侠/穿越/科幻等宏大叙事）
   fixedModel?: LLMConfig | null; // 项目级锁定模型
   nsfw?: boolean;              // NSFW 模式
+  arenaMode?: boolean;         // 竞技模式开关
+  arenaConfig?: ArenaConfig;   // 竞技参数
 }
 
 /** 参考小说深度解析摘要 */

@@ -42,6 +42,10 @@ import {
   buildFactoryCharacterPrompt, retryProtagonistExtraction, type FactoryProtagonist,
 } from './agent-factory.js';
 import arenaRoutes from './arena-routes.js';
+import {
+  startArenaCreation, selectCandidate, getArenaStatus, getArenaCandidates,
+  type FunnelStage,
+} from './arena-engine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1226,7 +1230,7 @@ app.get('/api/screenplay/genres', (_req, res) => {
 
 // POST /api/screenplay/create - 创建剧本项目
 app.post('/api/screenplay/create', (req, res) => {
-  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool, useTimeline } = req.body;
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool, useTimeline, arenaMode, arenaConfig } = req.body;
   if (!genres?.length || !audience || !tone || !totalEpisodes) {
     return res.status(400).json({ error: '缺少必要参数' });
   }
@@ -1242,7 +1246,50 @@ app.post('/api/screenplay/create', (req, res) => {
     nsfw: nsfw || false,
   });
   if ('error' in result) return res.status(400).json({ error: result.error });
+
+  // 竞技模式：创建项目后启动异步竞技流程
+  if (arenaMode && arenaConfig) {
+    const taskId = createTaskId();
+    startArenaCreation(result.id, arenaConfig, taskId).catch(err => {
+      console.error('[arena] 竞技创作启动失败:', err);
+    });
+    return res.json({ project: result, async: true, taskId });
+  }
+
+  // 普通模式：原有逻辑不变
   res.json({ project: result });
+});
+
+// POST /api/screenplay/:id/arena/select - 用户选择某阶段候选
+app.post('/api/screenplay/:id/arena/select', (req, res) => {
+  const { stage, candidateId } = req.body;
+  if (!stage || !candidateId) {
+    return res.status(400).json({ error: '缺少 stage 或 candidateId' });
+  }
+  try {
+    selectCandidate(req.params.id, stage as FunnelStage, candidateId);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || '选择候选失败' });
+  }
+});
+
+// GET /api/screenplay/:id/arena/status - 竞技状态查询
+app.get('/api/screenplay/:id/arena/status', (req, res) => {
+  const status = getArenaStatus(req.params.id);
+  if (!status) return res.status(404).json({ error: '未找到竞技会话' });
+  res.json(status);
+});
+
+// GET /api/screenplay/:id/arena/candidates/:stage - 候选列表查询（含系统Agent风格来源信息）
+app.get('/api/screenplay/:id/arena/candidates/:stage', (req, res) => {
+  const validStages: FunnelStage[] = ['creative_plan', 'character', 'directory', 'episode'];
+  const stage = req.params.stage as FunnelStage;
+  if (!validStages.includes(stage)) {
+    return res.status(400).json({ error: `无效的阶段: ${req.params.stage}` });
+  }
+  const candidates = getArenaCandidates(req.params.id, stage);
+  res.json({ candidates });
 });
 
 // GET /api/screenplay/list - 列出所有剧本项目

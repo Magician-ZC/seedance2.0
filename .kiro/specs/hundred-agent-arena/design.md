@@ -7,20 +7,22 @@
 ### 漏斗模型
 
 ```
-阶段1：创意方案    50个创作Agent → 评审筛选 → Top 10 方案
-阶段2：角色开发    10×3个Agent + 群演仓库 → 评审筛选 → 10套角色
-阶段3：分集目录    10×2个Agent → 评审筛选 → Top 5 目录
-阶段4：分集剧本    Top 5 全量生成 → 逐集评审打回 → Top 3 剧本
-阶段5：用户选择    Top 3 → 用户选1 → 进入审片/投稿
+阶段1：创意方案    10个系统Agent组长各带4人=50人 → 组内互审 → 每组选1 → 跨组评审 → 10方案
+阶段2：角色开发    10方案×(组长+2变体)=30人 + 群演仓库素材 → 评审 → 每方案留最佳 → 10套角色
+阶段3：分集目录    10套×(组长+1变体)=20人 → 评审 → Top 5目录
+阶段4：分集剧本    Top 5由各自组长全量生成 → 逐集评审打回 → Top 3剧本
+阶段5：用户选择    Top 3（标注系统Agent风格来源）→ 用户选1 → 进入审片/投稿
 ```
 
 ### 核心设计决策
 
-1. **嵌入而非独立**：竞技模式作为 `ScreenplayConfig.arenaMode` 开关嵌入现有流程，复用 `screenplay-creator.ts` 的所有生成函数
-2. **阶段式评审**：每个阶段只激活相关的评审方向（而非全部50人），节省LLM调用成本
-3. **群演仓库深度集成**：角色开发阶段优先从群演仓库匹配角色，复用现有 `generateCharactersFromPool` 的世界观模拟机制
-4. **用户可介入**：每个阶段的筛选结果都展示给用户，用户可以手动选择偏好，而非完全自动化
-5. **并发队列调度**：所有Agent的LLM调用通过 `QueueScheduler` 控制并发上限
+1. **系统Agent为组长**：10个系统Agent（听花岛、倾故、麦芽传媒等）各自担任一个创作组的组长，直接参与创作并用自身风格指导组内Agent，确保每组产出有鲜明的编剧风格烙印
+2. **嵌入而非独立**：竞技模式作为 `ScreenplayConfig.arenaMode` 开关嵌入现有流程，复用 `screenplay-creator.ts` 的所有生成函数
+3. **阶段式评审**：每个阶段只激活相关的评审方向（而非全部50人），节省LLM调用成本
+4. **群演仓库深度集成**：角色开发阶段优先从群演仓库匹配角色，复用现有 `generateCharactersFromPool` 的世界观模拟机制
+5. **用户可介入**：每个阶段的筛选结果都展示给用户，标注来自哪个系统Agent风格，用户可以手动选择偏好
+6. **并发队列调度**：所有Agent的LLM调用通过 `QueueScheduler` 控制并发上限
+7. **风格溯源**：每个候选产出都标注其系统Agent风格来源，用户可以看到"听花岛风格出品"vs"麦芽传媒风格出品"的直接对比
 
 ## 架构
 
@@ -85,19 +87,21 @@ sequenceDiagram
     U->>FE: 配置 + arenaMode=true
     FE->>API: POST /api/screenplay/create (含arenaConfig)
     API->>AE: startArenaCreation(config)
-    AE->>AE: 生成50个创作Agent + 50个评审Agent
+    AE->>AE: 组建10个系统Agent创作组(10组长+40组员=50人) + 50个评审Agent
 
-    Note over U,WS: ═══ 阶段1：创意方案 (50→10) ═══
-    AE->>WS: "创意方案竞技开始"
-    loop 50个创作Agent (并发≤5)
+    Note over U,WS: ═══ 阶段1：创意方案 (10组×5人=50→组内互审→10→跨组评审→10方案) ═══
+    AE->>WS: "创意方案竞技开始: 10个系统Agent组长各带4人"
+    loop 10个创作组 × 5人 (并发≤5)
         AE->>Q: enqueue(创作任务)
-        Q->>LLM: generateCreativePlan核心逻辑
+        Q->>LLM: generateCreativePlan核心逻辑(组长用原始Prompt,组员用变异Prompt)
         LLM-->>Q: 创意方案
         Q-->>AE: 收集结果
-        AE->>WS: "创意方案: {n}/50 完成"
+        AE->>WS: "{系统Agent名}组: {n}/5 完成"
     end
+    AE->>AE: 组内互审: 组长审查组员方案, 组员环形互审
+    AE->>AE: 每组选出最佳1个方案(组长和组员平等竞争) → 10个方案
     AE->>WS: "评审开始: 剧情结构+商业潜力+创意新颖度"
-    loop 50个方案 × 3方向 × 5人 (并发≤5)
+    loop 10个方案 × 3方向 × 5人 (并发≤5)
         AE->>Q: enqueue(评审任务)
         Q->>LLM: 专业评审
         LLM-->>RV: 评分+点评
@@ -135,19 +139,19 @@ sequenceDiagram
     WS-->>FE: 展示Top 5对比
     U->>FE: 选择偏好目录(或默认Top 1)
 
-    Note over U,WS: ═══ 阶段4：分集剧本 (5→3) ═══
-    loop Top 5 × 全量集数 (并发≤5)
-        AE->>Q: enqueue(剧本生成任务)
-        Q->>LLM: generateEpisode
+    Note over U,WS: ═══ 阶段4：分集剧本 (Top 5由各自系统Agent组长全量生成→逐集评审→3) ═══
+    loop Top 5 × 全量集数 (各自系统Agent组长创作, 并发≤5)
+        AE->>Q: enqueue(剧本生成任务, 组长完整systemPrompt注入)
+        Q->>LLM: generateEpisode(组长风格指导)
         LLM-->>AE: 单集剧本
         AE->>RV: 逐集评审(全10方向)
-        alt 评分 < 6.0
-            AE->>Q: 打回修改(最多2次)
+        alt 评分 < passScore
+            AE->>Q: 打回修改(组长根据自身风格+评审意见修改, 最多2次)
         end
     end
     AE->>AE: 综合评分排名 → Top 3
-    AE->>WS: "竞技完成: Top 3剧本"
-    WS-->>FE: 展示Top 3选择
+    AE->>WS: "竞技完成: Top 3剧本(标注系统Agent风格来源)"
+    WS-->>FE: 展示Top 3选择(如"听花岛风格出品"、"麦芽传媒风格出品")
     U->>FE: 选择最终剧本
     FE->>API: 设为正式剧本 → 进入审片/投稿
 ```
@@ -166,11 +170,11 @@ import { ScreenplayConfig, ScreenplayProject } from './screenplay-creator.js';
 // ============ 配置类型 ============
 
 interface ArenaConfig {
-  writerCount: number;        // 创作Agent数量，默认50
-  groupCount: number;         // 分组数，默认5
+  groupCount: number;           // 创作组数，固定10（对应10个系统Agent）
+  membersPerGroup: number;      // 每组变体组员数，默认4（组长+4组员=5人/组）
   strictness: 'standard' | 'strict' | 'extreme'; // 评审严格度
-  concurrency: number;        // LLM并发数，默认5
-  passScore: number;          // 通过分数线，standard=5.5, strict=6.0, extreme=7.0
+  concurrency: number;          // LLM并发数，默认5
+  passScore: number;            // 通过分数线，standard=5.5, strict=6.0, extreme=7.0
 }
 
 // ============ 主入口 ============
@@ -230,56 +234,81 @@ async function runEpisodeArena(
 ): Promise<StageCandidates<FullScreenplay>>;
 ```
 
-#### 2. 创作Agent风格变异生成
+#### 2. 创作Agent组织：系统Agent组长 + 变体组员
 
-从10个系统Agent（`system-agents-data.ts`）的风格基因中变异派生50个创作Agent。
+10个系统Agent（`system-agents-data.ts`）各自担任一个创作组的组长，每组再派生4个变体组员，共50人。
 
 ```typescript
-interface StyleGene {
-  baseStyleId: string;          // 派生自哪个系统Agent
-  narrativeStructure: string;   // 叙事结构偏好（从systemPrompt中提取）
-  characterMethod: string;      // 角色塑造方法
-  dialogueStyle: string;        // 对白风格
-  emotionRhythm: string;        // 情绪节奏
-  hookDesign: string;           // 钩子设计
+interface WriterGroup {
+  id: string;                     // 'group-sys-01' ~ 'group-sys-10'
+  leader: WriterAgent;            // 组长：系统Agent本体
+  members: WriterAgent[];         // 组员：4个变体Agent
+  systemAgentId: string;          // 对应的系统Agent ID
+  systemAgentName: string;        // 如"听花岛风格"
 }
 
 interface WriterAgent {
   id: string;
   name: string;
+  groupId: string;
+  isLeader: boolean;              // 是否为组长（系统Agent本体）
+  systemAgentId: string;          // 所属系统Agent
   styleGene: StyleGene;
-  systemPrompt: string;         // 编译后的完整创作Prompt
+  systemPrompt: string;           // 组长=原始systemPrompt，组员=变异后Prompt
 }
 
-// 变异策略：10个系统Agent各派生5个变体 = 50个
-// 每个变体在父代基础上随机变异1-2个基因维度
-// 变异方式：
-//   - 替换：用另一个系统Agent的对应基因替换
-//   - 增强：强化某个特征（如"钩子密度×2"）
-//   - 融合：取两个系统Agent的对应基因做混合
+interface StyleGene {
+  baseStyleId: string;
+  narrativeStructure: string;
+  characterMethod: string;
+  dialogueStyle: string;
+  emotionRhythm: string;
+  hookDesign: string;
+}
 
-function generateWriterAgents(count: number): WriterAgent[] {
-  const agents: WriterAgent[] = [];
-  const perBase = Math.ceil(count / SYSTEM_AGENTS.length);
-  
-  for (const base of SYSTEM_AGENTS) {
-    const baseGene = extractStyleGene(base);
-    for (let i = 0; i < perBase && agents.length < count; i++) {
+// 组建10个创作组
+function buildWriterGroups(): WriterGroup[] {
+  return SYSTEM_AGENTS.map(sysAgent => {
+    const baseGene = extractStyleGene(sysAgent);
+    
+    // 组长：直接使用系统Agent的原始systemPrompt
+    const leader: WriterAgent = {
+      id: `leader-${sysAgent.id}`,
+      name: `${sysAgent.name}·组长`,
+      groupId: `group-${sysAgent.id}`,
+      isLeader: true,
+      systemAgentId: sysAgent.id,
+      styleGene: baseGene,
+      systemPrompt: sysAgent.systemPrompt,  // 原始完整Prompt
+    };
+    
+    // 4个组员：在组长风格基础上变异
+    const members: WriterAgent[] = [];
+    for (let i = 0; i < 4; i++) {
       const mutated = mutateStyleGene(baseGene, SYSTEM_AGENTS);
-      agents.push({
-        id: `writer-${agents.length}`,
-        name: `${base.name}·变体${i + 1}`,
+      members.push({
+        id: `member-${sysAgent.id}-${i}`,
+        name: `${sysAgent.name}·变体${i + 1}`,
+        groupId: `group-${sysAgent.id}`,
+        isLeader: false,
+        systemAgentId: sysAgent.id,
         styleGene: mutated,
         systemPrompt: compileWriterPrompt(mutated),
       });
     }
-  }
-  return agents;
+    
+    return {
+      id: `group-${sysAgent.id}`,
+      leader,
+      members,
+      systemAgentId: sysAgent.id,
+      systemAgentName: sysAgent.name,
+    };
+  });
 }
 
 // 从系统Agent的systemPrompt中提取5个基因维度
 function extractStyleGene(agent: SystemAgent): StyleGene {
-  // 通过正则/关键词从systemPrompt的各个【】段落中提取
   const prompt = agent.systemPrompt;
   return {
     baseStyleId: agent.id,
@@ -291,31 +320,65 @@ function extractStyleGene(agent: SystemAgent): StyleGene {
   };
 }
 
-// 变异：随机选1-2个维度进行变异
+// 提取systemPrompt中【xxx】段落的内容
+function extractSection(prompt: string, sectionName: string): string {
+  const regex = new RegExp(`【${sectionName}】\\n([\\s\\S]*?)(?=\\n【|$)`);
+  const match = prompt.match(regex);
+  return match?.[1]?.trim() || '';
+}
+
+// 变异：随机选1-2个维度，用其他系统Agent的对应基因替换或融合
 function mutateStyleGene(base: StyleGene, allAgents: SystemAgent[]): StyleGene {
   const gene = { ...base };
-  const dimensions: (keyof Omit<StyleGene, 'baseStyleId'>)[] = 
+  const dims: (keyof Omit<StyleGene, 'baseStyleId'>)[] = 
     ['narrativeStructure', 'characterMethod', 'dialogueStyle', 'emotionRhythm', 'hookDesign'];
   
-  // 随机选1-2个维度
   const mutCount = 1 + Math.floor(Math.random() * 2);
-  const selected = shuffle(dimensions).slice(0, mutCount);
+  const selected = shuffle(dims).slice(0, mutCount);
   
   for (const dim of selected) {
-    // 随机选另一个系统Agent的对应基因做替换/融合
     const donor = allAgents[Math.floor(Math.random() * allAgents.length)];
     const donorGene = extractStyleGene(donor);
     gene[dim] = Math.random() > 0.5 
-      ? donorGene[dim]  // 替换
-      : `${gene[dim]}\n同时融合：${donorGene[dim].slice(0, 200)}`; // 融合
+      ? donorGene[dim]
+      : `${gene[dim]}\n同时融合：${donorGene[dim].slice(0, 200)}`;
   }
   return gene;
 }
+
+// 将StyleGene编译为完整的创作Agent systemPrompt
+function compileWriterPrompt(gene: StyleGene): string {
+  return `你是一位专业的微短剧编剧。以下是你的创作风格指导：
+
+【叙事结构偏好】
+${gene.narrativeStructure}
+
+【角色塑造方法】
+${gene.characterMethod}
+
+【对白风格】
+${gene.dialogueStyle}
+
+【情绪节奏】
+${gene.emotionRhythm}
+
+【钩子设计】
+${gene.hookDesign}
+
+请严格按照以上风格指导进行创作。`;
+}
 ```
+
+组内互审机制：
+- 组长审查4个组员的方案，给出修改建议（组长视角：是否符合本组风格）
+- 组员之间环形互审（组员1审组员2，组员2审组员3...）
+- 组长方案不被组员审查（组长地位高于组员）
+- 互审后组员可修改1轮，组长方案不修改
+- 最终从5个方案中选最佳1个（组长和组员平等竞争评分）
 
 #### 3. 评审Agent专业体系
 
-10个专业方向，每方向5人，按阶段按需激活。
+10个专业方向，每方向5人，按阶段按需激活。评审Agent在评审时会收到候选产出的系统Agent风格来源信息，以便从不同风格视角给出更精准的评价。
 
 ```typescript
 interface ReviewDirection {
@@ -550,8 +613,12 @@ async function runCharacterArena(
     for (const design of designs) {
       if (design) candidates.push({ 
         id: `char-${candidates.length}`,
+        writerId: design.writerId,
+        groupId: plan.groupId,
+        systemAgentId: plan.systemAgentId,
+        systemAgentName: plan.systemAgentName,
         planId: plan.id,
-        data: design,
+        data: design.data,
         score: 0,
       });
     }
@@ -782,7 +849,11 @@ CREATE TABLE IF NOT EXISTS arena_sessions (
 CREATE TABLE IF NOT EXISTS arena_writers (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,            -- 所属创作组ID（group-sys-01 ~ group-sys-10）
   name TEXT NOT NULL,
+  is_leader BOOLEAN DEFAULT FALSE,   -- 是否为组长（系统Agent本体）
+  system_agent_id TEXT NOT NULL,     -- 对应的系统Agent ID（sys-01 ~ sys-10）
+  system_agent_name TEXT NOT NULL,   -- 系统Agent名称（如"听花岛风格"）
   base_style_id TEXT,                -- 派生自哪个系统Agent
   style_gene TEXT NOT NULL,          -- JSON: StyleGene
   system_prompt TEXT NOT NULL,
@@ -812,6 +883,9 @@ CREATE TABLE IF NOT EXISTS arena_candidates (
   session_id TEXT NOT NULL,
   stage TEXT NOT NULL,               -- 'creative_plan'|'character'|'directory'|'episode'
   writer_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,            -- 所属创作组ID（风格溯源）
+  system_agent_id TEXT NOT NULL,     -- 对应的系统Agent ID（风格溯源）
+  system_agent_name TEXT NOT NULL,   -- 系统Agent名称（如"听花岛风格出品"）
   parent_candidate_id TEXT,          -- 上一阶段的候选ID（追溯链）
   content TEXT NOT NULL,             -- JSON: 该阶段的产出内容
   character_pool_ids TEXT,           -- JSON: 使用的群演角色ID列表（角色阶段）
@@ -857,18 +931,18 @@ CREATE TABLE IF NOT EXISTS arena_scores (
 // ============ 配置 ============
 
 interface ArenaConfig {
-  writerCount: number;          // 默认50
-  groupCount: number;           // 默认5
-  strictness: 'standard' | 'strict' | 'extreme';
-  concurrency: number;          // 默认5
-  passScore: number;            // standard=5.5, strict=6.0, extreme=7.0
+  groupCount: number;           // 创作组数，固定10（对应10个系统Agent）
+  membersPerGroup: number;      // 每组变体组员数，默认4（组长+4组员=5人/组）
+  strictness: 'standard' | 'strict' | 'extreme'; // 评审严格度
+  concurrency: number;          // LLM并发数，默认5
+  passScore: number;            // 通过分数线，standard=5.5, strict=6.0, extreme=7.0
 }
 
 // 扩展现有 ScreenplayConfig
 interface ScreenplayConfig {
   // ...现有字段...
-  arenaMode?: boolean;
-  arenaConfig?: ArenaConfig;
+  arenaMode?: boolean;          // 竞技模式开关
+  arenaConfig?: ArenaConfig;    // 竞技参数
 }
 
 // ============ 漏斗阶段 ============
@@ -878,6 +952,9 @@ type FunnelStage = 'creative_plan' | 'character' | 'directory' | 'episode';
 interface CandidateEntry<T> {
   id: string;
   writerId: string;
+  groupId: string;              // 所属创作组ID（风格溯源）
+  systemAgentId: string;        // 对应的系统Agent ID
+  systemAgentName: string;      // 系统Agent名称（如"听花岛风格出品"）
   parentCandidateId?: string;   // 上一阶段的候选ID
   data: T;                      // 该阶段的产出内容
   characterPoolIds?: string[];  // 使用的群演角色ID（角色阶段）
@@ -935,6 +1012,7 @@ interface ArenaStatus {
   config: ArenaConfig;
   status: string;
   currentStage: FunnelStage | null;
+  groups: ArenaGroupInfo[];       // 10个创作组的概览信息
   stages: {
     creative_plan?: StageStatus;
     character?: StageStatus;
@@ -942,6 +1020,15 @@ interface ArenaStatus {
     episode?: StageStatus;
   };
   taskId: string;
+}
+
+// 创作组概览（前端展示用）
+interface ArenaGroupInfo {
+  groupId: string;
+  systemAgentId: string;
+  systemAgentName: string;        // 如"听花岛风格"
+  leaderName: string;             // 如"听花岛风格·组长"
+  memberCount: number;            // 组员数（不含组长）
 }
 
 interface StageStatus {
@@ -986,19 +1073,20 @@ interface ScreenplayConfig {
 
 | 阶段 | progress 格式 |
 |------|---------------|
-| 初始化 | `"竞技初始化: 生成50个创作Agent + 50个评审Agent"` |
-| 创意方案-创作 | `"创意方案: {n}/50 Agent完成"` |
-| 创意方案-评审 | `"方案评审: {dim} {n}/5 完成 ({total_done}/{total_all})"` |
-| 创意方案-筛选 | `"Top 10方案已选出, 最高分{score}"` |
+| 初始化 | `"竞技初始化: 组建10个系统Agent创作组(50人) + 50个评审Agent"` |
+| 创意方案-创作 | `"创意方案: {sysAgentName}组 {n}/5 完成 (总进度 {total}/{50})"` |
+| 创意方案-组内互审 | `"组内互审: {sysAgentName}组 互审完成, 选出最佳方案"` |
+| 创意方案-跨组评审 | `"跨组评审: {dim} {n}/5 完成 ({total_done}/{total_all})"` |
+| 创意方案-筛选 | `"Top 10方案已选出, 最高分{score}, 来自{sysAgentName}组"` |
 | 角色-群演匹配 | `"群演匹配: 选中{n}个候选角色"` |
-| 角色-创作 | `"角色设计: 方案{p} Agent{a}/3 完成"` |
+| 角色-创作 | `"角色设计: {sysAgentName}组 Agent{a}/3 完成"` |
 | 角色-评审 | `"角色评审: {n}/30 完成"` |
-| 目录-创作 | `"分集目录: {n}/20 完成"` |
+| 目录-创作 | `"分集目录: {sysAgentName}组 {n}/2 完成 (总进度 {total}/20)"` |
 | 目录-评审 | `"目录评审: {n}/20 完成, Top 5已选出"` |
-| 剧本-生成 | `"剧本生成: 方案{p} 第{ep}集"` |
-| 剧本-评审 | `"逐集评审: 方案{p} 第{ep}集 {score}分"` |
-| 剧本-打回 | `"打回修改: 方案{p} 第{ep}集 (第{r}次)"` |
-| 完成 | `"竞技完成: Top 3剧本, 最高分{score}"` |
+| 剧本-生成 | `"剧本生成: {sysAgentName}组长 第{ep}集"` |
+| 剧本-评审 | `"逐集评审: {sysAgentName}组 第{ep}集 {score}分"` |
+| 剧本-打回 | `"打回修改: {sysAgentName}组长 第{ep}集 (第{r}次)"` |
+| 完成 | `"竞技完成: Top 3剧本, 最高分{score}, 冠军来自{sysAgentName}组"` |
 
 ## 正确性属性
 
@@ -1062,6 +1150,24 @@ interface ScreenplayConfig {
 
 **Validates: Requirements 8.5**
 
+### Property 11: 系统Agent组长唯一性
+
+*For any* 创作组（WriterGroup），恰好有1个Agent的 `isLeader === true`，且该Agent的 `systemPrompt` 应与对应系统Agent的原始 `systemPrompt` 完全一致。
+
+**Validates: Requirements 2.1, 2.2**
+
+### Property 12: 风格溯源完整性
+
+*For any* 候选产出（CandidateEntry），其 `systemAgentId` 应对应 `SYSTEM_AGENTS` 中的一个有效系统Agent，且 `systemAgentName` 应与该系统Agent的 `name` 一致。
+
+**Validates: Requirements 2.6, 5.5**
+
+### Property 13: 创作组结构正确性
+
+*For any* 竞技会话，应恰好有10个创作组，每组恰好有1个组长 + `membersPerGroup` 个组员，且10个组长分别对应10个不同的系统Agent。
+
+**Validates: Requirements 2.1**
+
 ## 错误处理
 
 ### LLM调用失败
@@ -1098,15 +1204,22 @@ interface ScreenplayConfig {
 - Property 4: 生成随机方向评分和权重，验证加权总分范围
 - Property 5: 生成随机阶段，验证激活方向集合
 - Property 8: 模拟并发任务提交，验证并发上限
+- Property 11: 生成随机创作组，验证每组恰好1个组长且Prompt一致
+- Property 12: 生成随机候选产出，验证systemAgentId和systemAgentName的一致性
+- Property 13: 验证buildWriterGroups()输出恰好10组，每组结构正确
 
 ### 单元测试（Vitest）
 
 - QueueScheduler 并发控制、重试、超时测试
+- buildWriterGroups 创作组构建测试（10组、每组1组长+4组员、组长Prompt=原始Prompt）
+- extractStyleGene 基因提取测试（验证从systemPrompt中正确提取5个维度）
 - 风格变异算法测试（确保变异后的基因与父代不完全相同）
+- compileWriterPrompt 编译测试（验证输出包含5个维度段落）
 - 评审中位数计算测试
 - 加权评分归一化测试
 - 群演角色匹配逻辑测试
 - 候选排名和筛选逻辑测试
+- 风格溯源字段完整性测试（CandidateEntry的systemAgentId/Name）
 
 ### 测试文件组织
 
