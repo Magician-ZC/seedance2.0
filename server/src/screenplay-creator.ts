@@ -51,7 +51,14 @@ export interface CreativePlan {
   setting: { era: string; location: string; socialEnv: string; classRelation: string };
   storyLine: string;
   coreConflict: string;
-  threeActs: {
+  fourActs: {
+    act1: { episodeRange: string; coreEvents: string[]; relationships: string };
+    act2: { episodeRange: string; conflicts: string[]; turningPoints: string[] };
+    act3: { episodeRange: string; climax: string; turningPoints: string[] };
+    act4: { episodeRange: string; ending: string; themeElevation: string };
+  };
+  /** @deprecated 旧数据兼容，新数据使用 fourActs */
+  threeActs?: {
     act1: { episodeRange: string; coreEvents: string[]; relationships: string };
     act2: { episodeRange: string; conflicts: string[]; turningPoints: string[] };
     act3: { episodeRange: string; climax: string; ending: string };
@@ -62,6 +69,19 @@ export interface CreativePlan {
   endingDesign: { mainLine: string; romanceLine: string; foreshadowRecovery: string };
   // 跨时代时间线架构（useTimeline=true 时生成）
   timelineArcs?: TimelineArcs;
+}
+
+/** 兼容旧数据：threeActs → fourActs，旧数据 act3 拆分为 act3(转) + act4(合) */
+export function getActsFromPlan(plan: CreativePlan): CreativePlan['fourActs'] {
+  if (plan.fourActs) return plan.fourActs;
+  const old = (plan as any).threeActs;
+  if (!old) throw new Error('CreativePlan 缺少 fourActs 和 threeActs');
+  return {
+    act1: old.act1,
+    act2: old.act2,
+    act3: { episodeRange: old.act3.episodeRange, climax: old.act3.climax, turningPoints: [] },
+    act4: { episodeRange: old.act3.episodeRange, ending: old.act3.ending || old.act3.climax, themeElevation: '' },
+  };
 }
 
 /** 跨时代时间线架构 */
@@ -534,10 +554,11 @@ ${config.novelAnalysis.keyRelationships.join('\n')}
   "setting": {"era": "时代", "location": "地点", "socialEnv": "社会环境", "classRelation": "阶层关系"},
   "storyLine": "一句话故事线",
   "coreConflict": "核心冲突",
-  "threeActs": {
+  "fourActs": {
     "act1": {"episodeRange": "第1-N集", "coreEvents": ["事件1"], "relationships": "人物关系建立"},
     "act2": {"episodeRange": "第N-M集", "conflicts": ["冲突1"], "turningPoints": ["转折1"]},
-    "act3": {"episodeRange": "第M-末集", "climax": "终极对决", "ending": "结局处理"}
+    "act3": {"episodeRange": "第M-K集", "climax": "高潮对决", "turningPoints": ["转折1"]},
+    "act4": {"episodeRange": "第K-末集", "ending": "结局处理", "themeElevation": "主题升华"}
   },
   "rhythmWave": "全剧节奏波形描述",
   "paywallPlan": [{"episode": 10, "type": "身份揭露", "suspense": "悬念描述"}],
@@ -559,7 +580,7 @@ ${config.novelAnalysis.keyRelationships.join('\n')}
 
 要求：
 1. 提供3个剧名备选
-2. 三幕结构的集数范围必须覆盖全部${config.totalEpisodes}集
+2. 四幕结构（起承转合）的集数范围必须覆盖全部${config.totalEpisodes}集
 3. 付费卡点约${Math.round(config.totalEpisodes * 0.12)}个
 4. 爽点矩阵百分比之和为100${config.useTimeline ? `
 5. timelineArcs.eras 必须覆盖全部集数，时代之间不能有集数空隙
@@ -618,10 +639,11 @@ export async function generateCharacters(
 - 故事线：${creativePlan.storyLine}
 - 核心冲突：${creativePlan.coreConflict}
 - 时空背景：${creativePlan.setting.era}，${creativePlan.setting.location}，${creativePlan.setting.socialEnv}
-- 三幕结构：
-  第一幕：${creativePlan.threeActs.act1.coreEvents.join('、')}
-  第二幕：${creativePlan.threeActs.act2.conflicts.join('、')}
-  第三幕：${creativePlan.threeActs.act3.climax}
+- 四幕结构：
+  第一幕·起：${getActsFromPlan(creativePlan).act1.coreEvents.join('、')}
+  第二幕·承：${getActsFromPlan(creativePlan).act2.conflicts.join('、')}
+  第三幕·转：${getActsFromPlan(creativePlan).act3.climax}
+  第四幕·合：${getActsFromPlan(creativePlan).act4.ending}
 
 请生成角色设计，JSON 格式：
 {
@@ -1179,13 +1201,16 @@ ${creativePlan.timelineArcs.causalChains.map(c => `- ${c.name}：${c.nodes.map(n
     `${c.name}（${c.publicIdentity}${c.villainLayer ? `，第${c.villainLayer}层反派` : ''}）`
   ).join('、');
 
+  const acts = getActsFromPlan(creativePlan!);
+
   const userPrompt = `创作方案：
 - 故事线：${creativePlan!.storyLine}
 - 核心冲突：${creativePlan!.coreConflict}
-- 三幕结构：
-  第一幕(${creativePlan!.threeActs.act1.episodeRange})：${creativePlan!.threeActs.act1.coreEvents.join('、')}
-  第二幕(${creativePlan!.threeActs.act2.episodeRange})：${creativePlan!.threeActs.act2.conflicts.join('、')}
-  第三幕(${creativePlan!.threeActs.act3.episodeRange})：${creativePlan!.threeActs.act3.climax}
+- 四幕结构（起承转合）：
+  第一幕·起(${acts.act1.episodeRange})：${acts.act1.coreEvents.join('、')}
+  第二幕·承(${acts.act2.episodeRange})：${acts.act2.conflicts.join('、')}
+  第三幕·转(${acts.act3.episodeRange})：${acts.act3.climax}
+  第四幕·合(${acts.act4.episodeRange})：${acts.act4.ending}
 - 角色：${charSummary}
 - 付费卡点规划：${creativePlan!.paywallPlan.map(p => `第${p.episode}集(${p.type})`).join('、')}
 - 结局：${creativePlan!.endingDesign.mainLine}
@@ -1871,7 +1896,7 @@ export async function generateSubmissionMaterials(
   // ---- 4. 剧本大纲：需要 LLM 生成 ----
   onProgress?.('正在生成剧本大纲...');
   let scriptSynopsis = `# ${title} · 剧本大纲\n\n`;
-  const threeActs = creativePlan?.threeActs;
+  const actsData = creativePlan ? getActsFromPlan(creativePlan) : null;
   const ending = creativePlan?.endingDesign;
 
   // 提取角色名列表供大纲使用
@@ -1883,7 +1908,7 @@ export async function generateSubmissionMaterials(
     allCharNames.length ? `角色名（必须使用这些名字）：${allCharNames.join('、')}` : '',
     `故事线：${storyLine}`,
     `核心冲突：${coreConflict}`,
-    threeActs ? `三幕结构：第一幕${threeActs.act1.coreEvents.join('、')}；第二幕冲突${threeActs.act2.conflicts.join('、')}，转折${threeActs.act2.turningPoints.join('、')}；第三幕${threeActs.act3.climax}` : '',
+    actsData ? `四幕结构：第一幕·起${actsData.act1.coreEvents.join('、')}；第二幕·承${actsData.act2.conflicts.join('、')}，转折${actsData.act2.turningPoints.join('、')}；第三幕·转${actsData.act3.climax}；第四幕·合${actsData.act4.ending}` : '',
     ending ? `结局：${ending.mainLine}，感情线${ending.romanceLine}` : '',
     topSatisfaction ? `核心爽点：${topSatisfaction}` : '',
   ].filter(Boolean).join('\n');

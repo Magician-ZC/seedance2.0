@@ -39,10 +39,11 @@ interface CreativePlan {
   setting: { era: string; location: string; socialEnv: string; classRelation: string };
   storyLine: string;
   coreConflict: string;
-  threeActs: {
+  fourActs: {
     act1: { episodeRange: string; coreEvents: string[]; relationships: string };
     act2: { episodeRange: string; conflicts: string[]; turningPoints: string[] };
-    act3: { episodeRange: string; climax: string; ending: string };
+    act3: { episodeRange: string; climax: string; turningPoints: string[] };
+    act4: { episodeRange: string; ending: string; themeElevation: string };
   };
   rhythmWave: string;
   paywallPlan: Array<{ episode: number; type: string; suspense: string }>;
@@ -1557,7 +1558,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                     <span className="text-4xl">📋</span>
                   </div>
                   <h3 className="text-xl font-bold text-white mb-2">{isZh ? '生成创作方案' : 'Generate Plan'}</h3>
-                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将基于你的配置，生成包含故事线、人物关系、三幕结构和爽点设计的完整方案。' : 'AI will generate a complete creative plan including storyline, characters, and structure.'}</p>
+                  <p className="text-gray-500 mb-8 text-center max-w-md">{isZh ? 'AI 将基于你的配置，生成包含故事线、人物关系、四幕结构和爽点设计的完整方案。' : 'AI will generate a complete creative plan including storyline, characters, and structure.'}</p>
                   <button onClick={handleGeneratePlan} disabled={loading}
                     className="px-8 py-3.5 rounded-full bg-green-600 hover:bg-green-500 text-white font-bold shadow-lg shadow-green-900/20 transition-all hover:scale-105">
                     {isZh ? '开始生成' : 'Generate Now'}
@@ -1600,25 +1601,37 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                     </div>
 
                     <div className="bg-[#161616] rounded-2xl p-6 border border-white/5">
-                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '三幕结构' : 'Structure'}</h3>
+                      <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">{isZh ? '四幕结构' : 'Structure'}</h3>
                       <div className="space-y-6 relative">
                         <div className="absolute left-[15px] top-2 bottom-2 w-0.5 bg-white/5" />
-                        {(['act1', 'act2', 'act3'] as const).map((act, i) => {
-                          const a = project.creativePlan!.threeActs[act];
-                          const labels = [isZh ? '第一幕 · 建置' : 'Act 1', isZh ? '第二幕 · 对抗' : 'Act 2', isZh ? '第三幕 · 高潮' : 'Act 3'];
-                          const colors = ['text-blue-400', 'text-yellow-400', 'text-red-400'];
-                          return (
-                            <div key={act} className="relative pl-10">
-                              <div className={`absolute left-[11px] top-1 w-2.5 h-2.5 rounded-full bg-[#161616] border-2 ${i === 0 ? 'border-blue-500' : i === 1 ? 'border-yellow-500' : 'border-red-500'}`} />
-                              <div className={`text-xs font-bold mb-1 ${colors[i]}`}>{labels[i]} <span className="opacity-50 font-normal ml-2">{a.episodeRange}</span></div>
-                              <div className="text-sm text-gray-300">
-                                {'coreEvents' in a && (a as any).coreEvents.join(' → ')}
-                                {'conflicts' in a && (a as any).conflicts.join(' → ')}
-                                {'climax' in a && (a as any).climax}
+                        {(() => {
+                          const plan = project.creativePlan!;
+                          // 兼容旧数据：threeActs → fourActs
+                          const acts = plan.fourActs ?? (plan as any).threeActs;
+                          if (!acts) return null;
+                          const actKeys = acts.act4 ? ['act1', 'act2', 'act3', 'act4'] as const : ['act1', 'act2', 'act3'] as const;
+                          const labels4 = [isZh ? '第一幕 · 起' : 'Act 1', isZh ? '第二幕 · 承' : 'Act 2', isZh ? '第三幕 · 转' : 'Act 3', isZh ? '第四幕 · 合' : 'Act 4'];
+                          const labels3 = [isZh ? '第一幕 · 建置' : 'Act 1', isZh ? '第二幕 · 对抗' : 'Act 2', isZh ? '第三幕 · 高潮' : 'Act 3'];
+                          const labels = acts.act4 ? labels4 : labels3;
+                          const colors = ['text-blue-400', 'text-yellow-400', 'text-red-400', 'text-green-400'];
+                          const borders = ['border-blue-500', 'border-yellow-500', 'border-red-500', 'border-green-500'];
+                          return actKeys.map((act, i) => {
+                            const a = acts[act];
+                            if (!a) return null;
+                            return (
+                              <div key={act} className="relative pl-10">
+                                <div className={`absolute left-[11px] top-1 w-2.5 h-2.5 rounded-full bg-[#161616] border-2 ${borders[i]}`} />
+                                <div className={`text-xs font-bold mb-1 ${colors[i]}`}>{labels[i]} <span className="opacity-50 font-normal ml-2">{a.episodeRange}</span></div>
+                                <div className="text-sm text-gray-300">
+                                  {'coreEvents' in a && (a as any).coreEvents.join(' → ')}
+                                  {'conflicts' in a && (a as any).conflicts.join(' → ')}
+                                  {'climax' in a && (a as any).climax}
+                                  {'ending' in a && (a as any).ending}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          });
+                        })()}
                       </div>
                     </div>
                   </div>

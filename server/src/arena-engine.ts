@@ -9,6 +9,7 @@ import { SYSTEM_AGENTS, type SystemAgent } from './system-agents-data.js';
 import { chatCompletionJSON } from './llm-service.js';
 import {
   getScreenplay,
+  getActsFromPlan,
   type CreativePlan,
   type CharacterDesign,
   type ScreenplayConfig,
@@ -140,37 +141,298 @@ ${gene.hookDesign}
 }
 
 /**
- * 组建10个创作组：每个系统Agent担任组长，派生membersPerGroup个变体组员
- * @param membersPerGroup 每组变体组员数，默认4
+ * 系统Agent题材匹配关键词映射
+ * 每个Agent的genre/tone对应可匹配的题材关键词
  */
-export function buildWriterGroups(membersPerGroup = 4): WriterGroup[] {
-  return SYSTEM_AGENTS.map(sysAgent => {
-    const groupId = `group-${sysAgent.id}`;
-    const baseGene = extractStyleGene(sysAgent);
+const AGENT_GENRE_KEYWORDS: Record<string, string[]> = {
+  'sys-01': ['复仇', '女频', '逆袭', '宫斗', '宅斗', '重生', '虐渣'],
+  'sys-02': ['现实', '都市', '职场', '家庭', '社会', '文艺', '生活'],
+  'sys-03': [], // 全题材通用，始终匹配
+  'sys-04': [], // 流量算法通用，始终匹配
+  'sys-05': ['马甲', '身份', '隐藏', '豪门', '总裁', '逆袭', '打脸', '都市'],
+  'sys-06': ['男频', '战神', '热血', '修仙', '玄幻', '武道', '末世', '系统', '觉醒'],
+  'sys-07': ['虐恋', '情感', '爱情', '破碎', '错过', '遗憾', '悲剧', '女频'],
+  'sys-08': ['奇幻', '玄幻', '仙侠', '穿越', '异世界', '魔法', '科幻', '末世'],
+  'sys-09': ['甜宠', '恋爱', '甜蜜', '校园', '青春', '暖', '治愈', '女频'],
+  'sys-10': ['解构', '讽刺', '喜剧', '搞笑', '脑洞', '反套路', '实验'],
+  'sys-11': ['重生', '逆袭', '改命', '穿越', '前世', '宿命', '时空', '重活'],
+  'sys-12': ['玄幻', '修仙', '仙尊', '武道', '大帝', '圣王', '魔帝', '越阶', '境界'],
+  'sys-13': ['奇幻', '脑洞', '规则', '天幕', '异能', '设定', '穿越', '平行世界'],
+  'sys-14': ['都市', '专家', '神医', '律师', '商战', '职场', '马甲', '豪门', '警神'],
+  'sys-15': ['末世', '灵异', '诡异', '生存', '丧尸', '变异', '恐怖', '废土'],
+  'sys-16': ['历史', '年代', '种田', '穿越', '古代', '大明', '民国', '建设'],
+  'sys-17': ['系统', '面板', '升级', '转职', '觉醒', '数值', '任务', '抽奖', '开箱'],
+  'sys-18': ['千金', '换嫁', '身份', '错位', '冒名', '豪门', '认亲', '女频', '归位'],
+};
 
-    // 组长：直接使用系统Agent的原始systemPrompt
+/** 通用型Agent ID（不受题材限制，始终作为组长） */
+const UNIVERSAL_AGENT_IDS = new Set(['sys-03', 'sys-04']);
+
+// ============ 双层Agent体系：骨架 + 灵魂 ============
+
+/** 风格灵魂Agent（sys-01~10）：注入创作风格、语言质感、情绪调性 */
+const STYLE_AGENT_IDS = new Set([
+  'sys-01', 'sys-02', 'sys-03', 'sys-04', 'sys-05',
+  'sys-06', 'sys-07', 'sys-08', 'sys-09', 'sys-10',
+]);
+
+/** 题材骨架Agent（sys-11~18）：定义叙事逻辑、结构框架、题材规则 */
+const GENRE_AGENT_IDS = new Set([
+  'sys-11', 'sys-12', 'sys-13', 'sys-14', 'sys-15', 'sys-16', 'sys-17', 'sys-18',
+]);
+
+/** 获取风格Agent列表 */
+export function getStyleAgents(): SystemAgent[] {
+  return SYSTEM_AGENTS.filter(a => STYLE_AGENT_IDS.has(a.id));
+}
+
+/** 获取骨架Agent列表 */
+export function getGenreAgents(): SystemAgent[] {
+  return SYSTEM_AGENTS.filter(a => GENRE_AGENT_IDS.has(a.id));
+}
+
+/**
+ * 融合双层Prompt："逻辑定型，风格润色"
+ * 骨架Agent提供叙事结构、钩子设计等逻辑框架
+ * 风格Agent提供对白风格、情绪节奏等创作调性
+ * @param genreAgent 骨架Agent（sys-11~18）
+ * @param styleAgent 风格Agent（sys-01~10）
+ */
+export function compileHybridPrompt(genreAgent: SystemAgent, styleAgent: SystemAgent): string {
+  const genreGene = extractStyleGene(genreAgent);
+  const styleGene = extractStyleGene(styleAgent);
+
+  return `你是一位专业的微短剧编剧，同时具备精准的题材把控力和独特的创作风格。
+
+## 第一层：题材骨架（来自「${genreAgent.name}」—— ${genreAgent.genre}）
+以下是你的题材逻辑框架，决定了剧本的叙事结构和核心机制：
+
+【叙事结构偏好】
+${genreGene.narrativeStructure}
+
+【钩子设计】
+${genreGene.hookDesign}
+
+## 第二层：风格灵魂（来自「${styleAgent.name}」—— ${styleAgent.genre}/${styleAgent.tone}）
+以下是你的创作风格指导，决定了剧本的语言质感和情绪调性：
+
+【角色塑造方法】
+${styleGene.characterMethod}
+
+【对白风格】
+${styleGene.dialogueStyle}
+
+【情绪节奏】
+${styleGene.emotionRhythm}
+
+## 创作原则
+- 叙事结构和钩子设计严格遵循题材骨架的逻辑框架
+- 角色塑造、对白和情绪节奏融入风格灵魂的创作调性
+- 两层之间如有冲突，题材骨架的结构逻辑优先，风格灵魂负责润色表达
+
+请严格按照以上双层指导进行创作。`;
+}
+
+/**
+ * 融合StyleGene：骨架Agent提供结构维度，风格Agent提供表达维度
+ */
+export function hybridStyleGene(genreAgent: SystemAgent, styleAgent: SystemAgent): StyleGene {
+  const genreGene = extractStyleGene(genreAgent);
+  const styleGene = extractStyleGene(styleAgent);
+  return {
+    baseStyleId: `${genreAgent.id}+${styleAgent.id}`,
+    narrativeStructure: genreGene.narrativeStructure,  // 骨架定结构
+    characterMethod: styleGene.characterMethod,         // 灵魂定角色
+    dialogueStyle: styleGene.dialogueStyle,             // 灵魂定对白
+    emotionRhythm: styleGene.emotionRhythm,             // 灵魂定节奏
+    hookDesign: genreGene.hookDesign,                    // 骨架定钩子
+  };
+}
+
+/**
+ * 计算系统Agent与题材的匹配度
+ * @returns 'strong' 强匹配 | 'universal' 通用型 | 'weak' 弱匹配
+ */
+export function matchAgentToGenres(
+  agent: SystemAgent,
+  genres: string[],
+): 'strong' | 'universal' | 'weak' {
+  if (UNIVERSAL_AGENT_IDS.has(agent.id)) return 'universal';
+  if (!genres || genres.length === 0) return 'universal'; // 无题材信息时全部视为通用
+
+  const keywords = AGENT_GENRE_KEYWORDS[agent.id] || [];
+  if (keywords.length === 0) return 'universal';
+
+  const genreStr = genres.join(' ').toLowerCase();
+  const agentGenreStr = `${agent.genre} ${agent.tone}`.toLowerCase();
+
+  // 检查题材关键词是否命中
+  const hit = keywords.some(kw => genreStr.includes(kw)) ||
+    genres.some(g => agentGenreStr.includes(g.toLowerCase()));
+
+  return hit ? 'strong' : 'weak';
+}
+
+/**
+ * 根据题材匹配度对系统Agent排序分组
+ * 现在同时考虑骨架Agent和风格Agent的匹配度
+ */
+export function rankAgentsByGenreMatch(
+  genres: string[],
+): { leaders: SystemAgent[]; supporters: SystemAgent[] } {
+  const strong: SystemAgent[] = [];
+  const universal: SystemAgent[] = [];
+  const weak: SystemAgent[] = [];
+
+  for (const agent of SYSTEM_AGENTS) {
+    const match = matchAgentToGenres(agent, genres);
+    if (match === 'strong') strong.push(agent);
+    else if (match === 'universal') universal.push(agent);
+    else weak.push(agent);
+  }
+
+  const leaders = [...strong, ...universal, ...weak];
+  return { leaders, supporters: [] };
+}
+
+/**
+ * 为骨架Agent匹配最合适的风格Agent列表（按题材匹配度排序）
+ * @param genres 当前剧本的题材列表
+ * @returns 排序后的风格Agent列表（强匹配优先）
+ */
+function rankStyleAgentsForGenres(genres: string[]): SystemAgent[] {
+  const styleAgents = getStyleAgents();
+  if (!genres || genres.length === 0) return shuffle(styleAgents);
+
+  const strong: SystemAgent[] = [];
+  const universal: SystemAgent[] = [];
+  const weak: SystemAgent[] = [];
+
+  for (const agent of styleAgents) {
+    const match = matchAgentToGenres(agent, genres);
+    if (match === 'strong') strong.push(agent);
+    else if (match === 'universal') universal.push(agent);
+    else weak.push(agent);
+  }
+
+  // 强匹配优先，同级内随机排列
+  return [...shuffle(strong), ...shuffle(universal), ...shuffle(weak)];
+}
+
+/**
+ * 为骨架Agent匹配最合适的骨架Agent列表（按题材匹配度排序）
+ * @param genres 当前剧本的题材列表
+ * @returns 排序后的骨架Agent列表（强匹配优先）
+ */
+function rankGenreAgentsForGenres(genres: string[]): SystemAgent[] {
+  const genreAgents = getGenreAgents();
+  if (!genres || genres.length === 0) return shuffle(genreAgents);
+
+  const strong: SystemAgent[] = [];
+  const weak: SystemAgent[] = [];
+
+  for (const agent of genreAgents) {
+    const match = matchAgentToGenres(agent, genres);
+    if (match === 'strong') strong.push(agent);
+    else weak.push(agent);
+  }
+
+  return [...shuffle(strong), ...shuffle(weak)];
+}
+
+/**
+ * 组建创作组：双层Agent体系 —— "逻辑定型，风格润色"
+ * 
+ * 骨架Agent（sys-11~18）作为组的核心，定义题材逻辑框架
+ * 风格Agent（sys-01~10）注入创作灵魂，提供语言质感和情绪调性
+ * 
+ * 每组结构：
+ * - 组长：骨架Agent + 最匹配的风格Agent 融合prompt
+ * - 变体组员：同一骨架Agent + 不同风格Agent 的融合变体
+ * 
+ * @param membersPerGroup 每组基础变体组员数，默认4
+ * @param genres 当前剧本的题材列表（可选）
+ */
+export function buildWriterGroups(membersPerGroup = 4, genres?: string[]): WriterGroup[] {
+  // 按题材匹配度排序骨架Agent和风格Agent
+  const rankedGenreAgents = genres?.length ? rankGenreAgentsForGenres(genres) : shuffle(getGenreAgents());
+  const rankedStyleAgents = genres?.length ? rankStyleAgentsForGenres(genres) : shuffle(getStyleAgents());
+
+  // 计算每个骨架Agent的题材匹配度
+  const genreMatchMap = new Map<string, 'strong' | 'universal' | 'weak'>();
+  for (const agent of rankedGenreAgents) {
+    genreMatchMap.set(agent.id, genres?.length ? matchAgentToGenres(agent, genres) : 'universal');
+  }
+
+  // 根据匹配度调整每组的组员数：强匹配+1，弱匹配-1
+  const totalBudget = rankedGenreAgents.length * membersPerGroup;
+  const memberAlloc = new Map<string, number>();
+  let allocated = 0;
+
+  for (const agent of rankedGenreAgents) {
+    const match = genreMatchMap.get(agent.id)!;
+    let count: number;
+    if (match === 'strong') count = membersPerGroup + 1;
+    else if (match === 'weak') count = Math.max(1, membersPerGroup - 1);
+    else count = membersPerGroup;
+    memberAlloc.set(agent.id, count);
+    allocated += count;
+  }
+
+  // 修正总数
+  const diff = allocated - totalBudget;
+  if (diff !== 0) {
+    const adjustableIds = rankedGenreAgents
+      .filter(a => genreMatchMap.get(a.id) !== 'strong')
+      .map(a => a.id);
+    let remaining = Math.abs(diff);
+    for (const uid of adjustableIds) {
+      if (remaining <= 0) break;
+      const cur = memberAlloc.get(uid)!;
+      const adj = diff > 0 ? -1 : 1;
+      memberAlloc.set(uid, Math.max(1, cur + adj));
+      remaining--;
+    }
+  }
+
+  return rankedGenreAgents.map((genreAgent, groupIdx) => {
+    const groupId = `group-${genreAgent.id}`;
+    const groupMemberCount = memberAlloc.get(genreAgent.id) || membersPerGroup;
+
+    // 为组长选择最匹配的风格Agent（循环分配，确保风格多样性）
+    const leaderStyleAgent = rankedStyleAgents[groupIdx % rankedStyleAgents.length];
+    const hybridGene = hybridStyleGene(genreAgent, leaderStyleAgent);
+
+    // 组长：骨架 + 最匹配风格 的融合prompt
     const leader: WriterAgent = {
-      id: `leader-${sysAgent.id}`,
-      name: `${sysAgent.name}·组长`,
+      id: `leader-${genreAgent.id}`,
+      name: `${genreAgent.name}×${leaderStyleAgent.name}·组长`,
       groupId,
       isLeader: true,
-      systemAgentId: sysAgent.id,
-      styleGene: baseGene,
-      systemPrompt: sysAgent.systemPrompt,
+      systemAgentId: genreAgent.id,
+      styleGene: hybridGene,
+      systemPrompt: compileHybridPrompt(genreAgent, leaderStyleAgent),
     };
 
-    // 变体组员：在组长风格基础上变异
+    // 变体组员：同一骨架 + 不同风格Agent 的融合变体
     const members: WriterAgent[] = [];
-    for (let i = 0; i < membersPerGroup; i++) {
-      const mutated = mutateStyleGene(baseGene, SYSTEM_AGENTS);
+    for (let i = 0; i < groupMemberCount; i++) {
+      // 循环选择不同的风格Agent，跳过组长已用的
+      const styleIdx = (groupIdx + i + 1) % rankedStyleAgents.length;
+      const memberStyleAgent = rankedStyleAgents[styleIdx];
+      const memberGene = hybridStyleGene(genreAgent, memberStyleAgent);
+
+      // 在融合基因基础上做轻微变异，增加多样性
+      const mutatedGene = mutateStyleGene(memberGene, getStyleAgents());
+
       members.push({
-        id: `member-${sysAgent.id}-${i}`,
-        name: `${sysAgent.name}·变体${i + 1}`,
+        id: `member-${genreAgent.id}-${i}`,
+        name: `${genreAgent.name}×${memberStyleAgent.name}·变体${i + 1}`,
         groupId,
         isLeader: false,
-        systemAgentId: sysAgent.id,
-        styleGene: mutated,
-        systemPrompt: compileWriterPrompt(mutated),
+        systemAgentId: genreAgent.id,
+        styleGene: mutatedGene,
+        systemPrompt: compileWriterPrompt(mutatedGene),
       });
     }
 
@@ -178,8 +440,8 @@ export function buildWriterGroups(membersPerGroup = 4): WriterGroup[] {
       id: groupId,
       leader,
       members,
-      systemAgentId: sysAgent.id,
-      systemAgentName: sysAgent.name,
+      systemAgentId: genreAgent.id,
+      systemAgentName: genreAgent.name,
     };
   });
 }
@@ -791,10 +1053,11 @@ ${config.referenceNovel ? `\n## 参考小说\n${config.referenceNovel.slice(0, 3
   "setting": {"era": "时代", "location": "地点", "socialEnv": "社会环境", "classRelation": "阶层关系"},
   "storyLine": "一句话故事线",
   "coreConflict": "核心冲突",
-  "threeActs": {
+  "fourActs": {
     "act1": {"episodeRange": "第1-N集", "coreEvents": ["事件1"], "relationships": "人物关系建立"},
     "act2": {"episodeRange": "第N-M集", "conflicts": ["冲突1"], "turningPoints": ["转折1"]},
-    "act3": {"episodeRange": "第M-末集", "climax": "终极对决", "ending": "结局处理"}
+    "act3": {"episodeRange": "第M-K集", "climax": "高潮对决", "turningPoints": ["转折1"]},
+    "act4": {"episodeRange": "第K-末集", "ending": "结局处理", "themeElevation": "主题升华"}
   },
   "rhythmWave": "全剧节奏波形描述",
   "paywallPlan": [{"episode": 10, "type": "身份揭露", "suspense": "悬念描述"}],
@@ -804,7 +1067,7 @@ ${config.referenceNovel ? `\n## 参考小说\n${config.referenceNovel.slice(0, 3
 
 要求：
 1. 提供3个剧名备选
-2. 三幕结构的集数范围必须覆盖全部${config.totalEpisodes}集
+2. 四幕结构（起承转合）的集数范围必须覆盖全部${config.totalEpisodes}集
 3. 付费卡点约${paywallCount}个
 4. 爽点矩阵百分比之和为100`;
 }
@@ -1273,10 +1536,11 @@ function buildCharacterDesignUserPrompt(
 
 故事线：${plan.storyLine}
 核心冲突：${plan.coreConflict}
-三幕结构：
-  第一幕：${plan.threeActs.act1.coreEvents.join('、')}
-  第二幕：${plan.threeActs.act2.conflicts.join('、')}
-  第三幕：${plan.threeActs.act3.climax}
+四幕结构（起承转合）：
+  第一幕·起：${getActsFromPlan(plan).act1.coreEvents.join('、')}
+  第二幕·承：${getActsFromPlan(plan).act2.conflicts.join('、')}
+  第三幕·转：${getActsFromPlan(plan).act3.climax}
+  第四幕·合：${getActsFromPlan(plan).act4.ending}
 ${poolNote}
 
 请生成角色设计，JSON格式：
@@ -1711,15 +1975,17 @@ export function buildDirectoryUserPrompt(
     `${c.name}（${c.publicIdentity}${c.villainLayer ? `，第${c.villainLayer}层反派` : ''}）`,
   ).join('、');
 
+  const acts = getActsFromPlan(creativePlan);
   const hasTimeline = !!creativePlan.timelineArcs;
 
   return `创作方案：
 - 故事线：${creativePlan.storyLine}
 - 核心冲突：${creativePlan.coreConflict}
-- 三幕结构：
-  第一幕(${creativePlan.threeActs.act1.episodeRange})：${creativePlan.threeActs.act1.coreEvents.join('、')}
-  第二幕(${creativePlan.threeActs.act2.episodeRange})：${creativePlan.threeActs.act2.conflicts.join('、')}
-  第三幕(${creativePlan.threeActs.act3.episodeRange})：${creativePlan.threeActs.act3.climax}
+- 四幕结构（起承转合）：
+  第一幕·起(${acts.act1.episodeRange})：${acts.act1.coreEvents.join('、')}
+  第二幕·承(${acts.act2.episodeRange})：${acts.act2.conflicts.join('、')}
+  第三幕·转(${acts.act3.episodeRange})：${acts.act3.climax}
+  第四幕·合(${acts.act4.episodeRange})：${acts.act4.ending}
 - 角色：${charSummary}
 - 付费卡点规划：${creativePlan.paywallPlan.map(p => `第${p.episode}集(${p.type})`).join('、')}
 - 结局：${creativePlan.endingDesign.mainLine}
@@ -2528,10 +2794,14 @@ export async function startArenaCreation(
   });
 
   activeSessionIds.set(projectId, sessionId);
-  broadcastArenaProgress(taskId, '竞技初始化: 组建10个系统Agent创作组(50人) + 50个评审Agent');
+  broadcastArenaProgress(taskId, '竞技初始化: 组建8个骨架Agent创作组(骨架×风格双层融合) + 50个评审Agent');
 
-  // 2. 组建创作组和评审Agent
-  const writerGroups = buildWriterGroups(arenaConfig.membersPerGroup);
+  // 2. 获取项目题材信息，用于Agent题材匹配
+  const project = getScreenplay(projectId);
+  const genres = project?.config?.genres || [];
+
+  // 3. 组建创作组（根据题材匹配度分配组长和组员）和评审Agent
+  const writerGroups = buildWriterGroups(arenaConfig.membersPerGroup, genres);
   const reviewers = generateReviewerAgents();
 
   // 3. 持久化Agent数据
@@ -2578,7 +2848,7 @@ export async function startArenaCreation(
   try {
     // 阶段1：创意方案
     updateArenaSession(sessionId, { status: 'stage_plan', current_stage: 'creative_plan' });
-    broadcastArenaProgress(taskId, '阶段1开始: 创意方案竞争 (10组×5人=50人)');
+    broadcastArenaProgress(taskId, '阶段1开始: 创意方案竞争 (8骨架组×风格融合)');
     const planResult = await runCreativePlanArena(
       projectId, allWriters, reviewers, scheduler, taskId, sessionId,
     );

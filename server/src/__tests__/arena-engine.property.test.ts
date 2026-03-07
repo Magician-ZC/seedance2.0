@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import fc from 'fast-check';
 import {
   buildWriterGroups,
+  getGenreAgents,
   SYSTEM_AGENTS,
 } from '../arena-engine.js';
 
@@ -18,7 +19,7 @@ import {
 // ============================================================
 
 describe('Property 11: 系统Agent组长唯一性', () => {
-  it('每个创作组恰好有1个组长，且组长Prompt与系统Agent原始Prompt一致', async () => {
+  it('每个创作组恰好有1个组长，且组长Prompt包含双层融合标记', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 8 }), // membersPerGroup
@@ -33,10 +34,9 @@ describe('Property 11: 系统Agent组长唯一性', () => {
             const leaders = allAgents.filter(a => a.isLeader);
             expect(leaders).toHaveLength(1);
 
-            // 组长的systemPrompt应与对应系统Agent的原始systemPrompt完全一致
-            const sysAgent = SYSTEM_AGENTS.find((a: { id: string }) => a.id === group.systemAgentId);
-            expect(sysAgent).toBeDefined();
-            expect(leaders[0].systemPrompt).toBe(sysAgent!.systemPrompt);
+            // 组长的systemPrompt应包含双层融合标记（骨架+风格）
+            expect(leaders[0].systemPrompt).toContain('题材骨架');
+            expect(leaders[0].systemPrompt).toContain('风格灵魂');
           }
         },
       ),
@@ -53,15 +53,16 @@ describe('Property 11: 系统Agent组长唯一性', () => {
 // ============================================================
 
 describe('Property 13: 创作组结构正确性', () => {
-  it('恰好10组，每组1组长+N组员，10个组长对应10个不同系统Agent', async () => {
+  it('恰好8组（骨架Agent数），每组1组长+N组员，8个组长对应8个不同骨架Agent', async () => {
+    const GENRE_COUNT = getGenreAgents().length; // 8
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 1, max: 8 }), // membersPerGroup
         async (membersPerGroup) => {
           const groups = buildWriterGroups(membersPerGroup);
 
-          // 恰好10个创作组
-          expect(groups).toHaveLength(10);
+          // 恰好8个创作组（对应8个骨架Agent）
+          expect(groups).toHaveLength(GENRE_COUNT);
 
           const leaderSystemAgentIds = new Set<string>();
 
@@ -80,8 +81,8 @@ describe('Property 13: 创作组结构正确性', () => {
             leaderSystemAgentIds.add(group.leader.systemAgentId);
           }
 
-          // 10个组长分别对应10个不同的系统Agent
-          expect(leaderSystemAgentIds.size).toBe(10);
+          // 8个组长分别对应8个不同的骨架Agent
+          expect(leaderSystemAgentIds.size).toBe(GENRE_COUNT);
         },
       ),
       { numRuns: 10 },

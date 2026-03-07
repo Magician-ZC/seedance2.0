@@ -24,6 +24,10 @@ import {
   mutateStyleGene,
   compileWriterPrompt,
   buildWriterGroups,
+  compileHybridPrompt,
+  hybridStyleGene,
+  getStyleAgents,
+  getGenreAgents,
   SYSTEM_AGENTS,
   type StyleGene,
 } from '../arena-engine.js';
@@ -190,9 +194,11 @@ describe('compileWriterPrompt', () => {
 // ============================================================
 
 describe('buildWriterGroups', () => {
-  it('应生成恰好10个创作组', () => {
+  const GENRE_AGENT_COUNT = getGenreAgents().length; // 8个骨架Agent
+
+  it('应生成恰好8个创作组（对应8个骨架Agent）', () => {
     const groups = buildWriterGroups();
-    expect(groups).toHaveLength(10);
+    expect(groups).toHaveLength(GENRE_AGENT_COUNT);
   });
 
   it('每组应有1个组长和4个组员（默认membersPerGroup=4）', () => {
@@ -207,20 +213,24 @@ describe('buildWriterGroups', () => {
     }
   });
 
-  it('组长的systemPrompt应与对应系统Agent的原始systemPrompt完全一致', () => {
+  it('组长的systemPrompt应是骨架+风格的融合Prompt', () => {
     const groups = buildWriterGroups();
     for (const group of groups) {
-      const sysAgent = SYSTEM_AGENTS.find((a: { id: string }) => a.id === group.systemAgentId);
-      expect(sysAgent).toBeDefined();
-      expect(group.leader.systemPrompt).toBe(sysAgent!.systemPrompt);
+      // 融合Prompt应包含双层标记
+      expect(group.leader.systemPrompt).toContain('题材骨架');
+      expect(group.leader.systemPrompt).toContain('风格灵魂');
     }
   });
 
-  it('10个组长应分别对应10个不同的系统Agent', () => {
+  it('8个组长应分别对应8个不同的骨架Agent', () => {
     const groups = buildWriterGroups();
     const leaderAgentIds = groups.map(g => g.leader.systemAgentId);
     const uniqueIds = new Set(leaderAgentIds);
-    expect(uniqueIds.size).toBe(10);
+    expect(uniqueIds.size).toBe(GENRE_AGENT_COUNT);
+    // 所有组长的systemAgentId应属于骨架Agent（sys-11~18）
+    for (const id of leaderAgentIds) {
+      expect(id).toMatch(/^sys-1[1-8]$/);
+    }
   });
 
   it('组员的systemPrompt应是编译后的变异Prompt（非原始Prompt）', () => {
@@ -229,8 +239,6 @@ describe('buildWriterGroups', () => {
       for (const member of group.members) {
         // 组员Prompt应以编译模板开头
         expect(member.systemPrompt).toMatch(/^你是一位专业的微短剧编剧/);
-        // 组员Prompt不应与组长Prompt完全相同
-        // （理论上极小概率相同，但实际上变异后几乎不可能完全一致）
       }
     }
   });
@@ -247,17 +255,19 @@ describe('buildWriterGroups', () => {
 
   it('自定义membersPerGroup应生效', () => {
     const groups = buildWriterGroups(2);
-    expect(groups).toHaveLength(10);
+    expect(groups).toHaveLength(GENRE_AGENT_COUNT);
     for (const group of groups) {
       expect(group.members).toHaveLength(2);
     }
   });
 
-  it('组的systemAgentName应与系统Agent的name一致', () => {
+  it('组的systemAgentName应与骨架Agent的name一致', () => {
     const groups = buildWriterGroups();
+    const genreAgents = getGenreAgents();
     for (const group of groups) {
-      const sysAgent = SYSTEM_AGENTS.find((a: { id: string }) => a.id === group.systemAgentId);
-      expect(group.systemAgentName).toBe(sysAgent!.name);
+      const genreAgent = genreAgents.find((a: { id: string }) => a.id === group.systemAgentId);
+      expect(genreAgent).toBeDefined();
+      expect(group.systemAgentName).toBe(genreAgent!.name);
     }
   });
 });
@@ -766,7 +776,7 @@ describe('startArenaCreation', () => {
     expect(session!.status).toBe('completed');
   });
 
-  it('应持久化50个创作Agent和50个评审Agent', async () => {
+  it('应持久化40个创作Agent和50个评审Agent', async () => {
     const config: ArenaConfig = {
       groupCount: 10,
       membersPerGroup: 4,
@@ -780,14 +790,14 @@ describe('startArenaCreation', () => {
     const session = getArenaSessionByProjectId('proj-agents');
     expect(session).not.toBeNull();
 
-    // 验证writers: 10组长 + 40组员 = 50
+    // 验证writers: 8组长 + 32组员 = 40
     const d = getDB();
     const writerStmt = d.prepare('SELECT COUNT(*) as cnt FROM arena_writers WHERE session_id = ?');
     writerStmt.bind([session!.id]);
     writerStmt.step();
     const writerCount = (writerStmt.getAsObject() as { cnt: number }).cnt;
     writerStmt.free();
-    expect(writerCount).toBe(50);
+    expect(writerCount).toBe(40);
 
     // 验证reviewers: 10方向 × 5人 = 50
     const reviewerStmt = d.prepare('SELECT COUNT(*) as cnt FROM arena_reviewers WHERE session_id = ?');
@@ -816,8 +826,8 @@ describe('startArenaCreation', () => {
     stmt.step();
     const count = (stmt.getAsObject() as { cnt: number }).cnt;
     stmt.free();
-    // 10组长 + 10×2组员 = 30
-    expect(count).toBe(30);
+    // 8组长 + 8×2组员 = 24
+    expect(count).toBe(24);
   });
 });
 
@@ -852,10 +862,11 @@ function makeFakePlan(idx: number) {
     setting: { era: '现代', location: '都市', socialEnv: '商业', classRelation: '阶层' },
     storyLine: `故事线${idx}`,
     coreConflict: `冲突${idx}`,
-    threeActs: {
+    fourActs: {
       act1: { episodeRange: '1-10', coreEvents: ['事件1'], relationships: '关系' },
-      act2: { episodeRange: '11-30', conflicts: ['冲突1'], turningPoints: ['转折1'] },
-      act3: { episodeRange: '31-50', climax: '高潮', ending: '结局' },
+      act2: { episodeRange: '11-25', conflicts: ['冲突1'], turningPoints: ['转折1'] },
+      act3: { episodeRange: '26-40', climax: '高潮', turningPoints: ['转折2'] },
+      act4: { episodeRange: '41-50', ending: '结局', themeElevation: '主题升华' },
     },
     rhythmWave: '节奏波形',
     paywallPlan: [{ episode: 10, type: '身份揭露', suspense: '悬念' }],
@@ -995,7 +1006,7 @@ describe('runCreativePlanArena', () => {
     expect(result.totalGenerated).toBe(0);
   });
 
-  it('应生成50个创意方案（10组×5人）', async () => {
+  it('应生成40个创意方案（8组×5人）', async () => {
     const scheduler = new QueueScheduler(10); // 高并发加速测试
     const { allWriters, reviewers } = buildTestWritersAndReviewers();
 
@@ -1011,12 +1022,12 @@ describe('runCreativePlanArena', () => {
       'proj-arena-test', allWriters, reviewers, scheduler, 'task-plan-test', 'sess-plan-test',
     );
 
-    // 应生成50个方案（所有LLM调用都成功）
-    expect(result.totalGenerated).toBe(50);
-    // 每组选出1个 → 10个进入跨组评审
-    expect(result.totalSurvived).toBeLessThanOrEqual(10);
+    // 应生成40个方案（所有LLM调用都成功）
+    expect(result.totalGenerated).toBe(40);
+    // 每组选出1个 → 8个进入跨组评审
+    expect(result.totalSurvived).toBeLessThanOrEqual(8);
     expect(result.candidates.length).toBeGreaterThan(0);
-    expect(result.candidates.length).toBeLessThanOrEqual(10);
+    expect(result.candidates.length).toBeLessThanOrEqual(8);
   }, 30000);
 
   it('每个候选应正确填充groupId、systemAgentId、systemAgentName', async () => {
@@ -1090,12 +1101,12 @@ describe('runCreativePlanArena', () => {
 
     // 验证候选已持久化
     const dbCandidates = listArenaCandidatesByStage('sess-persist-test', 'creative_plan');
-    expect(dbCandidates.length).toBe(50); // 所有50个方案都应持久化
+    expect(dbCandidates.length).toBe(40); // 所有40个方案都应持久化
 
     // 验证评分已持久化
     const dbScores = listArenaFunnelScoresByStage('sess-persist-test', 'creative_plan');
     expect(dbScores.length).toBeGreaterThan(0);
-    expect(dbScores.length).toBeLessThanOrEqual(10);
+    expect(dbScores.length).toBeLessThanOrEqual(8);
   }, 30000);
 
   it('部分LLM失败时应优雅降级', async () => {
@@ -1374,7 +1385,7 @@ describe('runCharacterArena', () => {
     return { groups, allWriters, reviewers };
   }
 
-  // 构建模拟的阶段1 Top 10方案结果
+  // 构建模拟的阶段1 Top 8方案结果
   function buildFakeTopPlans(writers: WriterAgent[]): StageCandidates<unknown> {
     const groups = buildWriterGroups(4);
     const candidates = groups.map((g, idx) => ({
@@ -1390,8 +1401,8 @@ describe('runCharacterArena', () => {
     return {
       stage: 'creative_plan' as const,
       candidates,
-      totalGenerated: 50,
-      totalSurvived: 10,
+      totalGenerated: 40,
+      totalSurvived: 8,
     };
   }
 
@@ -1623,10 +1634,10 @@ describe('runCharacterArena', () => {
       'proj-char-test', topPlans, allWriters, reviewers, scheduler, 'task-assign', 'sess-assign',
     );
 
-    // 10个方案 × 3个Agent = 30个角色设计调用
-    expect(designCallCount).toBe(30);
-    // 总生成数应为30
-    expect(result.totalGenerated).toBe(30);
+    // 8个方案 × 3个Agent = 24个角色设计调用
+    expect(designCallCount).toBe(24);
+    // 总生成数应为24
+    expect(result.totalGenerated).toBe(24);
   }, 60000);
 });
 
@@ -1651,7 +1662,7 @@ function makeFakeDirectory(totalEpisodes: number) {
     summary: `第${i + 1}集摘要`,
     hookType: hookTypes[i % hookTypes.length],
     mark: i % 5 === 0 ? '🔥' : i % 7 === 0 ? '💰' : '',
-    act: i < 10 ? '第一幕' : i < 30 ? '第二幕' : '第三幕',
+    act: i < 10 ? '第一幕' : i < 25 ? '第二幕' : i < 40 ? '第三幕' : '第四幕',
     phase: phases[Math.min(Math.floor(i / (totalEpisodes / 4)), 3)],
   }));
 }
@@ -1760,11 +1771,12 @@ describe('buildDirectoryUserPrompt', () => {
     expect(prompt).toContain('身份揭露');
   });
 
-  it('应包含三幕结构信息', () => {
+  it('应包含四幕结构信息', () => {
     const prompt = buildDirectoryUserPrompt(fakeConfig, fakePlan, fakeCharDesign);
     expect(prompt).toContain('第一幕');
     expect(prompt).toContain('第二幕');
     expect(prompt).toContain('第三幕');
+    expect(prompt).toContain('第四幕');
   });
 });
 
@@ -1783,7 +1795,7 @@ describe('runDirectoryArena', () => {
     return { groups, allWriters, reviewers };
   }
 
-  // 构建模拟的阶段2 Top 10角色设计结果（含parentCandidateId指向阶段1方案）
+  // 构建模拟的阶段2 Top 8角色设计结果（含parentCandidateId指向阶段1方案）
   function buildFakeTopChars(sessionId: string): StageCandidates<unknown> {
     const groups = buildWriterGroups(4);
     const candidates = groups.map((g, idx) => ({
@@ -1800,23 +1812,23 @@ describe('runDirectoryArena', () => {
     return {
       stage: 'character' as const,
       candidates,
-      totalGenerated: 30,
-      totalSurvived: 10,
+      totalGenerated: 24,
+      totalSurvived: 8,
     };
   }
 
   // 在数据库中插入阶段1的方案候选（供 runDirectoryArena 查询）
   function insertFakePlanCandidates(sessionId: string) {
     const rows: ArenaCandidateRow[] = [];
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 8; i++) {
       rows.push({
         id: `plan-dir-${i}`,
         session_id: sessionId,
         stage: 'creative_plan',
         writer_id: `writer-${i}`,
-        group_id: `group-sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_id: `sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_name: `风格${i + 1}`,
+        group_id: `group-sys-${String(i + 11)}`,
+        system_agent_id: `sys-${String(i + 11)}`,
+        system_agent_name: `骨架${i + 1}`,
         parent_candidate_id: null,
         content: JSON.stringify(makeFakePlan(i)),
         character_pool_ids: null,
@@ -1882,9 +1894,9 @@ describe('runDirectoryArena', () => {
     );
 
     expect(result.stage).toBe('directory');
-    // 10个组合 × 2个Agent = 最多20个候选
+    // 8个组合 × 2个Agent = 最多16个候选
     expect(result.totalGenerated).toBeGreaterThan(0);
-    expect(result.totalGenerated).toBeLessThanOrEqual(20);
+    expect(result.totalGenerated).toBeLessThanOrEqual(16);
     // Top 5筛选
     expect(result.totalSurvived).toBeLessThanOrEqual(5);
     expect(result.totalSurvived).toBeGreaterThan(0);
@@ -2013,7 +2025,7 @@ describe('runDirectoryArena', () => {
 
     expect(result.stage).toBe('directory');
     // 部分失败，但不应崩溃
-    expect(result.totalGenerated).toBeLessThan(20);
+    expect(result.totalGenerated).toBeLessThan(16);
     expect(result.totalGenerated).toBeGreaterThan(0);
   }, 60000);
 
@@ -2044,9 +2056,9 @@ describe('runDirectoryArena', () => {
       'proj-dir-test', topChars, allWriters, reviewers, scheduler, 'task-dir-assign', sessId,
     );
 
-    // 10个组合 × 2个Agent = 20个目录生成调用
-    expect(dirCallCount).toBe(20);
-    expect(result.totalGenerated).toBe(20);
+    // 8个组合 × 2个Agent = 16个目录生成调用
+    expect(dirCallCount).toBe(16);
+    expect(result.totalGenerated).toBe(16);
   }, 60000);
 
   it('LLM返回包裹对象时应正确解析', async () => {
@@ -2076,7 +2088,7 @@ describe('runDirectoryArena', () => {
     );
 
     // 包裹对象应被正确解析
-    expect(result.totalGenerated).toBe(20);
+    expect(result.totalGenerated).toBe(16);
     // 每个候选的data应是数组
     for (const c of result.candidates) {
       expect(Array.isArray(c.data)).toBe(true);
@@ -2312,7 +2324,7 @@ describe('runEpisodeArena', () => {
     return {
       stage: 'directory' as const,
       candidates,
-      totalGenerated: 20,
+      totalGenerated: 16,
       totalSurvived: 5,
     };
   }
@@ -2327,9 +2339,9 @@ describe('runEpisodeArena', () => {
         session_id: sessionId,
         stage: 'creative_plan',
         writer_id: `writer-${i}`,
-        group_id: `group-sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_id: `sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_name: `风格${i + 1}`,
+        group_id: `group-sys-${String(i + 11)}`,
+        system_agent_id: `sys-${String(i + 11)}`,
+        system_agent_name: `骨架${i + 1}`,
         parent_candidate_id: null,
         content: JSON.stringify(makeFakePlan(i)),
         character_pool_ids: null,
@@ -2346,9 +2358,9 @@ describe('runEpisodeArena', () => {
         session_id: sessionId,
         stage: 'character',
         writer_id: `writer-${i}`,
-        group_id: `group-sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_id: `sys-${String(i + 1).padStart(2, '0')}`,
-        system_agent_name: `风格${i + 1}`,
+        group_id: `group-sys-${String(i + 11)}`,
+        system_agent_id: `sys-${String(i + 11)}`,
+        system_agent_name: `骨架${i + 1}`,
         parent_candidate_id: `plan-ep-${i}`,
         content: JSON.stringify(makeFakeCharacterDesign(i)),
         character_pool_ids: null,

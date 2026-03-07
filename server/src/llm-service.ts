@@ -11,6 +11,10 @@ export type LLMProvider = 'deepseek' | 'openai' | 'gemini' | 'anthropic' | 'olla
 let _proxyUrl: string | null | undefined;
 function getSystemProxy(): string | null {
   if (_proxyUrl !== undefined) return _proxyUrl;
+  // 显式禁用代理
+  if (process.env.NO_PROXY === '*' || process.env.no_proxy === '*') {
+    _proxyUrl = null; return null;
+  }
   // 优先使用环境变量
   const envProxy = process.env.https_proxy || process.env.HTTPS_PROXY
     || process.env.http_proxy || process.env.HTTP_PROXY || process.env.ALL_PROXY;
