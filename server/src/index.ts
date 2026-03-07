@@ -26,7 +26,7 @@ import {
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, getProjectLLMStats, getLLMLogDetail, getProjectLogsList, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, loadNSFWFromDB, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
@@ -35,6 +35,7 @@ import {
   generateEpisode, generateEpisodeBatch, retryFailedEpisodes, reviewEpisode, exportScreenplay, getGenreList,
   loadScreenplayProjectsFromDB, analyzeReferenceNovel, generateSubmissionMaterials,
 } from './screenplay-creator.js';
+import { generateEmotionMap } from './creation-loop.js';
 import {
   createFactory, getFactory, updateFactory, listFactories, removeFactory,
   parseNovelDNA, generateInitialAgents, runEvolutionRound, mutateAndBreed,
@@ -1230,7 +1231,7 @@ app.get('/api/screenplay/genres', (_req, res) => {
 
 // POST /api/screenplay/create - 创建剧本项目
 app.post('/api/screenplay/create', (req, res) => {
-  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool, useTimeline, arenaMode, arenaConfig } = req.body;
+  const { genres, audience, tone, endingType, totalEpisodes, language, mode, customPrompt, agentId, referenceNovel, fixedModel, nsfw, useCharacterPool, useTimeline, arenaMode, arenaConfig, loopMode, loopConfig, stageModelMap } = req.body;
   if (!genres?.length || !audience || !tone || !totalEpisodes) {
     return res.status(400).json({ error: '缺少必要参数' });
   }
@@ -1244,6 +1245,9 @@ app.post('/api/screenplay/create', (req, res) => {
     useTimeline: useTimeline || false,
     fixedModel: fixedModel || undefined,
     nsfw: nsfw || false,
+    loopMode: loopMode || false,
+    loopConfig: loopConfig || undefined,
+    stageModelMap: stageModelMap || undefined,
   });
   if ('error' in result) return res.status(400).json({ error: result.error });
 
@@ -1570,6 +1574,88 @@ app.patch('/api/screenplay/:id', (req, res) => {
   const project = updateScreenplay(req.params.id, req.body);
   if (!project) return res.status(404).json({ error: '项目不存在' });
   res.json({ project });
+});
+
+// GET /api/screenplay/:id/loop-iterations - 查询闭环迭代记录
+app.get('/api/screenplay/:id/loop-iterations', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  res.json({ loopIterations: project.loopIterations || {}, emotionMap: project.emotionMap || [] });
+});
+
+// POST /api/screenplay/:id/emotion-map - 生成情绪锚点图
+app.post('/api/screenplay/:id/emotion-map', async (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  if (!project.episodes?.length) return res.status(400).json({ error: '暂无剧集' });
+
+  const taskId = `emotion_map_${req.params.id}_${Date.now()}`;
+  res.json({ async: true, taskId });
+
+  generateEmotionMap(req.params.id, project.episodes, (msg) => {
+    const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+    wsManager.broadcast(taskId, task);
+  }).then((anchors) => {
+    updateScreenplay(req.params.id, { emotionMap: anchors });
+    const task: TaskInfo = {
+      id: taskId, status: 'done',
+      progress: `情绪锚点图生成完成，共${anchors.length}个锚点`,
+      startTime: Date.now(), result: null, error: null,
+    };
+    wsManager.broadcast(taskId, task);
+  }).catch((err) => {
+    const task: TaskInfo = {
+      id: taskId, status: 'error', progress: '',
+      startTime: Date.now(), result: null, error: (err as Error).message,
+    };
+    wsManager.broadcast(taskId, task);
+  });
+});
+
+// GET /api/screenplay/:id/llm-stats - 获取项目LLM调用统计
+app.get('/api/screenplay/:id/llm-stats', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const stats = getProjectLLMStats(req.params.id);
+  res.json(stats);
+});
+
+// GET /api/screenplay/:id/llm-logs - 获取项目LLM调用日志列表（不含完整提示词，节省带宽）
+app.get('/api/screenplay/:id/llm-logs', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const logs = getProjectLogsList(req.params.id);
+  res.json({ logs });
+});
+
+// GET /api/screenplay/llm-log/:logId - 获取单条LLM调用的完整提示词和响应
+app.get('/api/screenplay/llm-log/:logId', (req, res) => {
+  const logId = parseInt(req.params.logId);
+  if (isNaN(logId)) return res.status(400).json({ error: '无效的logId' });
+  const detail = getLLMLogDetail(logId);
+  if (!detail) return res.status(404).json({ error: '日志不存在' });
+  res.json(detail);
+});
+
+// PUT /api/screenplay/:id/stage-model-map - 更新项目的阶段模型配置
+app.put('/api/screenplay/:id/stage-model-map', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  const { stageModelMap } = req.body;
+  if (!stageModelMap || typeof stageModelMap !== 'object') {
+    return res.status(400).json({ error: '缺少 stageModelMap' });
+  }
+  const updated = updateScreenplay(req.params.id, {
+    config: { ...project.config, stageModelMap },
+  });
+  res.json({ success: true, stageModelMap: updated?.config?.stageModelMap });
+});
+
+// GET /api/screenplay/:id/stage-model-map - 获取项目的阶段模型配置
+app.get('/api/screenplay/:id/stage-model-map', (req, res) => {
+  const project = getScreenplay(req.params.id);
+  if (!project) return res.status(404).json({ error: '项目不存在' });
+  res.json({ stageModelMap: project.config.stageModelMap || {} });
 });
 
 // ============================================================

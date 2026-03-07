@@ -52,9 +52,14 @@ export async function initDB(): Promise<void> {
     duration_ms INTEGER DEFAULT 0,
     success INTEGER DEFAULT 1,
     error TEXT,
-    created_at INTEGER
+    created_at INTEGER,
+    prompt_text TEXT,
+    response_text TEXT
   )`);
 
+  // 安全添加新列（已有数据库可能缺少这些列）
+  try { db.run('ALTER TABLE llm_logs ADD COLUMN prompt_text TEXT'); } catch { /* 列已存在 */ }
+  try { db.run('ALTER TABLE llm_logs ADD COLUMN response_text TEXT'); } catch { /* 列已存在 */ }
   // 创作工厂项目表
   db.run(`CREATE TABLE IF NOT EXISTS factory_projects (
     id TEXT PRIMARY KEY,
@@ -375,13 +380,20 @@ export function logLLMCall(entry: {
   durationMs: number;
   success: boolean;
   error?: string;
+  promptText?: string;
+  responseText?: string;
 }): void {
   const d = getDB();
+  const promptChars = entry.promptText?.length || 0;
+  const responseChars = entry.responseText?.length || 0;
   d.run(
-    `INSERT INTO llm_logs (project_id, step, provider, model, duration_ms, success, error, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO llm_logs (project_id, step, provider, model, prompt_tokens, completion_tokens, duration_ms, success, error, prompt_text, response_text, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [entry.projectId, entry.step, entry.provider, entry.model,
-     entry.durationMs, entry.success ? 1 : 0, entry.error || null, Date.now()],
+     promptChars, responseChars,
+     entry.durationMs, entry.success ? 1 : 0, entry.error || null,
+     entry.promptText || null, entry.responseText || null,
+     Date.now()],
   );
   saveDB();
 }
@@ -396,6 +408,84 @@ export function getProjectLogs(projectId: string): Array<Record<string, unknown>
   }
   stmt.free();
   return results;
+}
+
+/** 获取项目LLM调用日志列表（不含完整prompt/response文本，节省带宽） */
+export function getProjectLogsList(projectId: string): Array<Record<string, unknown>> {
+  const d = getDB();
+  const results: Array<Record<string, unknown>> = [];
+  const stmt = d.prepare(
+    `SELECT id, project_id, step, provider, model, prompt_tokens, completion_tokens, duration_ms, success, error, created_at
+     FROM llm_logs WHERE project_id = ? ORDER BY created_at DESC`
+  );
+  stmt.bind([projectId]);
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as Record<string, unknown>);
+  }
+  stmt.free();
+  return results;
+}
+
+/** 获取项目LLM调用统计摘要 */
+export function getProjectLLMStats(projectId: string): Record<string, unknown> {
+  const d = getDB();
+  // 总调用次数、总耗时、总提示词字符数、总响应字符数
+  const summaryStmt = d.prepare(`
+    SELECT
+      COUNT(*) as total_calls,
+      SUM(duration_ms) as total_duration_ms,
+      SUM(prompt_tokens) as total_prompt_chars,
+      SUM(completion_tokens) as total_response_chars,
+      SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as fail_count
+    FROM llm_logs WHERE project_id = ?
+  `);
+  summaryStmt.bind([projectId]);
+  const summary = summaryStmt.step() ? summaryStmt.getAsObject() : {};
+  summaryStmt.free();
+
+  // 按模型分组统计
+  const modelStmt = d.prepare(`
+    SELECT provider, model,
+      COUNT(*) as calls,
+      SUM(duration_ms) as duration_ms,
+      SUM(prompt_tokens) as prompt_chars,
+      SUM(completion_tokens) as response_chars
+    FROM llm_logs WHERE project_id = ?
+    GROUP BY provider, model ORDER BY calls DESC
+  `);
+  modelStmt.bind([projectId]);
+  const byModel: Array<Record<string, unknown>> = [];
+  while (modelStmt.step()) byModel.push(modelStmt.getAsObject() as Record<string, unknown>);
+  modelStmt.free();
+
+  // 按step分组统计
+  const stepStmt = d.prepare(`
+    SELECT step,
+      COUNT(*) as calls,
+      SUM(duration_ms) as duration_ms,
+      SUM(prompt_tokens) as prompt_chars,
+      SUM(completion_tokens) as response_chars,
+      provider, model
+    FROM llm_logs WHERE project_id = ?
+    GROUP BY step ORDER BY created_at ASC
+  `);
+  stepStmt.bind([projectId]);
+  const byStep: Array<Record<string, unknown>> = [];
+  while (stepStmt.step()) byStep.push(stepStmt.getAsObject() as Record<string, unknown>);
+  stepStmt.free();
+
+  return { summary, byModel, byStep };
+}
+
+/** 获取单条LLM调用的完整提示词和响应（用于留痕查看） */
+export function getLLMLogDetail(logId: number): Record<string, unknown> | null {
+  const d = getDB();
+  const stmt = d.prepare('SELECT * FROM llm_logs WHERE id = ?');
+  stmt.bind([logId]);
+  const row = stmt.step() ? stmt.getAsObject() as Record<string, unknown> : null;
+  stmt.free();
+  return row;
 }
 
 

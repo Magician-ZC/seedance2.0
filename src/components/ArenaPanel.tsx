@@ -6,6 +6,8 @@ import EvolutionView from './EvolutionView';
 import TournamentView from './TournamentView';
 import LeaderboardView from './LeaderboardView';
 import HistoryView from './HistoryView';
+import LoopView from './LoopView';
+import LLMStatsView from './LLMStatsView';
 
 // 角斗场剧本信息类型
 interface ArenaScreenplayInfo {
@@ -26,7 +28,7 @@ interface ArenaScreenplayInfo {
 }
 
 // 子视图类型
-type ArenaView = 'home' | 'score' | 'battle' | 'tournament' | 'leaderboard' | 'history' | 'evolution';
+type ArenaView = 'home' | 'score' | 'battle' | 'tournament' | 'leaderboard' | 'history' | 'evolution' | 'loop' | 'stats';
 
 export default function ArenaPanel() {
   const { t } = useTranslation();
@@ -125,6 +127,26 @@ export default function ArenaPanel() {
     );
   }
 
+  // 闭环迭代记录视图
+  if (view === 'loop' && selectedScreenplayId) {
+    return (
+      <LoopView
+        projectId={selectedScreenplayId}
+        onBack={goHome}
+      />
+    );
+  }
+
+  // LLM调用统计视图
+  if (view === 'stats' && selectedScreenplayId) {
+    return (
+      <LLMStatsView
+        projectId={selectedScreenplayId}
+        onBack={goHome}
+      />
+    );
+  }
+
   // 其他子视图占位组件（后续任务实现）
   if (view !== 'home') {
     return (
@@ -195,6 +217,8 @@ export default function ArenaPanel() {
                   key={sp.id}
                   screenplay={sp}
                   onClick={() => navigateTo('history', sp.id)}
+                  onLoopClick={() => navigateTo('loop', sp.id)}
+                  onStatsClick={() => navigateTo('stats', sp.id)}
                   t={t}
                 />
               ))}
@@ -217,6 +241,8 @@ function getViewLabel(view: ArenaView, t: (key: string) => string): string {
     leaderboard: t('arena.leaderboard'),
     history: t('arena.history'),
     evolution: t('arena.evolution'),
+    loop: t('loop.title'),
+    stats: t('llmStats.title'),
   };
   return map[view] || view;
 }
@@ -258,10 +284,14 @@ function EmptyState({ message }: { message: string }) {
 function ScreenplayCard({
   screenplay,
   onClick,
+  onLoopClick,
+  onStatsClick,
   t,
 }: {
   screenplay: ArenaScreenplayInfo;
   onClick: () => void;
+  onLoopClick?: () => void;
+  onStatsClick?: () => void;
   t: (key: string, opts?: Record<string, unknown>) => string;
 }) {
   return (
@@ -301,8 +331,26 @@ function ScreenplayCard({
             {t('arena.episodes', { count: screenplay.episodeCount })}
           </span>
         </div>
-        <div className="text-[10px] text-gray-600 mt-2 pt-2 border-t border-white/5">
-          {new Date(screenplay.createdAt).toLocaleDateString()}
+        <div className="text-[10px] text-gray-600 mt-2 pt-2 border-t border-white/5 flex items-center justify-between">
+          <span>{new Date(screenplay.createdAt).toLocaleDateString()}</span>
+          {onLoopClick && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onLoopClick(); }}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 transition-colors"
+              title={t('loop.title')}
+            >
+              🔄 {t('loop.title')}
+            </button>
+          )}
+          {onStatsClick && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onStatsClick(); }}
+              className="px-1.5 py-0.5 rounded text-[10px] bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors"
+              title={t('llmStats.title')}
+            >
+              📊 {t('llmStats.title')}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -5,10 +5,33 @@ import { chatCompletionJSON, chatCompletion, getLLMConfig, getNextConfig, select
 import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProjectById, listScreenplayProjects as dbListScreenplayProjects, deleteScreenplayProject as dbDeleteScreenplayProject, listCharacterAgents, type CharacterAgentRow } from './db-service.js';
 import { splitNovelIntoChapters, splitTextIntoChunks } from './novel-to-drama.js';
 import type { ArenaConfig } from './arena-engine.js';
+import { loopCreativePlan, loopCharacterDesign, loopDirectory, loopEpisode, generateEmotionMap, type LoopIteration, type EmotionAnchor } from './creation-loop.js';
 
 // ============================================================
 // 类型定义
 // ============================================================
+
+/**
+ * 按创作阶段自定义模型配置
+ * key = 阶段标识，value = 该阶段使用的LLM配置
+ * 未配置的阶段走默认模型选择逻辑（轮询/fixedModel）
+ */
+export type StageModelKey =
+  | 'creative_plan'      // 创意方案生成
+  | 'character_design'   // 角色设计
+  | 'world_sim'          // 世界观模拟
+  | 'directory'          // 分集目录
+  | 'episode'            // 分集剧本撰写
+  | 'review'             // 质量评审
+  | 'rewrite'            // 评审后改写
+  | 'loop_mentor'        // 闭环-导师Agent
+  | 'loop_humanity'      // 闭环-人性Agent
+  | 'loop_nexus'         // 闭环-中枢裁决
+  | 'loop_revise'        // 闭环-迭代修改
+  | 'emotion_map'        // 情绪锚点图
+  | 'novel_analysis';    // 小说解析
+
+export type StageModelMap = Partial<Record<StageModelKey, LLMConfig>>;
 
 export interface ScreenplayConfig {
   genres: string[];           // 题材组合（最多2个）
@@ -28,6 +51,14 @@ export interface ScreenplayConfig {
   nsfw?: boolean;              // NSFW 模式
   arenaMode?: boolean;         // 竞技模式开关
   arenaConfig?: ArenaConfig;   // 竞技参数
+  loopMode?: boolean;          // 闭环创作模式（三位一体+中枢迭代）
+  loopConfig?: {               // 闭环创作参数
+    maxIterations?: number;    // 最大迭代次数，默认3
+    mentorContext?: string;    // 导师Agent额外行业知识
+    humanityContext?: string;  // 人性Agent额外爆款基因
+    thresholds?: { logicTruth?: number; emotionHook?: number; dialogueStyle?: number };
+  };
+  stageModelMap?: StageModelMap; // 按阶段自定义模型配置
 }
 
 /** 参考小说深度解析摘要 */
@@ -218,6 +249,8 @@ export interface ScreenplayProject {
   selectedTitle?: string;
   simulationLogs?: string[];  // 世界观模拟 [SIM] 日志，持久化用于回看和Agent进化
   submissionMaterials?: SubmissionMaterials;  // 投稿材料
+  loopIterations?: Record<string, LoopIteration[]>;  // 闭环迭代记录 { stepName: iterations[] }
+  emotionMap?: EmotionAnchor[];  // 情绪锚点图
   createdAt: number;
   updatedAt: number;
 }
@@ -317,28 +350,43 @@ function getProjectNsfw(projectId: string): boolean {
   return screenplayProjects.get(projectId)?.config?.nsfw || false;
 }
 
-async function llmJSON<T>(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; data?: T; error?: string }> {
+/** 根据阶段key从项目配置中获取指定模型，未配置则返回undefined走默认逻辑 */
+function getStageModel(projectId: string, stageKey?: StageModelKey): LLMConfig | undefined {
+  if (!stageKey) return undefined;
+  const project = screenplayProjects.get(projectId);
+  const mapped = project?.config?.stageModelMap?.[stageKey];
+  return mapped?.apiKey ? mapped : undefined;
+}
+
+async function llmJSON<T>(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate', stageKey?: StageModelKey): Promise<{ success: boolean; data?: T; error?: string }> {
   const nsfw = getProjectNsfw(projectId);
-  const config = selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
+  // 优先级：stageModelMap > fixedModel > 默认轮询
+  const stageModel = getStageModel(projectId, stageKey);
+  const config = stageModel || selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
   const finalSystem = enhancePromptForNSFW(system, nsfw);
   const startTime = Date.now();
   const result = await chatCompletionJSON<T>(finalSystem, user, { config, timeoutMs: 600000 });
   logLLMCall({
     projectId, step, provider: config.provider, model: config.model,
     durationMs: Date.now() - startTime, success: result.success, error: result.error,
+    promptText: finalSystem + '\n---USER---\n' + user,
+    responseText: result.raw || (result.error ? `[ERROR] ${result.error}` : ''),
   });
   return result;
 }
 
-async function llmText(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate'): Promise<{ success: boolean; content?: string; error?: string }> {
+async function llmText(projectId: string, step: string, system: string, user: string, taskType: TaskType = 'generate', stageKey?: StageModelKey): Promise<{ success: boolean; content?: string; error?: string }> {
   const nsfw = getProjectNsfw(projectId);
-  const config = selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
+  const stageModel = getStageModel(projectId, stageKey);
+  const config = stageModel || selectConfig(taskType, getProjectFixedModel(projectId), nsfw);
   const finalSystem = enhancePromptForNSFW(system, nsfw);
   const startTime = Date.now();
   const result = await chatCompletion(finalSystem, user, { config, timeoutMs: 600000 });
   logLLMCall({
     projectId, step, provider: config.provider, model: config.model,
     durationMs: Date.now() - startTime, success: result.success, error: result.error,
+    promptText: finalSystem + '\n---USER---\n' + user,
+    responseText: result.content || (result.error ? `[ERROR] ${result.error}` : ''),
   });
   if (!result.success) return { success: false, error: result.error };
   return { success: true, content: result.content };
@@ -442,7 +490,7 @@ export async function analyzeReferenceNovel(
   const user = `以下是小说的采样章节（前/中/后各取样，共${indices.length}章，全书${chapters.length}章）：\n\n${sampleText}`;
 
   onProgress?.('📖 正在深度分析故事结构...');
-  const result = await llmJSON<NovelAnalysisSummary>(projectId, 'analyze_reference_novel', system, user, 'parse');
+  const result = await llmJSON<NovelAnalysisSummary>(projectId, 'analyze_reference_novel', system, user, 'parse', 'novel_analysis');
   if (!result.success || !result.data) {
     onProgress?.(`⚠️ 小说解析失败: ${result.error || '未知错误'}`);
     return { success: false, error: result.error || '小说解析失败' };
@@ -588,11 +636,25 @@ ${config.novelAnalysis.keyRelationships.join('\n')}
 7. causalChains 至少2条，每条至少跨越2个时代
 8. 每个时代的 keyCharacters 要与该时代的剧情匹配` : ''}`;
 
-  const result = await llmJSON<CreativePlan>(projectId, 'creative_plan', systemPrompt, userPrompt);
+  const result = await llmJSON<CreativePlan>(projectId, 'creative_plan', systemPrompt, userPrompt, 'generate', 'creative_plan');
   if (!result.success || !result.data) return { success: false, error: result.error || '创作方案生成失败' };
 
+  let finalPlan = result.data;
+
+  // 闭环创作模式：导师Agent + 人性Agent 交叉审阅 + 中枢迭代
+  if (config.loopMode) {
+    onProgress?.('🔄 启动闭环创作模式：三位一体+中枢迭代...');
+    const loopResult = await loopCreativePlan(projectId, finalPlan, config.loopConfig, onProgress);
+    finalPlan = loopResult.finalOutput;
+    // 保存闭环迭代记录
+    const existingIterations = getScreenplay(projectId)?.loopIterations || {};
+    existingIterations['creative_plan'] = loopResult.iterations;
+    updateScreenplay(projectId, { loopIterations: existingIterations });
+    onProgress?.(`📊 创作方案闭环完成：${loopResult.totalIterations}轮迭代，${loopResult.passed ? '✅达标' : '⚠️未完全达标'}`);
+  }
+
   onProgress?.('创作方案生成完成');
-  return { success: true, project: updateScreenplay(projectId, { creativePlan: result.data, status: 'plan_done' }) };
+  return { success: true, project: updateScreenplay(projectId, { creativePlan: finalPlan, status: 'plan_done' }) };
 }
 
 // ============================================================
@@ -685,11 +747,24 @@ export async function generateCharacters(
 4. romanceLine标注具体集数
 5. 关系图覆盖所有主要角色间的关系`;
 
-  const result = await llmJSON<CharacterDesign>(projectId, 'character_design', systemPrompt, userPrompt);
+  const result = await llmJSON<CharacterDesign>(projectId, 'character_design', systemPrompt, userPrompt, 'generate', 'character_design');
   if (!result.success || !result.data) return { success: false, error: result.error || '角色开发失败' };
 
+  let finalDesign = result.data;
+
+  // 闭环创作模式
+  if (config.loopMode) {
+    onProgress?.('🔄 角色体系闭环审阅...');
+    const loopResult = await loopCharacterDesign(projectId, finalDesign, config.loopConfig, onProgress);
+    finalDesign = loopResult.finalOutput;
+    const existingIterations = getScreenplay(projectId)?.loopIterations || {};
+    existingIterations['character_design'] = loopResult.iterations;
+    updateScreenplay(projectId, { loopIterations: existingIterations });
+    onProgress?.(`📊 角色闭环完成：${loopResult.totalIterations}轮，${loopResult.passed ? '✅达标' : '⚠️未完全达标'}`);
+  }
+
   onProgress?.('角色体系开发完成');
-  return { success: true, project: updateScreenplay(projectId, { characterDesign: result.data, status: 'characters_done' }) };
+  return { success: true, project: updateScreenplay(projectId, { characterDesign: finalDesign, status: 'characters_done' }) };
 }
 
 // ============================================================
@@ -751,7 +826,7 @@ async function generateCharactersFromPool(
 候选角色库（共${allAgents.length}个）：
 ${candidateSummary}`;
 
-  const matchResult = await llmJSON<{ selectedIds: string[]; reason: string }>(projectId, 'match_pool_agents', matchSystem, matchUser, 'parse');
+  const matchResult = await llmJSON<{ selectedIds: string[]; reason: string }>(projectId, 'match_pool_agents', matchSystem, matchUser, 'parse', 'world_sim');
 
   let selectedAgents: CharacterAgentRow[];
   if (matchResult.success && matchResult.data && matchResult.data.selectedIds && matchResult.data.selectedIds.length >= 10) {
@@ -868,7 +943,7 @@ ${era.powerSystem ? `- 力量体系：${era.powerSystem}` : ''}
     const roundUser = `本轮进入世界的角色（第${roundNum}组，共${groups.length}组）：\n\n${group.map(buildProfile).join('\n\n')}\n\n请模拟这组角色在世界中的互动，注意标注时间线阶段。`;
 
     return llmJSON<RoundResult & { interactions: Array<SimInteraction & { timeline?: string }> }>(
-      projectId, `world_sim_round_${roundNum}`, roundSystem, roundUser, 'generate'
+      projectId, `world_sim_round_${roundNum}`, roundSystem, roundUser, 'generate', 'world_sim'
     ).then(result => {
       if (result.success && result.data) {
         // 推送本轮结果
@@ -982,7 +1057,7 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
       ? `跨时代核心角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同时代的角色之间的跨时空因果关联。`
       : `跨组交叉角色：\n\n${crossAgents.map(buildProfile).join('\n\n')}\n\n请模拟这些来自不同圈子的角色之间的互动。`;
 
-    const crossResult = await llmJSON<RoundResult>(projectId, 'world_sim_cross', crossSystem, crossUser, 'generate');
+    const crossResult = await llmJSON<RoundResult>(projectId, 'world_sim_cross', crossSystem, crossUser, 'generate', 'world_sim');
     if (crossResult.success && crossResult.data) {
       crossInteractions = crossResult.data.interactions || [];
       emitAndCollect(`[SIM]${JSON.stringify({
@@ -1024,7 +1099,7 @@ ${allRoundResults.map((r, i) => `第${i + 1}组：${r.narrative?.slice(0, 150)}`
     outcasts: string[];
     powerDynamics: string;
     emergentStory: string;
-  }>(projectId, 'world_sim_summary', summarySystem, summaryUser, 'generate');
+  }>(projectId, 'world_sim_summary', summarySystem, summaryUser, 'generate', 'world_sim');
 
   const simData = {
     interactions: allInteractions,
@@ -1117,7 +1192,7 @@ ${selectedAgents.filter(a => !simData.outcasts?.includes(a.name)).map(a =>
   "villainSystem": {"layer1": [], "layer2": [], "layer3": [], "layer4": []}
 }`;
 
-  const extractResult = await llmJSON<CharacterDesign>(projectId, 'extract_final_characters', extractSystem, extractUser, 'generate');
+  const extractResult = await llmJSON<CharacterDesign>(projectId, 'extract_final_characters', extractSystem, extractUser, 'generate', 'character_design');
   if (!extractResult.success || !extractResult.data) {
     emitAndCollect('⚠️ 角色提取失败，回退到默认角色开发');
     return generateCharactersDefault(projectId, onProgress);
@@ -1240,7 +1315,7 @@ ${creativePlan.timelineArcs.causalChains.map(c => `- ${c.name}：${c.nodes.map(n
 7. 涉及伏笔埋设或收线的集数，foreshadows数组中填入对应节点ID
 8. 时代切换的集数必须标记为🔥` : ''}`;
 
-  const result = await llmJSON<EpisodeDirectoryItem[]>(projectId, 'episode_directory', systemPrompt, userPrompt);
+  const result = await llmJSON<EpisodeDirectoryItem[]>(projectId, 'episode_directory', systemPrompt, userPrompt, 'generate', 'directory');
   if (!result.success || !result.data) return { success: false, error: result.error || '分集目录生成失败' };
 
   // LLM 可能返回包裹对象 { "directory": [...] } 而非直接数组
@@ -1253,6 +1328,17 @@ ${creativePlan.timelineArcs.causalChains.map(c => `- ${c.name}：${c.nodes.map(n
     directory = arr;
   }
   console.log(`[screenplay] directory生成成功, len=${directory.length}, isArray=${Array.isArray(directory)}`);
+
+  // 闭环创作模式
+  if (config.loopMode) {
+    onProgress?.('🔄 分集目录闭环审阅...');
+    const loopResult = await loopDirectory(projectId, directory, config.loopConfig, onProgress);
+    directory = loopResult.finalOutput;
+    const existingIterations = getScreenplay(projectId)?.loopIterations || {};
+    existingIterations['directory'] = loopResult.iterations;
+    updateScreenplay(projectId, { loopIterations: existingIterations });
+    onProgress?.(`📊 目录闭环完成：${loopResult.totalIterations}轮，${loopResult.passed ? '✅达标' : '⚠️未完全达标'}`);
+  }
 
   onProgress?.('分集目录生成完成');
   const updated = updateScreenplay(projectId, { episodeDirectory: directory, status: 'directory_done' });
@@ -1416,15 +1502,29 @@ ${simContext}
   "mark": "${dirItem.mark}"
 }`;
 
-  const result = await llmJSON<EpisodeScript>(projectId, `episode_${episodeNumber}`, systemPrompt, userPrompt);
+  const result = await llmJSON<EpisodeScript>(projectId, `episode_${episodeNumber}`, systemPrompt, userPrompt, 'generate', 'episode');
   if (!result.success || !result.data) return { success: false, error: result.error || `第${episodeNumber}集生成失败` };
 
   // 确保 number 字段正确（LLM 可能返回字符串或缺失）
   result.data.number = episodeNumber;
   result.data.keywords = result.data.keywords || [];
 
+  let finalEpisode = result.data;
+
+  // 闭环创作模式：对每集执行导师+人性Agent交叉审阅
+  if (config.loopMode) {
+    onProgress?.(`🔄 第${episodeNumber}集闭环审阅...`);
+    const loopResult = await loopEpisode(projectId, finalEpisode, config.loopConfig, onProgress);
+    finalEpisode = loopResult.finalOutput;
+    const existingIterations = getScreenplay(projectId)?.loopIterations || {};
+    const key = `episode_${episodeNumber}`;
+    existingIterations[key] = loopResult.iterations;
+    updateScreenplay(projectId, { loopIterations: existingIterations });
+    onProgress?.(`📊 第${episodeNumber}集闭环完成：${loopResult.totalIterations}轮，${loopResult.passed ? '✅达标' : '⚠️未完全达标'}`);
+  }
+
   // 更新项目（按 number 去重后排序）
-  const episodes = [...project.episodes.filter(e => e.number !== episodeNumber), result.data].sort((a, b) => a.number - b.number);
+  const episodes = [...project.episodes.filter(e => e.number !== episodeNumber), finalEpisode].sort((a, b) => a.number - b.number);
   const newStatus = episodes.length >= config.totalEpisodes ? 'review' : 'writing';
   updateScreenplay(projectId, { episodes, status: newStatus });
 
@@ -1577,7 +1677,7 @@ ${adjacentContext ? `\n## 前后集上下文（用于评估连贯性）\n${adjac
 
 请输出严格的 JSON 格式。`;
 
-  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, buildReviewUserPrompt(episode), 'evaluate');
+  const reviewResult = await llmJSON<ReviewScore>(projectId, `review_${episodeNumber}`, reviewSystemPrompt, buildReviewUserPrompt(episode), 'evaluate', 'review');
   if (!reviewResult.success || !reviewResult.data) return { success: false, error: reviewResult.error || '自检失败' };
 
   const review = reviewResult.data;
@@ -1667,7 +1767,7 @@ ${adjacentContext ? `\n## 前后集上下文（改写时必须保持衔接）\n$
   "mark": "${episode.mark || ''}"
 }`;
 
-  const rewriteResult = await llmJSON<EpisodeScript>(projectId, `rewrite_${episodeNumber}`, rewriteSystemPrompt, rewriteUserPrompt, 'optimize');
+  const rewriteResult = await llmJSON<EpisodeScript>(projectId, `rewrite_${episodeNumber}`, rewriteSystemPrompt, rewriteUserPrompt, 'optimize', 'rewrite');
   if (rewriteResult.success && rewriteResult.data) {
     const rewritten = rewriteResult.data;
     rewritten.number = episodeNumber;
@@ -1686,7 +1786,7 @@ ${adjacentContext ? `\n## 前后集上下文（改写时必须保持衔接）\n$
 
     // 对改写后的剧本重新评分（使用 buildReviewUserPrompt 避免 string replace 问题）
     const reReviewResult = await llmJSON<ReviewScore>(projectId, `re_review_${episodeNumber}`, reviewSystemPrompt,
-      buildReviewUserPrompt(rewritten), 'evaluate');
+      buildReviewUserPrompt(rewritten), 'evaluate', 'review');
 
     if (reReviewResult.success && reReviewResult.data) {
       const newReview = reReviewResult.data;
@@ -1702,7 +1802,7 @@ ${adjacentContext ? `\n## 前后集上下文（改写时必须保持衔接）\n$
         // 分数下降 → 再尝试一次改写
         console.log(`[screenplay] 第${episodeNumber}集优化: ${review.total} → ${newReview.total} ↓ 分数下降，重试...`);
         const retryResult = await llmJSON<EpisodeScript>(projectId, `rewrite_retry_${episodeNumber}`, rewriteSystemPrompt,
-          rewriteUserPrompt + `\n\n⚠️ 上一次改写后评分从 ${review.total} 降到了 ${newReview.total}，请更谨慎地修改，只改必须改的问题，保留原剧本的优点。`, 'optimize');
+          rewriteUserPrompt + `\n\n⚠️ 上一次改写后评分从 ${review.total} 降到了 ${newReview.total}，请更谨慎地修改，只改必须改的问题，保留原剧本的优点。`, 'optimize', 'rewrite');
         if (retryResult.success && retryResult.data) {
           const retryEp = retryResult.data;
           retryEp.number = episodeNumber;
@@ -1717,7 +1817,7 @@ ${adjacentContext ? `\n## 前后集上下文（改写时必须保持衔接）\n$
           } else {
             // 重试版本再评分
             const retryReview = await llmJSON<ReviewScore>(projectId, `re_review_retry_${episodeNumber}`, reviewSystemPrompt,
-              buildReviewUserPrompt(retryEp), 'evaluate');
+              buildReviewUserPrompt(retryEp), 'evaluate', 'review');
             if (retryReview.success && retryReview.data && retryReview.data.total >= review.total) {
               const updatedProject2 = getScreenplay(projectId)!;
               const episodes = updatedProject2.episodes.map(e => e.number === episodeNumber ? retryEp : e);

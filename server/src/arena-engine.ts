@@ -9,6 +9,7 @@ import { SYSTEM_AGENTS, type SystemAgent } from './system-agents-data.js';
 import { chatCompletionJSON } from './llm-service.js';
 import {
   getScreenplay,
+  updateScreenplay,
   getActsFromPlan,
   type CreativePlan,
   type CharacterDesign,
@@ -16,6 +17,14 @@ import {
   type EpisodeDirectoryItem,
   type EpisodeScript,
 } from './screenplay-creator.js';
+import {
+  loopCreativePlan,
+  loopCharacterDesign,
+  loopDirectory,
+  loopEpisode,
+  type LoopConfig,
+  type LoopIteration,
+} from './creation-loop.js';
 
 // ============ 类型定义 ============
 
@@ -991,6 +1000,66 @@ function broadcastArenaError(taskId: string, error: string): void {
   });
 }
 
+// ============ 闭环迭代辅助（竞技模式复用 creation-loop） ============
+
+/** 从 ScreenplayConfig 中提取 LoopConfig */
+function extractLoopConfig(config: ScreenplayConfig): Partial<LoopConfig> {
+  const lc = config.loopConfig;
+  return {
+    maxIterations: lc?.maxIterations ?? 2,  // 竞技模式默认2轮（节省时间）
+    mentorContext: lc?.mentorContext,
+    humanityContext: lc?.humanityContext,
+    thresholds: lc?.thresholds,
+  };
+}
+
+/**
+ * 对竞技模式Top候选执行闭环迭代（通用封装）
+ * 仅在 config.loopMode 为 true 时执行，否则直接返回原数据
+ */
+async function arenaLoopRefine<T>(
+  projectId: string,
+  config: ScreenplayConfig,
+  taskId: string,
+  stageName: string,
+  candidate: CandidateEntry<T>,
+  loopFn: (projectId: string, data: T, loopConfig?: Partial<LoopConfig>, onProgress?: (msg: string) => void) => Promise<import('./creation-loop.js').LoopResult<T>>,
+): Promise<T> {
+  if (!config.loopMode) return candidate.data;
+
+  const loopConfig = extractLoopConfig(config);
+  broadcastArenaProgress(taskId, `🔄 ${stageName}: Top 1 闭环迭代开始 (${candidate.systemAgentName}组)`);
+
+  try {
+    const result = await loopFn(
+      projectId,
+      candidate.data,
+      loopConfig,
+      (msg) => broadcastArenaProgress(taskId, `[闭环·${stageName}] ${msg}`),
+    );
+
+    // 存储闭环迭代记录到项目
+    const project = getScreenplay(projectId);
+    if (project) {
+      if (!project.loopIterations) project.loopIterations = {};
+      project.loopIterations[`arena_${stageName}`] = result.iterations;
+      updateScreenplay(projectId, { loopIterations: project.loopIterations });
+    }
+
+    const statusIcon = result.passed ? '✅' : '⏹️';
+    broadcastArenaProgress(taskId,
+      `${statusIcon} ${stageName} 闭环完成: ${result.totalIterations}轮迭代, ` +
+      `逻辑:${result.finalScores.logicTruth} 爽感:${result.finalScores.emotionHook} 对白:${result.finalScores.dialogueStyle}`,
+    );
+
+    return result.finalOutput;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    broadcastArenaProgress(taskId, `⚠️ ${stageName} 闭环失败(${errMsg})，使用原始版本`);
+    return candidate.data;
+  }
+}
+
 // ============ 阶段1：创意方案竞争 ============
 
 /**
@@ -1428,6 +1497,21 @@ export async function runCreativePlanArena(
     broadcastArenaProgress(taskId,
       `Top 10方案已选出, 最高分${topCandidate.score.toFixed(1)}, 来自${topCandidate.systemAgentName}组`,
     );
+
+    // ===== 闭环迭代：对Top 1方案执行导师+人性Agent交叉审阅 =====
+    const refinedPlan = await arenaLoopRefine<CreativePlan>(
+      projectId, config, taskId, '创意方案',
+      topCandidate as CandidateEntry<CreativePlan>,
+      loopCreativePlan,
+    );
+    if (refinedPlan !== topCandidate.data) {
+      topCandidate.data = refinedPlan;
+      // 更新持久化数据
+      const updatedRow = candidateRows.find(r => r.id === topCandidate.id);
+      if (updatedRow) {
+        updatedRow.content = JSON.stringify(refinedPlan);
+      }
+    }
   }
 
   return {
@@ -1880,6 +1964,16 @@ export async function runCharacterArena(
     broadcastArenaProgress(taskId,
       `角色开发完成, 最高分${topCandidate.score.toFixed(1)}, 来自${topCandidate.systemAgentName}组`,
     );
+
+    // ===== 闭环迭代：对Top 1角色设计执行导师+人性Agent交叉审阅 =====
+    const refinedChars = await arenaLoopRefine<CharacterDesign>(
+      projectId, config, taskId, '角色设计',
+      topCandidate as CandidateEntry<CharacterDesign>,
+      loopCharacterDesign,
+    );
+    if (refinedChars !== topCandidate.data) {
+      topCandidate.data = refinedChars;
+    }
   }
 
   return {
@@ -2225,6 +2319,16 @@ export async function runDirectoryArena(
     broadcastArenaProgress(taskId,
       `目录评审: ${totalReviews}/${totalReviews} 完成, Top 5已选出, 最高分${topCandidate.score.toFixed(1)}, 来自${topCandidate.systemAgentName}组`,
     );
+
+    // ===== 闭环迭代：对Top 1分集目录执行导师+人性Agent交叉审阅 =====
+    const refinedDir = await arenaLoopRefine<EpisodeDirectoryItem[]>(
+      projectId, config, taskId, '分集目录',
+      topCandidate as CandidateEntry<EpisodeDirectoryItem[]>,
+      loopDirectory,
+    );
+    if (refinedDir !== topCandidate.data) {
+      topCandidate.data = refinedDir;
+    }
   }
 
   return {
@@ -2626,10 +2730,37 @@ export async function runEpisodeArena(
         `逐集评审: ${sysAgentName}组 第${dirItem.number}集 ${finalScore.toFixed(1)}分`,
       );
 
-      episodes.push(finalEpisode);
+      // ===== 闭环迭代：对每集剧本执行导师+人性Agent交叉审阅 =====
+      let loopedEpisode = finalEpisode;
+      if (config.loopMode) {
+        const loopConfig = extractLoopConfig(config);
+        broadcastArenaProgress(taskId, `🔄 第${dirItem.number}集 闭环迭代开始`);
+        try {
+          const loopResult = await loopEpisode(
+            projectId, finalEpisode, loopConfig,
+            (msg) => broadcastArenaProgress(taskId, `[闭环·第${dirItem.number}集] ${msg}`),
+          );
+          loopedEpisode = loopResult.finalOutput;
+          // 存储闭环记录
+          const proj = getScreenplay(projectId);
+          if (proj) {
+            if (!proj.loopIterations) proj.loopIterations = {};
+            proj.loopIterations[`arena_episode_${dirItem.number}`] = loopResult.iterations;
+            updateScreenplay(projectId, { loopIterations: proj.loopIterations });
+          }
+          const icon = loopResult.passed ? '✅' : '⏹️';
+          broadcastArenaProgress(taskId,
+            `${icon} 第${dirItem.number}集 闭环完成: 逻辑:${loopResult.finalScores.logicTruth} 爽感:${loopResult.finalScores.emotionHook}`,
+          );
+        } catch {
+          broadcastArenaProgress(taskId, `⚠️ 第${dirItem.number}集 闭环失败，使用评审版本`);
+        }
+      }
+
+      episodes.push(loopedEpisode);
       episodeScores[dirItem.number] = finalScore;
       episodeDirScores[dirItem.number] = directionScores;
-      prevHook = finalEpisode.endHook || '';
+      prevHook = loopedEpisode.endHook || '';
     }
 
     // 计算综合评分 = 所有集的平均评分

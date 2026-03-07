@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Seedance 2.0 — 剧本创作系统架构</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;line-height:1.6;overflow-x:hidden}
+.container{max-width:1200px;margin:0 auto;padding:40px 24px 80px}
+h1{text-align:center;font-size:2.2rem;font-weight:700;background:linear-gradient(135deg,#f97316,#ec4899,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.subtitle{text-align:center;color:#6b7280;font-size:.95rem;margin-bottom:48px}
+h2{font-size:1.4rem;font-weight:600;color:#f97316;margin:48px 0 20px;padding-left:16px;border-left:4px solid #f97316}
+h3{font-size:1.1rem;font-weight:600;color:#e5e7eb;margin:28px 0 12px}
+
+/* 双路径总览 */
+.dual-path{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:24px 0}
+.path-card{background:#111118;border:1px solid #1f1f2e;border-radius:16px;padding:24px;position:relative;overflow:hidden}
+.path-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.path-normal::before{background:linear-gradient(90deg,#3b82f6,#06b6d4)}
+.path-arena::before{background:linear-gradient(90deg,#f97316,#ef4444)}
+.path-card h3{margin-top:0}
+.path-tag{display:inline-block;padding:2px 10px;border-radius:20px;font-size:.75rem;font-weight:600;margin-bottom:12px}
+.tag-blue{background:#3b82f620;color:#60a5fa;border:1px solid #3b82f640}
+.tag-orange{background:#f9731620;color:#fb923c;border:1px solid #f9731640}
+
+/* 流程图 */
+.flow{display:flex;flex-direction:column;align-items:center;gap:0;margin:32px 0}
+.flow-node{background:#111118;border:1px solid #1f1f2e;border-radius:12px;padding:16px 24px;width:100%;max-width:720px;position:relative;transition:all .3s}
+.flow-node:hover{border-color:#f9731660;box-shadow:0 0 20px #f9731610}
+.flow-arrow{width:2px;height:32px;background:linear-gradient(180deg,#f9731680,#f9731620);position:relative}
+.flow-arrow::after{content:'▼';position:absolute;bottom:-8px;left:50%;transform:translateX(-50%);color:#f97316;font-size:10px}
+.flow-branch{display:flex;align-items:stretch;gap:16px;width:100%;max-width:720px}
+.flow-branch .flow-node{flex:1}
+.flow-connector{display:flex;flex-direction:column;align-items:center;justify-content:center;width:40px;flex-shrink:0}
+.flow-connector .line{width:2px;flex:1;background:#f9731640}
+.flow-connector .label{writing-mode:vertical-rl;font-size:.7rem;color:#f97316;padding:4px 0;white-space:nowrap}
+
+/* 阶段卡片 */
+.stage{background:#111118;border:1px solid #1f1f2e;border-radius:16px;padding:24px;margin:16px 0;position:relative;overflow:hidden}
+.stage::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,var(--c1),var(--c2))}
+.stage-header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+.stage-num{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:.9rem;flex-shrink:0}
+.stage-title{font-size:1.05rem;font-weight:600;color:#e5e7eb}
+.stage-func{font-size:.8rem;color:#6b7280;font-family:'SF Mono',Consolas,monospace;margin-left:auto}
+.stage-desc{color:#9ca3af;font-size:.9rem;margin-bottom:12px}
+.stage-details{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.detail-box{background:#0a0a0f;border-radius:8px;padding:12px;border:1px solid #1a1a2e}
+.detail-box h4{font-size:.8rem;color:#f97316;margin-bottom:6px;font-weight:600}
+.detail-box p,.detail-box li{font-size:.82rem;color:#9ca3af}
+.detail-box ul{padding-left:16px}
+.detail-box li{margin-bottom:2px}
+
+/* 闭环系统 */
+.loop-system{background:linear-gradient(135deg,#111118,#0f0f1a);border:2px solid #8b5cf640;border-radius:20px;padding:32px;margin:32px 0;position:relative}
+.loop-system::before{content:'🔄 闭环迭代系统';position:absolute;top:-14px;left:24px;background:#0a0a0f;padding:0 12px;font-size:.85rem;font-weight:600;color:#a78bfa}
+.loop-flow{display:flex;flex-direction:column;align-items:center;gap:0;margin-top:16px}
+.loop-agents{display:grid;grid-template-columns:1fr 1fr;gap:16px;width:100%;max-width:640px}
+.agent-card{border-radius:12px;padding:16px;position:relative;overflow:hidden}
+.agent-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.agent-mentor{background:#1e3a5f20;border:1px solid #3b82f640}.agent-mentor::before{background:#3b82f6}
+.agent-humanity{background:#5f1e3a20;border:1px solid #ec489940}.agent-humanity::before{background:#ec4899}
+.agent-nexus{background:#3a1e5f20;border:1px solid #8b5cf640;grid-column:1/-1}.agent-nexus::before{background:#8b5cf6}
+.agent-card h4{font-size:.95rem;font-weight:600;margin-bottom:4px}
+.agent-card .role{font-size:.78rem;color:#6b7280;margin-bottom:8px}
+.agent-card ul{padding-left:16px;font-size:.82rem;color:#9ca3af}
+.agent-card li{margin-bottom:2px}
+.parallel-label{background:#f9731620;color:#fb923c;font-size:.7rem;padding:2px 8px;border-radius:4px;display:inline-block;margin-bottom:8px}
+
+/* 决策分支 */
+.decision{display:flex;align-items:center;justify-content:center;gap:24px;width:100%;max-width:640px;margin:8px 0}
+.decision-box{background:#1a1a2e;border:1px dashed #f9731660;border-radius:8px;padding:10px 20px;text-align:center;font-size:.85rem}
+.decision-yes{border-color:#10b98160;color:#34d399}
+.decision-no{border-color:#f59e0b60;color:#fbbf24}
+.decision-or{color:#6b7280;font-size:.8rem}
+
+/* Agent表格 */
+.agent-table{width:100%;border-collapse:collapse;margin:16px 0;font-size:.85rem}
+.agent-table th{background:#1a1a2e;color:#f97316;padding:10px 16px;text-align:left;font-weight:600;border-bottom:2px solid #f9731640}
+.agent-table td{padding:10px 16px;border-bottom:1px solid #1f1f2e;color:#d1d5db}
+.agent-table tr:hover td{background:#111118}
+
+/* 模型配置 */
+.model-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;margin:12px 0}
+.model-item{background:#111118;border:1px solid #1f1f2e;border-radius:8px;padding:8px 12px;font-size:.8rem;display:flex;justify-content:space-between;align-items:center}
+.model-item .key{color:#9ca3af}.model-item .val{color:#60a5fa;font-family:monospace;font-size:.75rem}
+
+/* 数据留痕 */
+.trace-flow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0}
+.trace-step{background:#111118;border:1px solid #1f1f2e;border-radius:8px;padding:8px 14px;font-size:.82rem;color:#d1d5db}
+.trace-arrow-h{color:#f97316;font-size:.8rem}
+
+/* 响应式 */
+@media(max-width:768px){
+  .dual-path,.stage-details,.loop-agents{grid-template-columns:1fr}
+  .flow-branch{flex-direction:column}
+  .flow-connector{width:100%;height:32px;flex-direction:row}.flow-connector .line{height:2px;width:auto}
+  h1{font-size:1.6rem}
+  .agent-nexus{grid-column:auto}
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Seedance 2.0 剧本创作系统架构</h1>
+<p class="subtitle">三位一体 + 中枢迭代 · 多Agent闭环创作引擎</p>
+
+<!-- ==================== 双路径总览 ==================== -->
+<h2>双路径创作模式</h2>
+<p style="color:#9ca3af;font-size:.9rem;margin-bottom:16px">系统提供两条创作路径，均可叠加闭环迭代系统</p>
+
+<div class="dual-path">
+  <div class="path-card path-normal">
+    <span class="path-tag tag-blue">普通模式</span>
+    <h3 style="color:#60a5fa">单Agent线性创作</h3>
+    <p style="color:#9ca3af;font-size:.85rem;margin-bottom:12px">单个创作Agent按阶段顺序生成，适合快速出稿</p>
+    <ul style="padding-left:16px;font-size:.82rem;color:#9ca3af">
+      <li>1个创作Agent逐步生成</li>
+      <li>每阶段产出1份结果</li>
+      <li>可选开启闭环迭代审阅</li>
+      <li>质量评审 + 自动改写</li>
+      <li>速度快，Token消耗低</li>
+    </ul>
+  </div>
+  <div class="path-card path-arena">
+    <span class="path-tag tag-orange">竞技模式</span>
+    <h3 style="color:#fb923c">百Agent竞争淘汰</h3>
+    <p style="color:#9ca3af;font-size:.85rem;margin-bottom:12px">多组Agent并行创作，评审打分，漏斗筛选最优</p>
+    <ul style="padding-left:16px;font-size:.82rem;color:#9ca3af">
+      <li>10组 × 4人 = 40个创作Agent</li>
+      <li>组内互评 → 组间评审 → 漏斗淘汰</li>
+      <li>Top10 → Top5 → Top1 逐级筛选</li>
+      <li>Top1 可叠加闭环迭代精修</li>
+      <li>质量高，Token消耗大</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 主流程 ==================== -->
+<h2>创作主流程（6大阶段）</h2>
+
+<!-- 阶段0 -->
+<div class="stage" style="--c1:#6b7280;--c2:#9ca3af">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#6b728020;color:#9ca3af">0</div>
+    <span class="stage-title">参考小说解析（可选）</span>
+    <span class="stage-func">analyzeReferenceNovel()</span>
+  </div>
+  <p class="stage-desc">如果用户提供了参考小说，先用LLM提取故事DNA，作为后续所有阶段的二次创作基础。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📥 输入</h4>
+      <p>用户粘贴的小说全文 / 上传的.txt文件</p>
+    </div>
+    <div class="detail-box">
+      <h4>📤 输出</h4>
+      <ul>
+        <li>故事线、核心冲突、主题</li>
+        <li>角色关系图谱</li>
+        <li>世界观设定</li>
+        <li>剧情弧线（主要情节点）</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段1 -->
+<div class="stage" style="--c1:#3b82f6;--c2:#06b6d4">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#3b82f620;color:#60a5fa">1</div>
+    <span class="stage-title">创意方案生成</span>
+    <span class="stage-func">generateCreativePlan()</span>
+  </div>
+  <p class="stage-desc">根据用户配置（题材、受众、集数、基调）生成完整的四幕结构创作方案。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📥 输入</h4>
+      <ul>
+        <li>题材组合（如：都市+复仇）</li>
+        <li>目标受众（男频/女频）</li>
+        <li>总集数、故事基调、结局类型</li>
+        <li>可选：参考小说解析结果</li>
+        <li>可选：用户自定义要求</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>📤 输出 — CreativePlan</h4>
+      <ul>
+        <li>3个剧名备选</li>
+        <li>四幕结构（起承转合）+ 集数分配</li>
+        <li>付费卡点布局（约12%集数）</li>
+        <li>爽点矩阵（5类爽点占比）</li>
+        <li>可选：跨时代时间线、伏笔/收线图谱、因果链</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🏟️ 竞技模式</h4>
+      <ul>
+        <li>10组 × 4人 = 40份方案</li>
+        <li>组内互评修改 → 组间评审打分</li>
+        <li>漏斗筛选 Top10 → Top1</li>
+        <li>函数：runCreativePlanArena()</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🔄 闭环迭代</h4>
+      <ul>
+        <li>loopCreativePlan()</li>
+        <li>导师审逻辑 + 人性审爽感</li>
+        <li>中枢裁决 → 修改 → 再审</li>
+        <li>达标或达最大迭代次数后停止</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段2 -->
+<div class="stage" style="--c1:#10b981;--c2:#34d399">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#10b98120;color:#34d399">2</div>
+    <span class="stage-title">角色体系设计</span>
+    <span class="stage-func">generateCharacters()</span>
+  </div>
+  <p class="stage-desc">基于创意方案设计完整角色体系，包含主角、配角、反派的性格、动机、口头禅、视觉描述。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📥 输入</h4>
+      <ul>
+        <li>阶段1的创意方案</li>
+        <li>题材配置和受众信息</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>📤 输出 — CharacterDesign</h4>
+      <ul>
+        <li>角色列表（名字、身份、性格、动机）</li>
+        <li>角色关系网络</li>
+        <li>口头禅、视觉描述</li>
+        <li>秘密身份 / 隐藏动机</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🎭 两条路径</h4>
+      <ul>
+        <li><strong>默认生成：</strong>LLM从零设计角色</li>
+        <li><strong>群演仓库匹配：</strong>从已有角色Agent库中匹配合适角色 + 补充新角色</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🔄 闭环迭代</h4>
+      <ul>
+        <li>loopCharacterDesign()</li>
+        <li>导师审角色合理性</li>
+        <li>人性审角色代入感和冲突张力</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段2.5 -->
+<div class="stage" style="--c1:#8b5cf6;--c2:#a78bfa;border-style:dashed">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#8b5cf620;color:#a78bfa">2.5</div>
+    <span class="stage-title">世界观模拟（可选）</span>
+    <span class="stage-func">worldSimulation</span>
+  </div>
+  <p class="stage-desc">角色Agent在虚拟世界中自由互动，多轮模拟 + 跨组互动，提取关键事件注入后续写作上下文。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>🎮 模拟流程</h4>
+      <ul>
+        <li>多轮模拟：角色按组自由互动</li>
+        <li>跨组互动：不同组角色碰撞</li>
+        <li>汇总提取：关键事件和关系变化</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>💡 作用</h4>
+      <ul>
+        <li>让角色行为在剧本中保持一致性</li>
+        <li>发现意想不到的角色化学反应</li>
+        <li>模拟日志注入剧本写作提示词</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段3 -->
+<div class="stage" style="--c1:#f59e0b;--c2:#fbbf24">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#f59e0b20;color:#fbbf24">3</div>
+    <span class="stage-title">分集目录规划</span>
+    <span class="stage-func">generateDirectory()</span>
+  </div>
+  <p class="stage-desc">规划每集的标题、梗概、钩子类型、所属阶段和付费卡点标记。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📤 输出 — EpisodeDirectoryItem[]</h4>
+      <ul>
+        <li>每集：标题、梗概、钩子类型</li>
+        <li>所属阶段（起势/攀升/风暴/决战）</li>
+        <li>付费卡点标记 💰</li>
+        <li>可选：时代归属、伏笔任务</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>📊 节奏分配</h4>
+      <ul>
+        <li>起势段（前15%）：密集建立信息</li>
+        <li>攀升段（15%-45%）：稳定上升</li>
+        <li>风暴段（45%-80%）：高潮密集</li>
+        <li>决战段（最后20%）：终极对决</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段4 -->
+<div class="stage" style="--c1:#ef4444;--c2:#f87171">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#ef444420;color:#f87171">4</div>
+    <span class="stage-title">逐集剧本撰写</span>
+    <span class="stage-func">generateEpisode() / generateEpisodeBatch()</span>
+  </div>
+  <p class="stage-desc">按分集目录逐集生成完整剧本，包含场景描写（镜头指示）、台词对话、结尾钩子。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📥 注入上下文</h4>
+      <ul>
+        <li>前一集结尾钩子</li>
+        <li>角色简表（性格、口头禅）</li>
+        <li>世界观模拟经历（如有）</li>
+        <li>可选：Agent仓库的编剧风格</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>📤 输出 — EpisodeScript</h4>
+      <ul>
+        <li>3-5个场景（镜头指示 + 台词）</li>
+        <li>每场景4-6轮对话</li>
+        <li>每集600-900字</li>
+        <li>结尾钩子 + 下集预告</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>📏 质量硬标准</h4>
+      <ul>
+        <li>1分钟 ≈ 250-300字</li>
+        <li>台词占60-70%，描写占30-40%</li>
+        <li>至少2种景别</li>
+        <li>禁止无意义过渡场景</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🔄 闭环迭代</h4>
+      <ul>
+        <li>loopEpisode() — 每集独立闭环</li>
+        <li>导师审逻辑连贯性</li>
+        <li>人性审爽点密度和钩子强度</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段5 -->
+<div class="stage" style="--c1:#ec4899;--c2:#f472b6">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#ec489920;color:#f472b6">5</div>
+    <span class="stage-title">质量评审 + 自动改写</span>
+    <span class="stage-func">reviewEpisode()</span>
+  </div>
+  <p class="stage-desc">五维度质量评分，评审后自动改写，改写后复审确保分数不下降。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📊 五维评分（各1-10分，满分50）</h4>
+      <ul>
+        <li>节奏：开场速度、紧张-舒缓交替</li>
+        <li>爽点：数量、强度、类型多样性</li>
+        <li>台词：废话比例、角色区分度</li>
+        <li>格式：场景头、景别、音乐提示</li>
+        <li>连贯性：前后集衔接、角色一致性</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🔧 改写保护机制</h4>
+      <ul>
+        <li>改写后复审，分数不低于原分才采纳</li>
+        <li>字数缩水保护：台词和描写不能缩水超30%</li>
+        <li>分数下降时自动重试一次</li>
+        <li>重试仍失败则保留原剧本</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- 阶段6 -->
+<div class="stage" style="--c1:#f97316;--c2:#fb923c">
+  <div class="stage-header">
+    <div class="stage-num" style="background:#f9731620;color:#fb923c">6</div>
+    <span class="stage-title">导出 / 角斗场</span>
+    <span class="stage-func">exportScreenplay() / ArenaPanel</span>
+  </div>
+  <p class="stage-desc">导出完整剧本文本，或进入角斗场进行剧本间的评分、对战、锦标赛和进化。</p>
+  <div class="stage-details">
+    <div class="detail-box">
+      <h4>📦 导出</h4>
+      <ul>
+        <li>完整剧本文本导出</li>
+        <li>投稿材料生成（梗概、人物小传等）</li>
+        <li>情绪锚点图（每分钟爽点分布）</li>
+      </ul>
+    </div>
+    <div class="detail-box">
+      <h4>🏟️ 角斗场</h4>
+      <ul>
+        <li>剧本评分（六维雷达图）</li>
+        <li>剧本对战（ELO积分制）</li>
+        <li>锦标赛（淘汰赛/循环赛）</li>
+        <li>吸收进化（败者吸收胜者优点）</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</h4>
+
+<!-- ==================== 闭环迭代系统 ==================== -->
+<h2>闭环迭代系统（三位一体 + 中枢迭代）</h2>
+<p style="color:#9ca3af;font-size:.9rem;margin-bottom:8px">当 <code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:#fb923c">config.loopMode = true</code> 时，每个阶段的产出都会经过闭环审阅。核心引擎：<code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:#a78bfa">runCreationLoop&lt;T&gt;()</code></p>
+
+<div class="loop-system">
+  <div class="loop-flow">
+
+    <!-- 入口 -->
+    <div class="flow-node" style="text-align:center;background:#0f172a;border-color:#3b82f640">
+      <div style="font-size:.75rem;color:#60a5fa;margin-bottom:4px">INPUT</div>
+      <div style="font-weight:600;color:#e5e7eb">创作Agent 产出 V1.0</div>
+      <div style="font-size:.78rem;color:#6b7280;margin-top:4px">由各阶段生成函数产出初稿，传入闭环迭代器</div>
+    </div>
+
+    <div class="flow-arrow"></div>
+
+    <!-- 序列化 -->
+    <div class="flow-node" style="text-align:center;background:#1a1a2e">
+      <div style="font-size:.78rem;color:#9ca3af">contentSerializer() — 将结构化数据序列化为审阅用文本</div>
+    </div>
+
+    <div class="flow-arrow"></div>
+
+    <!-- 并行审阅 -->
+    <div style="width:100%;max-width:720px">
+      <div style="text-align:center;margin-bottom:8px">
+        <span class="parallel-label">⚡ Promise.all() 并行执行</span>
+      </div>
+      <div class="loop-agents">
+        <div class="agent-card agent-mentor">
+          <h4 style="color:#60a5fa">🎓 导师Agent</h4>
+          <div class="role">专业逻辑官 · mentorReview()</div>
+          <ul>
+            <li><strong>知识注入：</strong>根据题材提供行业黑话、法律常识、职场规则</li>
+            <li><strong>逻辑体检：</strong>审视因果关系，禁止"降智"剧情</li>
+            <li><strong>事实核查：</strong>检查医疗操作、商业合同、历史背景等常识</li>
+          </ul>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #3b82f620;font-size:.78rem">
+            <span style="color:#6b7280">输出：</span>
+            <span style="color:#60a5fa">logicTruth 评分 (0-100)</span> + 反馈列表
+          </div>
+          <div style="font-size:.75rem;color:#6b7280;margin-top:4px">
+            颗粒度：具体到哪一场戏、哪一句台词<br>
+            策略：不仅说哪里错，必须给出替代方案
+          </div>
+        </div>
+
+        <div class="agent-card agent-humanity">
+          <h4 style="color:#f472b6">💡 人性Agent</h4>
+          <div class="role">心理策略师 · humanityReview()</div>
+          <ul>
+            <li><strong>钩子设计：</strong>前3秒必有冲突，前30秒必有反转</li>
+            <li><strong>情绪曲线：</strong>确保"憋屈（铺垫）"与"爽点（释放）"比例合理</li>
+            <li><strong>代入感：</strong>确保主角动机引发观众强烈共鸣</li>
+          </ul>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid #ec489920;font-size:.78rem">
+            <span style="color:#6b7280">输出：</span>
+            <span style="color:#f472b6">emotionHook 评分 (0-100)</span> + 反馈列表
+          </div>
+          <div style="font-size:.75rem;color:#6b7280;margin-top:4px">
+            心理框架：损失厌恶、社会比较、归属感渴求、复仇快感<br>
+            爽点模型：压抑释放、身份反转、降维打击、打脸反馈
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-arrow"></div>
+
+    <!-- 中枢裁决 -->
+    <div style="width:100%;max-width:720px">
+      <div class="loop-agents">
+        <div class="agent-card agent-nexus">
+          <h4 style="color:#a78bfa">🧠 控制中枢（首席制片人）</h4>
+          <div class="role">nexusJudge() — 汇总意见、裁决冲突、生成修改清单</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+            <div>
+              <div style="font-size:.82rem;color:#c4b5fd;font-weight:600;margin-bottom:4px">⚖️ 冲突裁决原则</div>
+              <ul>
+                <li>小逻辑服从大爽感</li>
+                <li>但不能产生常识性硬伤</li>
+                <li>逻辑硬伤导致出戏 → 优先修逻辑</li>
+                <li>逻辑瑕疵不影响观感 → 保爽感</li>
+                <li>最佳方案："合理的爽"</li>
+              </ul>
+            </div>
+            <div>
+              <div style="font-size:.82rem;color:#c4b5fd;font-weight:600;margin-bottom:4px">📋 输出内容</div>
+              <ul>
+                <li>mergedFeedbacks — 合并去重的反馈</li>
+                <li>conflictResolutions — 冲突裁决说明</li>
+                <li>priorityActions — 优先修改项</li>
+                <li>passThreshold — 是否达标</li>
+                <li>scores — 三维评分（逻辑/爽感/对白）</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow-arrow"></div>
+
+    <!-- 决策分支 -->
+    <div class="decision">
+      <div class="decision-box decision-yes">
+        ✅ passThreshold = true<br>
+        <span style="font-size:.78rem">达标 → 输出成品</span>
+      </div>
+      <div class="decision-or">或</div>
+      <div class="decision-box decision-no">
+        ⚠️ passThreshold = false<br>
+        <span style="font-size:.78rem">未达标 → 生成修改清单</span>
+      </div>
+    </div>
+
+    <div class="flow-arrow"></div>
+
+    <!-- 修改迭代 -->
+    <div class="flow-node" style="text-align:center;border-color:#f59e0b40;background:#1a1510">
+      <div style="font-weight:600;color:#fbbf24;margin-bottom:4px">📝 buildRevisionPrompt() → 创作Agent修改</div>
+      <div style="font-size:.82rem;color:#9ca3af">
+        修改清单包含：当前三维评分 + 优先修改项 + 冲突裁决说明 + 详细反馈<br>
+        修改原则：只改反馈指出的问题，保留优点，critical必须修复，不能缩水
+      </div>
+      <div style="font-size:.78rem;color:#f59e0b;margin-top:8px">revise() 回调 → 输出 V2.0 / V3.0 ... → 回到顶部继续审阅 🔄</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 4个阶段的闭环入口 -->
+<h3>四个阶段的闭环入口函数</h3>
+<table class="agent-table">
+  <thead>
+    <tr><th>阶段</th><th>闭环函数</th><th>序列化方式</th><th>修改方式</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>创意方案</td>
+      <td style="color:#60a5fa;font-family:monospace">loopCreativePlan()</td>
+      <td>四幕结构 + 爽点矩阵 + 卡点布局 → 文本</td>
+      <td>LLM按修改清单重新生成CreativePlan</td>
+    </tr>
+    <tr>
+      <td>角色设计</td>
+      <td style="color:#60a5fa;font-family:monospace">loopCharacterDesign()</td>
+      <td>角色列表 + 关系网络 + 性格动机 → 文本</td>
+      <td>LLM按修改清单重新生成CharacterDesign</td>
+    </tr>
+    <tr>
+      <td>分集目录</td>
+      <td style="color:#60a5fa;font-family:monospace">loopDirectory()</td>
+      <td>每集标题/梗概/钩子/阶段 → 文本</td>
+      <td>LLM按修改清单重新生成目录</td>
+    </tr>
+    <tr>
+      <td>逐集剧本</td>
+      <td style="color:#60a5fa;font-family:monospace">loopEpisode()</td>
+      <td>场景描写 + 台词 + 钩子 → 文本</td>
+      <td>LLM按修改清单重写该集剧本</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ==================== Agent职责表 ==================== -->
+<h2>四大Agent职责分工</h2>
+
+<table class="agent-table">
+  <thead>
+    <tr><th>Agent</th><th>角色定位</th><th>核心关注</th><th>评分维度</th><th>提示词构建</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="color:#60a5fa;font-weight:600">🎓 导师Agent</td>
+      <td>专业逻辑官</td>
+      <td>知识注入、逻辑体检、事实核查</td>
+      <td>logicTruth (0-100)</td>
+      <td style="font-family:monospace;font-size:.78rem;color:#6b7280">buildMentorSystemPrompt()</td>
+    </tr>
+    <tr>
+      <td style="color:#f472b6;font-weight:600">💡 人性Agent</td>
+      <td>心理策略师</td>
+      <td>钩子设计、情绪曲线、代入感</td>
+      <td>emotionHook (0-100)</td>
+      <td style="font-family:monospace;font-size:.78rem;color:#6b7280">buildHumanitySystemPrompt()</td>
+    </tr>
+    <tr>
+      <td style="color:#a78bfa;font-weight:600">🧠 控制中枢</td>
+      <td>首席制片人</td>
+      <td>合并反馈、冲突裁决、验收判定</td>
+      <td>综合三维 + passThreshold</td>
+      <td style="font-family:monospace;font-size:.78rem;color:#6b7280">NEXUS_SYSTEM_PROMPT</td>
+    </tr>
+    <tr>
+      <td style="color:#fbbf24;font-weight:600">✍️ 创作Agent</td>
+      <td>金牌编剧</td>
+      <td>高效执行、风格化写作、精准响应修改</td>
+      <td>—（执行者，不评分）</td>
+      <td style="font-family:monospace;font-size:.78rem;color:#6b7280">各阶段生成函数内置</td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- ==================== 验收阈值 ==================== -->
+<h2>验收阈值与评分体系</h2>
+
+<div class="stage-details" style="margin:16px 0">
+  <div class="detail-box">
+    <h4>🎯 默认验收阈值</h4>
+    <ul>
+      <li><span style="color:#60a5fa">logicTruth</span>（逻辑真实度）≥ <strong style="color:#e5e7eb">90</strong></li>
+      <li><span style="color:#f472b6">emotionHook</span>（情绪爽感值）≥ <strong style="color:#e5e7eb">95</strong></li>
+      <li><span style="color:#a78bfa">dialogueStyle</span>（对白风格化）≥ <strong style="color:#e5e7eb">85</strong></li>
+    </ul>
+    <p style="font-size:.78rem;color:#6b7280;margin-top:8px">三项全部达标 → passThreshold = true → 停止迭代</p>
+  </div>
+  <div class="detail-box">
+    <h4>📏 导师Agent评分标准</h4>
+    <ul>
+      <li><span style="color:#34d399">90-100：</span>逻辑严密，无硬伤</li>
+      <li><span style="color:#60a5fa">70-89：</span>有小瑕疵但不影响主线</li>
+      <li><span style="color:#fbbf24">50-69：</span>有明显逻辑漏洞</li>
+      <li><span style="color:#ef4444">&lt;50：</span>逻辑混乱，需要重写</li>
+    </ul>
+  </div>
+  <div class="detail-box">
+    <h4>📏 人性Agent评分标准</h4>
+    <ul>
+      <li><span style="color:#34d399">95-100：</span>每一秒都在制造情绪，停不下来</li>
+      <li><span style="color:#60a5fa">80-94：</span>整体不错但有几处情绪断档</li>
+      <li><span style="color:#fbbf24">60-79：</span>爽点不够密集，可能划走</li>
+      <li><span style="color:#ef4444">&lt;60：</span>平淡无奇，毫无吸引力</li>
+    </ul>
+  </div>
+  <div class="detail-box">
+    <h4>⚙️ 可配置项</h4>
+    <ul>
+      <li>最大迭代次数（默认3轮）</li>
+      <li>三项阈值均可自定义</li>
+      <li>导师Agent额外知识注入</li>
+      <li>人性Agent额外爆款基因注入</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 阶段模型配置 ==================== -->
+<h2>阶段模型配置（Per-Stage Model）</h2>
+<p style="color:#9ca3af;font-size:.9rem;margin-bottom:16px">每个阶段可独立配置不同的LLM模型，通过 <code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:#60a5fa">getStageModel()</code> 在调用时自动选择。优先级：阶段模型 &gt; 固定模型 &gt; 全局默认</p>
+
+<div class="model-grid">
+  <div class="model-item"><span class="key">creative_plan</span><span class="val">创意方案</span></div>
+  <div class="model-item"><span class="key">character_design</span><span class="val">角色设计</span></div>
+  <div class="model-item"><span class="key">world_sim</span><span class="val">世界观模拟</span></div>
+  <div class="model-item"><span class="key">directory</span><span class="val">分集目录</span></div>
+  <div class="model-item"><span class="key">episode</span><span class="val">剧本撰写</span></div>
+  <div class="model-item"><span class="key">review</span><span class="val">质量评审</span></div>
+  <div class="model-item"><span class="key">rewrite</span><span class="val">评审改写</span></div>
+  <div class="model-item"><span class="key">loop_mentor</span><span class="val">闭环-导师Agent</span></div>
+  <div class="model-item"><span class="key">loop_humanity</span><span class="val">闭环-人性Agent</span></div>
+  <div class="model-item"><span class="key">loop_nexus</span><span class="val">闭环-中枢裁决</span></div>
+  <div class="model-item"><span class="key">loop_revise</span><span class="val">闭环-迭代修改</span></div>
+  <div class="model-item"><span class="key">emotion_map</span><span class="val">情绪锚点图</span></div>
+  <div class="model-item"><span class="key">novel_analysis</span><span class="val">小说解析</span></div>
+</div>
+
+<div class="detail-box" style="margin-top:12px">
+  <h4>💡 使用场景示例</h4>
+  <ul>
+    <li>核心逻辑思考（creative_plan, directory）→ <strong style="color:#60a5fa">Gemini</strong>（推理能力强）</li>
+    <li>不雅/大尺度剧情（episode）→ <strong style="color:#ef4444">Grok</strong>（限制少）</li>
+    <li>环境描写、画面感（episode, emotion_map）→ <strong style="color:#34d399">MiniMax</strong>（文笔好）</li>
+    <li>评审和裁决（review, loop_nexus）→ <strong style="color:#a78bfa">Claude</strong>（判断力强）</li>
+  </ul>
+</div>
+
+<!-- ==================== 数据留痕 ==================== -->
+<h2>数据留痕与统计</h2>
+<p style="color:#9ca3af;font-size:.9rem;margin-bottom:16px">所有LLM调用全程留痕，前端 <code style="background:#1a1a2e;padding:2px 6px;border-radius:4px;color:#34d399">LLMStatsView</code> 可查看统计和完整提示词</p>
+
+<div class="trace-flow">
+  <div class="trace-step">LLM调用</div>
+  <div class="trace-arrow-h">→</div>
+  <div class="trace-step">logLLMCall()</div>
+  <div class="trace-arrow-h">→</div>
+  <div class="trace-step">llm_logs 表</div>
+  <div class="trace-arrow-h">→</div>
+  <div class="trace-step">API 接口</div>
+  <div class="trace-arrow-h">→</div>
+  <div class="trace-step">📊 LLMStatsView</div>
+</div>
+
+<div class="stage-details" style="margin:16px 0">
+  <div class="detail-box">
+    <h4>💾 每条日志记录</h4>
+    <ul>
+      <li>project_id — 所属项目</li>
+      <li>step — 阶段标识（如 episode_3, loop_mentor_iter2）</li>
+      <li>provider / model — 使用的模型</li>
+      <li>duration_ms — 调用耗时</li>
+      <li>prompt_text — 完整提示词</li>
+      <li>response_text — 完整响应</li>
+      <li>success / error — 成功/失败状态</li>
+    </ul>
+  </div>
+  <div class="detail-box">
+    <h4>📊 统计面板功能</h4>
+    <ul>
+      <li>总览：调用次数、总耗时、字符统计</li>
+      <li>按模型统计：各模型调用占比和耗时</li>
+      <li>按阶段统计：各阶段调用详情</li>
+      <li>点击展开：查看该阶段所有日志条目</li>
+      <li>点击日志：查看完整prompt和response</li>
+    </ul>
+  </div>
+  <div class="detail-box">
+    <h4>🔗 API 接口</h4>
+    <ul>
+      <li><code style="color:#60a5fa">GET /api/screenplay/:id/llm-stats</code> — 聚合统计</li>
+      <li><code style="color:#60a5fa">GET /api/screenplay/:id/llm-logs</code> — 日志列表</li>
+      <li><code style="color:#60a5fa">GET /api/screenplay/llm-log/:logId</code> — 单条详情</li>
+    </ul>
+  </div>
+  <div class="detail-box">
+    <h4>🔄 闭环迭代记录</h4>
+    <ul>
+      <li>每轮迭代的导师评分 + 人性评分</li>
+      <li>中枢裁决的合并反馈和冲突说明</li>
+      <li>版本号追踪（V1.0 → V2.0 → ...）</li>
+      <li>前端 LoopView 可视化查看</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ==================== 技术栈 ==================== -->
+<h2>技术栈与文件映射</h2>
+
+<table class="agent-table">
+  <thead>
+    <tr><th>模块</th><th>文件</th><th>职责</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="color:#60a5fa">普通创作流程</td>
+      <td style="font-family:monospace;font-size:.78rem">screenplay-creator.ts</td>
+      <td>6大阶段的生成、评审、改写、导出</td>
+    </tr>
+    <tr>
+      <td style="color:#a78bfa">闭环迭代系统</td>
+      <td style="font-family:monospace;font-size:.78rem">creation-loop.ts</td>
+      <td>三Agent提示词、审阅、裁决、通用迭代器</td>
+    </tr>
+    <tr>
+      <td style="color:#fb923c">竞技模式</td>
+      <td style="font-family:monospace;font-size:.78rem">arena-engine.ts</td>
+      <td>百Agent竞争、评审打分、漏斗筛选</td>
+    </tr>
+    <tr>
+      <td style="color:#34d399">数据库服务</td>
+      <td style="font-family:monospace;font-size:.78rem">db-service.ts</td>
+      <td>sql.js持久化、LLM日志、项目CRUD</td>
+    </tr>
+    <tr>
+      <td style="color:#fbbf24">API路由</td>
+      <td style="font-family:monospace;font-size:.78rem">index.ts / arena-routes.ts</td>
+      <td>Express路由、WebSocket进度推送</td>
+    </tr>
+    <tr>
+      <td style="color:#f472b6">前端面板</td>
+      <td style="font-family:monospace;font-size:.78rem">ArenaPanel.tsx / LLMStatsView.tsx / LoopView.tsx</td>
+      <td>角斗场、统计面板、闭环记录查看</td>
+    </tr>
+  </tbody>
+</table>
+
+<div style="text-align:center;margin-top:48px;padding-top:24px;border-top:1px solid #1f1f2e;color:#4b5563;font-size:.8rem">
+  Seedance 2.0 · 剧本创作系统架构文档 · 自动生成
+</div>
+
+</div>
+</body>
+</html>
