@@ -179,8 +179,12 @@ function useTaskProgress(taskId: string | null, onDone: (signal?: string) => voi
           const errorText = msg.data?.error || msg.error;
           if (status === 'processing' && progressText) {
             setLogs(prev => [...prev, progressText]);
-            // 每完成一集实时刷新项目数据
-            if (progressText.includes('撰写完成') || progressText.includes('已完成')) {
+            // 每完成一集或竞技阶段完成时实时刷新项目数据
+            if (progressText.includes('撰写完成') || progressText.includes('已完成') ||
+                progressText.includes('方案已选出') || progressText.includes('角色开发完成') ||
+                progressText.includes('Top 5已选出') || progressText.includes('竞技完成') ||
+                progressText.includes('阶段2开始') || progressText.includes('阶段3开始') ||
+                progressText.includes('阶段4开始') || progressText.includes('竞技分集撰写完成')) {
               onDoneRef.current('refresh');
             }
           } else if (status === 'done') { done = true; setLogs(prev => [...prev, '✅ 完成']); onDoneRef.current(); ws.close(); }
@@ -637,13 +641,20 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
         if (d?.project) {
           const p = normalizeProject(d.project);
           setProject(p);
-          const statusStepMap: Record<string, Step> = {
-            config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-            directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
-          };
+          const statusStepMap: Record<string, Step> = p.config?.arenaMode
+            ? { config_done: 'plan', plan_done: 'characters', characters_done: 'directory',
+                directory_done: 'writing', writing: 'writing', review: 'review', exported: 'submission' }
+            : { config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
+                directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission' };
           setStep(statusStepMap[p.status] || 'config');
           if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
           setExistingProjects([]);
+          // 竞技模式：尝试恢复taskId以重连WebSocket
+          if (p.config?.arenaMode) {
+            fetch(`/api/screenplay/${resumeProjectId}/arena/status`).then(r => r.json()).then(s => {
+              if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+            }).catch(() => {});
+          }
         }
       }).catch(() => {});
     }
@@ -660,15 +671,22 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
         if (d?.project) {
           const p = normalizeProject(d.project);
           setProject(p);
-          const statusStepMap: Record<string, Step> = {
-            config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-            directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
-          };
+          const statusStepMap: Record<string, Step> = p.config?.arenaMode
+            ? { config_done: 'plan', plan_done: 'characters', characters_done: 'directory',
+                directory_done: 'writing', writing: 'writing', review: 'review', exported: 'submission' }
+            : { config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
+                directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission' };
           setStep(statusStepMap[p.status] || 'config');
           if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
           else setSubmissionData(null);
           setExistingProjects([]);
           setError('');
+          // 竞技模式：尝试恢复taskId以重连WebSocket
+          if (p.config?.arenaMode) {
+            fetch(`/api/screenplay/${resumeProjectId}/arena/status`).then(r => r.json()).then(s => {
+              if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+            }).catch(() => {});
+          }
         }
       }).catch(() => {});
     }
@@ -751,13 +769,20 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   const resumeProject = (p: ScreenplayProject) => {
     saveAndRestoreReviewState(p.id);
     setProject(normalizeProject(p));
-    const statusStepMap: Record<string, Step> = {
-      config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
-    };
+    const statusStepMap: Record<string, Step> = p.config?.arenaMode
+      ? { config_done: 'plan', plan_done: 'characters', characters_done: 'directory',
+          directory_done: 'writing', writing: 'writing', review: 'review', exported: 'submission' }
+      : { config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
+          directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission' };
     setStep(statusStepMap[p.status] || 'config');
     if (p.submissionMaterials) setSubmissionData(p.submissionMaterials);
     setExistingProjects([]);
+    // 竞技模式：尝试恢复taskId以重连WebSocket
+    if (p.config?.arenaMode) {
+      fetch(`/api/screenplay/${p.id}/arena/status`).then(r => r.json()).then(s => {
+        if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+      }).catch(() => {});
+    }
   };
 
   // 题材选择切换
@@ -1142,10 +1167,16 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
   // 步骤导航（根据项目状态自动跳转）
   useEffect(() => {
     if (!project) return;
-    const statusMap: Record<string, Step> = {
-      config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
-      directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
-    };
+    // 竞技模式：阶段完成后自动前进到下一步（不需要用户手动确认）
+    const statusMap: Record<string, Step> = project.config?.arenaMode
+      ? {
+          config_done: 'plan', plan_done: 'characters', characters_done: 'directory',
+          directory_done: 'writing', writing: 'writing', review: 'review', exported: 'submission',
+        }
+      : {
+          config_done: 'plan', plan_done: 'plan', characters_done: 'characters',
+          directory_done: 'directory', writing: 'writing', review: 'review', exported: 'submission',
+        };
     const targetStep = statusMap[project.status];
     if (targetStep && STEPS.indexOf(targetStep) > STEPS.indexOf(step)) setStep(targetStep);
   }, [project?.status]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1553,6 +1584,27 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                 </div>
               )}
               {!project?.creativePlan ? (
+                project?.config?.arenaMode ? (
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                      <span className="text-4xl">⚔️</span>
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">{isZh ? '竞技模式运行中' : 'Arena Running'}</h3>
+                    <p className="text-gray-500 mb-6 text-center max-w-md">{isZh ? '多Agent竞技创作正在后台自动执行，全部阶段将串联完成。你可以返回项目列表开始新项目。' : 'Arena mode is running all stages automatically in the background.'}</p>
+                    <div className="flex gap-3">
+                      <button onClick={() => {
+                        fetch('/api/screenplay/list').then(r => r.json()).then(d => {
+                          if (d?.projects) setExistingProjects(d.projects.filter((p: ScreenplayProject) => p.status !== 'exported'));
+                        }).catch(() => {});
+                        setProject(null); setStep('config'); setTaskId(null); setLoading(false);
+                        setError(''); setSubmissionData(null);
+                      }}
+                        className="px-6 py-3 rounded-xl bg-[#1a1a1a] border border-white/10 text-white font-medium hover:bg-[#222] transition-colors">
+                        📂 {isZh ? '返回项目列表' : 'Back to Projects'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="flex flex-col items-center justify-center py-20">
                   <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
                     <span className="text-4xl">📋</span>
@@ -1564,6 +1616,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                     {isZh ? '开始生成' : 'Generate Now'}
                   </button>
                 </div>
+                )
               ) : (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   {/* 左侧：核心信息 */}
@@ -1716,6 +1769,15 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                 </div>
               )}
               {!project?.characterDesign ? (
+                project?.config?.arenaMode ? (
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                      <span className="text-4xl">⚔️</span>
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">{isZh ? '竞技模式运行中' : 'Arena Running'}</h3>
+                    <p className="text-gray-500 mb-6 text-center max-w-md">{isZh ? '角色开发阶段正在竞技中，请查看上方日志了解进度。' : 'Character design arena is running.'}</p>
+                  </div>
+                ) : (
                 <div className="space-y-8">
                   <div className="flex flex-col items-center justify-center py-20">
                     <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
@@ -1731,6 +1793,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                   {/* 世界观模拟实况面板 */}
                   {hasSimLogs && <SimulationPanel logs={simPanelLogs} />}
                 </div>
+                )
               ) : (
                 <div className="space-y-8">
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -1821,6 +1884,15 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                 </div>
               )}
               {!project?.episodeDirectory ? (
+                project?.config?.arenaMode ? (
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
+                      <span className="text-4xl">⚔️</span>
+                    </div>
+                    <h3 className="text-xl font-bold text-white mb-2">{isZh ? '竞技模式运行中' : 'Arena Running'}</h3>
+                    <p className="text-gray-500 mb-6 text-center max-w-md">{isZh ? '分集目录阶段正在竞技中，请查看上方日志了解进度。' : 'Directory arena is running.'}</p>
+                  </div>
+                ) : (
                 <div className="flex flex-col items-center justify-center py-20">
                   <div className="w-20 h-20 bg-[#161616] rounded-3xl flex items-center justify-center mb-6 shadow-2xl shadow-black">
                     <span className="text-4xl">📑</span>
@@ -1832,6 +1904,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
                     {isZh ? '生成目录' : 'Generate Directory'}
                   </button>
                 </div>
+                )
               ) : (
                 <div className="space-y-6">
                   {/* 统计栏 */}

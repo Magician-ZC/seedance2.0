@@ -25,8 +25,65 @@ import {
   type LoopConfig,
   type LoopIteration,
 } from './creation-loop.js';
+import { injectForArenaMode } from './experience-injector.js';
+import { extractExperiences } from './experience-extractor.js';
 
 // ============ 类型定义 ============
+
+// ---- 通用 LLM JSON 容错工具 ----
+
+/**
+ * 解包 LLM 返回的 JSON 对象。
+ * LLM 经常返回包裹对象如 {"plan":{...}} 而非直接 {...}，
+ * 或者对数组返回单个对象（截断）。此函数统一处理。
+ *
+ * @param data - chatCompletionJSON 返回的 data
+ * @param expectArray - 是否期望数组类型
+ * @param arrayItemValidator - 可选，验证数组元素是否合法（如检查 number+title 字段）
+ */
+function unwrapLLMResult<T>(
+  data: T,
+  expectArray: boolean,
+  arrayItemValidator?: (item: unknown) => boolean,
+): T | null {
+  if (data == null) return null;
+
+  if (expectArray) {
+    // 期望数组
+    if (Array.isArray(data)) return data;
+    if (typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      // 尝试从包裹对象中提取数组值
+      const arr = Object.values(obj).find(v => Array.isArray(v)) as T | undefined;
+      if (arr && (arr as unknown[]).length > 0) return arr;
+      // 截断导致只剩单个对象，检查是否像数组元素
+      if (arrayItemValidator && arrayItemValidator(obj)) {
+        return [obj] as unknown as T;
+      }
+    }
+    return null;
+  }
+
+  // 期望对象
+  if (typeof data !== 'object' || Array.isArray(data)) return null;
+  const obj = data as Record<string, unknown>;
+  // 如果对象只有一个 key 且其值也是对象，可能是包裹格式如 {"plan":{...}}
+  const keys = Object.keys(obj);
+  if (keys.length === 1) {
+    const inner = obj[keys[0]];
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      return inner as T;
+    }
+  }
+  return data;
+}
+
+/** 分集目录条目验证器 */
+const isDirectoryItem = (item: unknown): boolean => {
+  if (!item || typeof item !== 'object') return false;
+  const o = item as Record<string, unknown>;
+  return 'number' in o && 'title' in o;
+};
 
 /** 风格基因：从系统Agent的systemPrompt中提取的5个创作维度 */
 export interface StyleGene {
@@ -760,9 +817,11 @@ ${JSON.stringify(candidate.data, null, 2)}
     );
     if (!result.success || !result.data) return null;
 
+    const reviewData = unwrapLLMResult(result.data, false) ?? result.data;
+
     // 将评分钳制到 [0, 10] 范围
-    const score = Math.max(0, Math.min(10, result.data.score));
-    return { score, comment: result.data.comment || '' };
+    const score = Math.max(0, Math.min(10, reviewData.score ?? 0));
+    return { score, comment: reviewData.comment || '' };
   } catch {
     return null;
   }
@@ -884,6 +943,7 @@ import {
   batchInsertArenaReviews,
   batchInsertArenaFunnelScores,
   listArenaWritersBySession,
+  listArenaReviewersBySession,
   listArenaCandidatesByStage,
   listArenaFunnelScoresByStage,
   updateArenaFunnelScoreSelected,
@@ -1028,6 +1088,16 @@ async function arenaLoopRefine<T>(
   if (!config.loopMode) return candidate.data;
 
   const loopConfig = extractLoopConfig(config);
+
+  // 注入历史经验到闭环配置中（竞技模式经验注入）
+  const experienceContext = injectForArenaMode(config);
+  if (experienceContext.mentorContext) {
+    loopConfig.mentorContext = [loopConfig.mentorContext, experienceContext.mentorContext].filter(Boolean).join('\n');
+  }
+  if (experienceContext.humanityContext) {
+    loopConfig.humanityContext = [loopConfig.humanityContext, experienceContext.humanityContext].filter(Boolean).join('\n');
+  }
+
   broadcastArenaProgress(taskId, `🔄 ${stageName}: Top 1 闭环迭代开始 (${candidate.systemAgentName}组)`);
 
   try {
@@ -1154,7 +1224,8 @@ async function generateSingleCreativePlan(
 
   try {
     const result = await chatCompletionJSON<CreativePlan>(systemPrompt, userPrompt, { timeoutMs: 600_000 });
-    return result.success && result.data ? result.data : null;
+    if (!result.success || !result.data) return null;
+    return unwrapLLMResult(result.data, false) ?? result.data;
   } catch {
     return null;
   }
@@ -1682,11 +1753,13 @@ export async function generateCharacterDesign(
     );
     if (!result.success || !result.data) return null;
 
+    const charData = unwrapLLMResult(result.data, false) ?? result.data;
+
     // 提取使用的群演角色ID
     const characterPoolIds: string[] = [];
-    if (characterPool.length > 0 && result.data.characters) {
+    if (characterPool.length > 0 && charData.characters) {
       const poolIdSet = new Set(characterPool.map(a => a.id));
-      for (const char of result.data.characters) {
+      for (const char of charData.characters) {
         const agentId = (char as unknown as Record<string, unknown>).characterAgentId as string | undefined;
         if (agentId && poolIdSet.has(agentId)) {
           characterPoolIds.push(agentId);
@@ -1694,7 +1767,7 @@ export async function generateCharacterDesign(
       }
     }
 
-    return { data: result.data, characterPoolIds };
+    return { data: charData, characterPoolIds };
   } catch {
     return null;
   }
@@ -2129,14 +2202,27 @@ async function generateSingleDirectory(
     );
     if (!result.success || !result.data) return null;
 
-    // LLM 可能返回包裹对象 { "directory": [...] } 而非直接数组
-    let directory: EpisodeDirectoryItem[] = result.data;
-    if (!Array.isArray(directory)) {
-      const obj = directory as unknown as Record<string, unknown>;
-      const arr = Object.values(obj).find(v => Array.isArray(v)) as EpisodeDirectoryItem[] | undefined;
-      if (!arr?.length) return null;
-      directory = arr;
+    // 统一解包：处理包裹对象、截断单对象等情况
+    let directory = unwrapLLMResult<EpisodeDirectoryItem[]>(
+      result.data, true, isDirectoryItem,
+    );
+    if (!directory) return null;
+
+    // 条目数严重不足时重试一次
+    if (directory.length < config.totalEpisodes * 0.5) {
+      const retry = await chatCompletionJSON<EpisodeDirectoryItem[]>(
+        systemPrompt, userPrompt, { timeoutMs: 600_000 },
+      );
+      if (retry.success && retry.data) {
+        const retryDir = unwrapLLMResult<EpisodeDirectoryItem[]>(
+          retry.data, true, isDirectoryItem,
+        );
+        if (retryDir && retryDir.length > directory.length) {
+          directory = retryDir;
+        }
+      }
     }
+
     return directory;
   } catch {
     return null;
@@ -2470,13 +2556,15 @@ async function generateSingleEpisode(
     const result = await chatCompletionJSON<EpisodeScript>(systemPrompt, userPrompt);
     if (!result.success || !result.data) return null;
 
+    const episode = unwrapLLMResult(result.data, false) ?? result.data;
+
     // 确保 number 字段正确
-    result.data.number = dirItem.number;
-    result.data.keywords = result.data.keywords || [];
-    result.data.phase = dirItem.phase;
-    result.data.hookType = dirItem.hookType;
-    result.data.mark = dirItem.mark;
-    return result.data;
+    episode.number = dirItem.number;
+    episode.keywords = episode.keywords || [];
+    episode.phase = dirItem.phase;
+    episode.hookType = dirItem.hookType;
+    episode.mark = dirItem.mark;
+    return episode;
   } catch {
     return null;
   }
@@ -2976,6 +3064,7 @@ export async function startArenaCreation(
   const allWriters = writerGroups.flatMap(g => [g.leader, ...g.members]);
 
   // 5. 串联4个阶段（异步执行，不阻塞）
+  // 每阶段完成后将 Top 1 结果写回项目主字段，使前端能实时展示
   try {
     // 阶段1：创意方案
     updateArenaSession(sessionId, { status: 'stage_plan', current_stage: 'creative_plan' });
@@ -2983,6 +3072,11 @@ export async function startArenaCreation(
     const planResult = await runCreativePlanArena(
       projectId, allWriters, reviewers, scheduler, taskId, sessionId,
     );
+    // 将 Top 1 创意方案写回项目
+    if (planResult.candidates.length > 0) {
+      const topPlan = planResult.candidates[0].data as CreativePlan;
+      updateScreenplay(projectId, { creativePlan: topPlan, status: 'plan_done' });
+    }
 
     // 阶段2：角色开发
     updateArenaSession(sessionId, { status: 'stage_char', current_stage: 'character' });
@@ -2990,6 +3084,11 @@ export async function startArenaCreation(
     const charResult = await runCharacterArena(
       projectId, planResult, allWriters, reviewers, scheduler, taskId, sessionId,
     );
+    // 将 Top 1 角色设计写回项目
+    if (charResult.candidates.length > 0) {
+      const topChars = charResult.candidates[0].data as CharacterDesign;
+      updateScreenplay(projectId, { characterDesign: topChars, status: 'characters_done' });
+    }
 
     // 阶段3：分集目录
     updateArenaSession(sessionId, { status: 'stage_dir', current_stage: 'directory' });
@@ -2997,16 +3096,31 @@ export async function startArenaCreation(
     const dirResult = await runDirectoryArena(
       projectId, charResult, allWriters, reviewers, scheduler, taskId, sessionId,
     );
+    // 将 Top 1 分集目录写回项目
+    if (dirResult.candidates.length > 0) {
+      const topDir = dirResult.candidates[0].data as EpisodeDirectoryItem[];
+      updateScreenplay(projectId, { episodeDirectory: topDir, status: 'directory_done' });
+    }
 
     // 阶段4：分集剧本
     updateArenaSession(sessionId, { status: 'stage_ep', current_stage: 'episode' });
     broadcastArenaProgress(taskId, '阶段4开始: 分集剧本全量生成+逐集评审');
-    await runEpisodeArena(
+    const epResult = await runEpisodeArena(
       projectId, dirResult, allWriters, reviewers, scheduler, taskId, sessionId,
     );
+    // 将 Top 1 剧本写回项目
+    if (epResult.candidates.length > 0) {
+      const topEpData = epResult.candidates[0].data as { episodes: EpisodeScript[]; episodeScores?: Record<number, number> };
+      const episodes = (topEpData.episodes || []).sort((a, b) => a.number - b.number);
+      updateScreenplay(projectId, { episodes, status: 'review' });
+    }
 
     // 全部完成
     updateArenaSession(sessionId, { status: 'completed', completed_at: Date.now() });
+    // 竞技模式完成后自动触发经验提取（异步，不阻塞主流程）
+    extractExperiences(projectId).catch(err =>
+      console.error(`[experience-extractor] 竞技项目经验提取失败 (${projectId}):`, err),
+    );
     broadcastArenaDone(taskId, '竞技创作完成');
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
@@ -3051,6 +3165,121 @@ export function selectCandidate(
 ): void {
   // 幂等：先取消同阶段所有选中，再选中目标
   updateArenaFunnelScoreSelected(candidateId, stage, true);
+}
+
+// ============ 恢复竞技分集阶段 ============
+
+/**
+ * 从已有竞技会话中恢复并单独执行分集剧本阶段
+ * 用于：竞技模式项目在前3阶段完成后，用户手动触发分集撰写
+ */
+export async function resumeArenaEpisodeStage(
+  projectId: string,
+  taskId: string,
+  onProgress?: (msg: string) => void,
+): Promise<void> {
+  const session = getArenaSessionByProjectId(projectId);
+  if (!session) throw new Error('未找到竞技会话');
+
+  const sessionId = session.id;
+  const config: ArenaConfig = JSON.parse(session.config);
+
+  // 检查 directory 阶段是否已完成
+  const dirCandidates = listArenaCandidatesByStage(sessionId, 'directory');
+  if (dirCandidates.length === 0) {
+    throw new Error('竞技分集目录阶段尚未完成，无法恢复分集撰写');
+  }
+
+  // 从数据库恢复 writers
+  const writerRows = listArenaWritersBySession(sessionId);
+  const writers: WriterAgent[] = writerRows.map(row => ({
+    id: row.id,
+    name: row.name,
+    groupId: row.group_id,
+    isLeader: row.is_leader === 1,
+    systemAgentId: row.system_agent_id,
+    styleGene: JSON.parse(row.style_gene) as StyleGene,
+    systemPrompt: row.system_prompt,
+  }));
+
+  // 从数据库恢复 reviewers
+  const reviewerRows = listArenaReviewersBySession(sessionId);
+  const reviewers: ReviewerAgent[] = reviewerRows.map(row => ({
+    id: row.id,
+    directionId: row.direction_id,
+    directionName: row.direction_name,
+    systemPrompt: row.system_prompt,
+    weight: row.weight,
+  }));
+
+  // 构建 topDirs（从 directory 阶段的候选中恢复）
+  const dirScores = listArenaFunnelScoresByStage(sessionId, 'directory');
+  const scoredIds = new Set(dirScores.map(s => s.candidate_id));
+  // 优先使用通过评审的候选，否则使用全部
+  const filteredDirs = scoredIds.size > 0
+    ? dirCandidates.filter(c => scoredIds.has(c.id))
+    : dirCandidates;
+
+  const topDirs: StageCandidates<unknown> = {
+    stage: 'directory',
+    candidates: filteredDirs.map(row => ({
+      id: row.id,
+      writerId: row.writer_id,
+      groupId: row.group_id,
+      systemAgentId: row.system_agent_id,
+      systemAgentName: row.system_agent_name,
+      parentCandidateId: row.parent_candidate_id || undefined,
+      data: JSON.parse(row.content),
+      score: dirScores.find(s => s.candidate_id === row.id)?.weighted_total ?? 0,
+    })),
+    totalGenerated: dirCandidates.length,
+    totalSurvived: filteredDirs.length,
+  };
+
+  // 按分数降序排列
+  topDirs.candidates.sort((a, b) => b.score - a.score);
+
+  // 创建调度器
+  const scheduler = new QueueScheduler(config.concurrency);
+  activeSchedulers.set(projectId, scheduler);
+  activeSessionIds.set(projectId, sessionId);
+
+  try {
+    updateArenaSession(sessionId, { status: 'stage_ep', current_stage: 'episode' });
+    broadcastArenaProgress(taskId, '恢复竞技阶段4: 分集剧本全量生成+逐集评审');
+    onProgress?.('竞技模式: 恢复分集剧本生成...');
+
+    const epResult = await runEpisodeArena(
+      projectId, topDirs, writers, reviewers, scheduler, taskId, sessionId,
+    );
+
+    // 将 Top 1 剧本写回项目
+    if (epResult.candidates.length > 0) {
+      const topEpData = epResult.candidates[0].data as { episodes: EpisodeScript[]; episodeScores?: Record<number, number> };
+      const episodes = (topEpData.episodes || []).sort((a, b) => a.number - b.number);
+      updateScreenplay(projectId, { episodes, status: 'review' });
+    }
+
+    updateArenaSession(sessionId, { status: 'completed', completed_at: Date.now() });
+    // 竞技完成后异步提取经验
+    extractExperiences(projectId).catch(err =>
+      console.error(`[experience-extractor] 竞技恢复经验提取失败 (${projectId}):`, err),
+    );
+    broadcastArenaDone(taskId, '竞技分集撰写完成');
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errMsg === 'Scheduler stopped') {
+      updateArenaSession(sessionId, { status: 'stopped' });
+      broadcastArenaProgress(taskId, '竞技已停止');
+    } else {
+      updateArenaSession(sessionId, { status: 'stopped' });
+      broadcastArenaError(taskId, `竞技分集出错: ${errMsg}`);
+    }
+    throw err;
+  } finally {
+    activeSchedulers.delete(projectId);
+    activeSessionIds.delete(projectId);
+  }
 }
 
 // ============ 查询函数 ============

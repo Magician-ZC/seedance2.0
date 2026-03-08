@@ -17,6 +17,7 @@ import AgentStorePanel from './components/AgentStorePanel';
 import CharacterAgentPanel from './components/CharacterAgentPanel';
 import ArenaPanel from './components/ArenaPanel';
 import SystemAgentPanel from './components/SystemAgentPanel';
+import ExperiencePanel from './components/ExperiencePanel';
 import BackgroundIndicator, { type BackgroundStatus } from './components/BackgroundIndicator';
 import './i18n';
 
@@ -164,6 +165,9 @@ export default function App() {
             )}
             {activeTab === 'arena' && (
               <ArenaPanel />
+            )}
+            {activeTab === 'experiences' && (
+              <ExperiencePanel />
             )}
           </div>
 

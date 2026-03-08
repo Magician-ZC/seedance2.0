@@ -6,6 +6,8 @@ import { logLLMCall, getAgentById, upsertScreenplayProject, getScreenplayProject
 import { splitNovelIntoChapters, splitTextIntoChunks } from './novel-to-drama.js';
 import type { ArenaConfig } from './arena-engine.js';
 import { loopCreativePlan, loopCharacterDesign, loopDirectory, loopEpisode, generateEmotionMap, type LoopIteration, type EmotionAnchor } from './creation-loop.js';
+import { injectForLoopMode } from './experience-injector.js';
+import { extractExperiences } from './experience-extractor.js';
 
 // ============================================================
 // 类型定义
@@ -644,7 +646,9 @@ ${config.novelAnalysis.keyRelationships.join('\n')}
   // 闭环创作模式：导师Agent + 人性Agent 交叉审阅 + 中枢迭代
   if (config.loopMode) {
     onProgress?.('🔄 启动闭环创作模式：三位一体+中枢迭代...');
-    const loopResult = await loopCreativePlan(projectId, finalPlan, config.loopConfig, onProgress);
+    // 注入历史经验到闭环配置
+    const enhancedLoopConfig = injectForLoopMode(config, config.loopConfig || {});
+    const loopResult = await loopCreativePlan(projectId, finalPlan, enhancedLoopConfig, onProgress);
     finalPlan = loopResult.finalOutput;
     // 保存闭环迭代记录
     const existingIterations = getScreenplay(projectId)?.loopIterations || {};
@@ -755,7 +759,9 @@ export async function generateCharacters(
   // 闭环创作模式
   if (config.loopMode) {
     onProgress?.('🔄 角色体系闭环审阅...');
-    const loopResult = await loopCharacterDesign(projectId, finalDesign, config.loopConfig, onProgress);
+    // 注入历史经验到闭环配置
+    const enhancedLoopConfig = injectForLoopMode(config, config.loopConfig || {});
+    const loopResult = await loopCharacterDesign(projectId, finalDesign, enhancedLoopConfig, onProgress);
     finalDesign = loopResult.finalOutput;
     const existingIterations = getScreenplay(projectId)?.loopIterations || {};
     existingIterations['character_design'] = loopResult.iterations;
@@ -1318,21 +1324,48 @@ ${creativePlan.timelineArcs.causalChains.map(c => `- ${c.name}：${c.nodes.map(n
   const result = await llmJSON<EpisodeDirectoryItem[]>(projectId, 'episode_directory', systemPrompt, userPrompt, 'generate', 'directory');
   if (!result.success || !result.data) return { success: false, error: result.error || '分集目录生成失败' };
 
-  // LLM 可能返回包裹对象 { "directory": [...] } 而非直接数组
+  // LLM 可能返回包裹对象 { "directory": [...] } 而非直接数组，或截断后只剩单个对象
   let directory: EpisodeDirectoryItem[] = result.data;
   if (!Array.isArray(directory)) {
     console.log(`[screenplay] directory 非数组, type=${typeof directory}, keys=${Object.keys(directory as object)}`);
     const obj = directory as unknown as Record<string, unknown>;
     const arr = Object.values(obj).find(v => Array.isArray(v)) as EpisodeDirectoryItem[] | undefined;
-    if (!arr?.length) return { success: false, error: '分集目录格式异常：LLM未返回数组' };
-    directory = arr;
+    if (arr?.length) {
+      directory = arr;
+    } else if (typeof obj === 'object' && 'number' in obj && 'title' in obj) {
+      // LLM 截断导致只返回了单个目录条目对象，包装成数组
+      console.log(`[screenplay] directory 为单个条目对象，包装为数组并重试生成完整目录`);
+      directory = [obj as unknown as EpisodeDirectoryItem];
+    } else {
+      return { success: false, error: '分集目录格式异常：LLM未返回数组' };
+    }
+  }
+
+  // 如果目录条目数远少于总集数（LLM 输出截断），自动重试
+  if (directory.length < config.totalEpisodes * 0.5) {
+    console.log(`[screenplay] directory 条目不足 (${directory.length}/${config.totalEpisodes})，重试生成`);
+    onProgress?.(`目录条目不足 (${directory.length}/${config.totalEpisodes})，正在重试...`);
+    const retryResult = await llmJSON<EpisodeDirectoryItem[]>(projectId, 'episode_directory_retry', systemPrompt, userPrompt, 'generate', 'directory');
+    if (retryResult.success && retryResult.data) {
+      let retryDir = retryResult.data;
+      if (!Array.isArray(retryDir)) {
+        const retryObj = retryDir as unknown as Record<string, unknown>;
+        const retryArr = Object.values(retryObj).find(v => Array.isArray(v)) as EpisodeDirectoryItem[] | undefined;
+        if (retryArr?.length) retryDir = retryArr;
+      }
+      if (Array.isArray(retryDir) && retryDir.length > directory.length) {
+        directory = retryDir;
+      }
+    }
   }
   console.log(`[screenplay] directory生成成功, len=${directory.length}, isArray=${Array.isArray(directory)}`);
 
   // 闭环创作模式
   if (config.loopMode) {
     onProgress?.('🔄 分集目录闭环审阅...');
-    const loopResult = await loopDirectory(projectId, directory, config.loopConfig, onProgress);
+    // 注入历史经验到闭环配置
+    const enhancedLoopConfig = injectForLoopMode(config, config.loopConfig || {});
+    const loopResult = await loopDirectory(projectId, directory, enhancedLoopConfig, onProgress);
     directory = loopResult.finalOutput;
     const existingIterations = getScreenplay(projectId)?.loopIterations || {};
     existingIterations['directory'] = loopResult.iterations;
@@ -1514,7 +1547,9 @@ ${simContext}
   // 闭环创作模式：对每集执行导师+人性Agent交叉审阅
   if (config.loopMode) {
     onProgress?.(`🔄 第${episodeNumber}集闭环审阅...`);
-    const loopResult = await loopEpisode(projectId, finalEpisode, config.loopConfig, onProgress);
+    // 注入历史经验到闭环配置
+    const enhancedLoopConfig = injectForLoopMode(config, config.loopConfig || {});
+    const loopResult = await loopEpisode(projectId, finalEpisode, enhancedLoopConfig, onProgress);
     finalEpisode = loopResult.finalOutput;
     const existingIterations = getScreenplay(projectId)?.loopIterations || {};
     const key = `episode_${episodeNumber}`;
@@ -1549,6 +1584,16 @@ export async function generateEpisodeBatch(
       completed.push(ep);
     } else {
       errors.push({ episode: ep, error: result.error || '未知错误' });
+    }
+  }
+
+  // 闭环模式下，所有分集成功完成时自动触发经验提取（异步，不阻塞主流程）
+  if (errors.length === 0) {
+    const project = getScreenplay(projectId);
+    if (project?.config?.loopMode) {
+      extractExperiences(projectId).catch(err =>
+        console.error(`[experience-extractor] 闭环项目经验提取失败 (${projectId}):`, err),
+      );
     }
   }
 

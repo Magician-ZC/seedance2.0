@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-export type NavTab = 'works' | 'materials' | 'characters' | 'arena' | 'authorAgents' | 'characterAgents' | 'systemAgents';
+export type NavTab = 'works' | 'materials' | 'characters' | 'arena' | 'authorAgents' | 'characterAgents' | 'systemAgents' | 'experiences';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -81,12 +81,27 @@ function SwordsIcon({ className }: { className?: string }) {
   );
 }
 
+function BrainIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z" />
+      <path d="M10 21h4" />
+      <path d="M9 9h.01" />
+      <path d="M15 9h.01" />
+      <path d="M9.5 13a3.5 3.5 0 0 0 5 0" />
+    </svg>
+  );
+}
+
+// 顶级导航项
+
 // 顶级导航项
 const TOP_NAV: { key: NavTab; icon: typeof GridIcon; labelZh: string; labelEn: string }[] = [
   { key: 'works', icon: GridIcon, labelZh: '我的作品', labelEn: 'My Works' },
   { key: 'materials', icon: FolderIcon, labelZh: '素材', labelEn: 'Materials' },
   { key: 'characters', icon: UsersIcon, labelZh: '角色', labelEn: 'Characters' },
   { key: 'arena', icon: SwordsIcon, labelZh: '角斗场', labelEn: 'Arena' },
+  { key: 'experiences', icon: BrainIcon, labelZh: '经验记忆', labelEn: 'Memory' },
 ];
 
 // Agent仓库子菜单

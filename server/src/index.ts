@@ -43,8 +43,10 @@ import {
   buildFactoryCharacterPrompt, retryProtagonistExtraction, type FactoryProtagonist,
 } from './agent-factory.js';
 import arenaRoutes from './arena-routes.js';
+import experienceRoutes from './experience-routes.js';
 import {
   startArenaCreation, selectCandidate, getArenaStatus, getArenaCandidates,
+  resumeArenaEpisodeStage,
   type FunnelStage,
 } from './arena-engine.js';
 
@@ -61,6 +63,9 @@ app.use('/api/images', express.static(path.join(__dirname, '../../data/images'))
 
 // 角斗场 API 路由
 app.use('/api/arena', arenaRoutes);
+
+// 经验管理 API 路由
+app.use('/api/experiences', experienceRoutes);
 
 // 启动时加载敏感词库
 loadWords();
@@ -1245,6 +1250,8 @@ app.post('/api/screenplay/create', (req, res) => {
     useTimeline: useTimeline || false,
     fixedModel: fixedModel || undefined,
     nsfw: nsfw || false,
+    arenaMode: arenaMode || false,
+    arenaConfig: arenaConfig || undefined,
     loopMode: loopMode || false,
     loopConfig: loopConfig || undefined,
     stageModelMap: stageModelMap || undefined,
@@ -1411,6 +1418,25 @@ app.post('/api/screenplay/:id/episode-batch', async (req, res) => {
   const { startEp, endEp } = req.body;
   if (typeof startEp !== 'number' || typeof endEp !== 'number') return res.status(400).json({ error: '缺少 startEp/endEp' });
   const taskId = `sp_batch_${req.params.id}`;
+
+  // 竞技模式：走竞技引擎的分集阶段
+  const project = getScreenplay(req.params.id);
+  if (project?.config?.arenaMode) {
+    res.json({ async: true, taskId });
+    resumeArenaEpisodeStage(req.params.id, taskId, (msg) => {
+      const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };
+      wsManager.broadcast(taskId, task);
+    }).then(() => {
+      const task: TaskInfo = { id: taskId, status: 'done', progress: '竞技分集撰写完成', startTime: Date.now(), result: null, error: null };
+      wsManager.broadcast(taskId, task);
+    }).catch((err) => {
+      const task: TaskInfo = { id: taskId, status: 'error', progress: '竞技分集撰写失败', startTime: Date.now(), result: null, error: err?.message || String(err) };
+      wsManager.broadcast(taskId, task);
+    });
+    return;
+  }
+
+  // 普通模式：原有逻辑
   res.json({ async: true, taskId });
   generateEpisodeBatch(req.params.id, startEp, endEp, (msg) => {
     const task: TaskInfo = { id: taskId, status: 'processing', progress: msg, startTime: Date.now(), result: null, error: null };

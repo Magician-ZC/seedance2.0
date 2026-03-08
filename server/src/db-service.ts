@@ -4,6 +4,7 @@ import initSqlJs, { type Database } from 'sql.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { initExperienceTable } from './experience-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, '../../data');
@@ -273,6 +274,9 @@ export async function initDB(): Promise<void> {
     selected INTEGER DEFAULT 0,
     created_at INTEGER
   )`);
+
+  // 经验累积系统表
+  initExperienceTable();
 
   saveDB();
 }
@@ -973,7 +977,7 @@ export interface ArenaFunnelScoreRow {
 export function createArenaSession(row: ArenaSessionRow): void {
   const d = getDB();
   d.run(
-    `INSERT INTO arena_sessions (id, project_id, config, status, current_stage, task_id, created_at, completed_at)
+    `INSERT OR REPLACE INTO arena_sessions (id, project_id, config, status, current_stage, task_id, created_at, completed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [row.id, row.project_id, row.config, row.status, row.current_stage,
      row.task_id, row.created_at, row.completed_at],
@@ -1028,7 +1032,7 @@ export function updateArenaSession(id: string, fields: Partial<Omit<ArenaSession
 export function batchInsertArenaWriters(rows: ArenaWriterRow[]): void {
   const d = getDB();
   const stmt = d.prepare(
-    `INSERT INTO arena_writers (id, session_id, group_id, name, is_leader, system_agent_id, system_agent_name, base_style_id, style_gene, system_prompt, created_at)
+    `INSERT OR REPLACE INTO arena_writers (id, session_id, group_id, name, is_leader, system_agent_id, system_agent_name, base_style_id, style_gene, system_prompt, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const r of rows) {
@@ -1055,7 +1059,7 @@ export function listArenaWritersBySession(sessionId: string): ArenaWriterRow[] {
 export function batchInsertArenaReviewers(rows: ArenaReviewerRow[]): void {
   const d = getDB();
   const stmt = d.prepare(
-    `INSERT INTO arena_reviewers (id, session_id, direction_id, direction_name, system_prompt, weight, created_at)
+    `INSERT OR REPLACE INTO arena_reviewers (id, session_id, direction_id, direction_name, system_prompt, weight, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const r of rows) {
@@ -1085,7 +1089,7 @@ export function listArenaReviewersBySession(sessionId: string): ArenaReviewerRow
 export function insertArenaCandidate(row: ArenaCandidateRow): void {
   const d = getDB();
   d.run(
-    `INSERT INTO arena_candidates (id, session_id, stage, writer_id, group_id, system_agent_id, system_agent_name, parent_candidate_id, content, character_pool_ids, created_at)
+    `INSERT OR REPLACE INTO arena_candidates (id, session_id, stage, writer_id, group_id, system_agent_id, system_agent_name, parent_candidate_id, content, character_pool_ids, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [row.id, row.session_id, row.stage, row.writer_id, row.group_id,
      row.system_agent_id, row.system_agent_name, row.parent_candidate_id,
@@ -1097,7 +1101,7 @@ export function insertArenaCandidate(row: ArenaCandidateRow): void {
 export function batchInsertArenaCandidates(rows: ArenaCandidateRow[]): void {
   const d = getDB();
   const stmt = d.prepare(
-    `INSERT INTO arena_candidates (id, session_id, stage, writer_id, group_id, system_agent_id, system_agent_name, parent_candidate_id, content, character_pool_ids, created_at)
+    `INSERT OR REPLACE INTO arena_candidates (id, session_id, stage, writer_id, group_id, system_agent_id, system_agent_name, parent_candidate_id, content, character_pool_ids, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const r of rows) {
@@ -1124,7 +1128,7 @@ export function listArenaCandidatesByStage(sessionId: string, stage: string): Ar
 export function insertArenaReview(row: ArenaReviewRow): void {
   const d = getDB();
   d.run(
-    `INSERT INTO arena_reviews (id, session_id, candidate_id, reviewer_id, direction_id, stage, score, comments, created_at)
+    `INSERT OR REPLACE INTO arena_reviews (id, session_id, candidate_id, reviewer_id, direction_id, stage, score, comments, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [row.id, row.session_id, row.candidate_id, row.reviewer_id,
      row.direction_id, row.stage, row.score, row.comments, row.created_at],
@@ -1135,7 +1139,7 @@ export function insertArenaReview(row: ArenaReviewRow): void {
 export function batchInsertArenaReviews(rows: ArenaReviewRow[]): void {
   const d = getDB();
   const stmt = d.prepare(
-    `INSERT INTO arena_reviews (id, session_id, candidate_id, reviewer_id, direction_id, stage, score, comments, created_at)
+    `INSERT OR REPLACE INTO arena_reviews (id, session_id, candidate_id, reviewer_id, direction_id, stage, score, comments, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const r of rows) {
@@ -1165,7 +1169,7 @@ export function listArenaReviewsByCandidate(candidateId: string): ArenaReviewRow
 export function insertArenaFunnelScore(row: ArenaFunnelScoreRow): void {
   const d = getDB();
   d.run(
-    `INSERT INTO arena_funnel_scores (id, session_id, candidate_id, stage, direction_scores, weighted_total, rank, selected, created_at)
+    `INSERT OR REPLACE INTO arena_funnel_scores (id, session_id, candidate_id, stage, direction_scores, weighted_total, rank, selected, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [row.id, row.session_id, row.candidate_id, row.stage,
      row.direction_scores, row.weighted_total, row.rank, row.selected, row.created_at],
@@ -1176,7 +1180,7 @@ export function insertArenaFunnelScore(row: ArenaFunnelScoreRow): void {
 export function batchInsertArenaFunnelScores(rows: ArenaFunnelScoreRow[]): void {
   const d = getDB();
   const stmt = d.prepare(
-    `INSERT INTO arena_funnel_scores (id, session_id, candidate_id, stage, direction_scores, weighted_total, rank, selected, created_at)
+    `INSERT OR REPLACE INTO arena_funnel_scores (id, session_id, candidate_id, stage, direction_scores, weighted_total, rank, selected, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   for (const r of rows) {
