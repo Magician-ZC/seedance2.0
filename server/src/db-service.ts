@@ -275,6 +275,14 @@ export async function initDB(): Promise<void> {
     created_at INTEGER
   )`);
 
+  // 竞技日志表（持久化WebSocket推送的进度日志）
+  db.run(`CREATE TABLE IF NOT EXISTS arena_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at INTEGER
+  )`);
+
   // 经验累积系统表
   initExperienceTable();
 
@@ -1301,4 +1309,50 @@ export function getCompletedStageCandidates(sessionId: string, stage: string): A
  */
 export function getCompletedStageScores(sessionId: string, stage: string): ArenaFunnelScoreRow[] {
   return listArenaFunnelScoresByStage(sessionId, stage);
+}
+
+
+// ============================================================
+// 竞技日志 CRUD
+// ============================================================
+
+export interface ArenaLogRow {
+  id?: number;
+  session_id: string;
+  message: string;
+  created_at: number;
+}
+
+/** 插入一条竞技日志 */
+export function insertArenaLog(sessionId: string, message: string): void {
+  const d = getDB();
+  d.run(
+    'INSERT INTO arena_logs (session_id, message, created_at) VALUES (?, ?, ?)',
+    [sessionId, message, Date.now()],
+  );
+  // 日志不立即saveDB，由调用方批量保存
+}
+
+/** 批量插入竞技日志 */
+export function batchInsertArenaLogs(rows: ArenaLogRow[]): void {
+  const d = getDB();
+  const stmt = d.prepare('INSERT INTO arena_logs (session_id, message, created_at) VALUES (?, ?, ?)');
+  for (const r of rows) {
+    stmt.run([r.session_id, r.message, r.created_at]);
+  }
+  stmt.free();
+  saveDB();
+}
+
+/** 查询某session的竞技日志（按时间正序） */
+export function listArenaLogs(sessionId: string): ArenaLogRow[] {
+  const d = getDB();
+  const results: ArenaLogRow[] = [];
+  const stmt = d.prepare('SELECT id, session_id, message, created_at FROM arena_logs WHERE session_id = ? ORDER BY created_at ASC, id ASC');
+  stmt.bind([sessionId]);
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as unknown as ArenaLogRow);
+  }
+  stmt.free();
+  return results;
 }

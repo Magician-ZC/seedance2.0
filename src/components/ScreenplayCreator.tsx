@@ -198,7 +198,7 @@ function useTaskProgress(taskId: string | null, onDone: (signal?: string) => voi
     return () => { done = true; ws.close(); };
   }, [taskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { logs, error };
+  return { logs, error, setLogs };
 }
 
 function ProgressLog({ logs }: { logs: string[] }) {
@@ -653,6 +653,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           if (p.config?.arenaMode) {
             fetch(`/api/screenplay/${resumeProjectId}/arena/status`).then(r => r.json()).then(s => {
               if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+              else loadPersistedArenaLogs(resumeProjectId!);
             }).catch(() => {});
           }
         }
@@ -685,6 +686,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
           if (p.config?.arenaMode) {
             fetch(`/api/screenplay/${resumeProjectId}/arena/status`).then(r => r.json()).then(s => {
               if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+              else loadPersistedArenaLogs(resumeProjectId!);
             }).catch(() => {});
           }
         }
@@ -721,7 +723,17 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     refreshProject();
   }, [refreshProject]);
 
-  const { logs, error: wsError } = useTaskProgress(taskId, handleTaskDone);
+  const { logs, error: wsError, setLogs: setArenaLogs } = useTaskProgress(taskId, handleTaskDone);
+
+  // 加载已完成竞技会话的持久化日志
+  const loadPersistedArenaLogs = useCallback((projectId: string) => {
+    fetch(`/api/screenplay/${projectId}/arena/logs`)
+      .then(r => r.json())
+      .then(d => {
+        if (d?.logs?.length) setArenaLogs(d.logs.map((l: { message: string }) => l.message));
+      })
+      .catch(() => {});
+  }, [setArenaLogs]);
 
   // 通知父组件当前状态（用于后台运行浮动指示器）
   useEffect(() => {
@@ -781,6 +793,7 @@ export default function ScreenplayCreator({ onClose, onMinimize, onProjectCreate
     if (p.config?.arenaMode) {
       fetch(`/api/screenplay/${p.id}/arena/status`).then(r => r.json()).then(s => {
         if (s?.taskId && s.status !== 'completed' && s.status !== 'stopped') setTaskId(s.taskId);
+        else loadPersistedArenaLogs(p.id);
       }).catch(() => {});
     }
   };

@@ -26,7 +26,7 @@ import {
   type CharacterInfo, type LocationInfo,
 } from './novel-to-drama.js';
 import { generateImage, generateCharacterMainImages, generateCharacterDetailImages, generateCharacterSheetImage, downloadImageToLocal, deleteLocalImage, isLocalImageUrl, localUrlToFilename, httpsDownload, type ProfileImageType } from './image-generator.js';
-import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, getProjectLLMStats, getLLMLogDetail, getProjectLogsList, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
+import { initDB, saveLLMConfig as saveLLMConfigToDB, loadLLMConfigFromDB, saveVisionLLMConfig as saveVisionConfigToDB, loadVisionLLMConfigFromDB, saveExtraLLMConfigs as saveExtraConfigsToDB, loadExtraLLMConfigsFromDB, insertAgent as insertAgentStore, listAgents as listAgentStore, getAgentById as getAgentStoreById, deleteAgent as deleteAgentStore, listCharacterAgents, getCharacterAgentById, deleteCharacterAgent, updateCharacterAgent, insertCharacterAgent, getProjectLLMStats, getLLMLogDetail, getProjectLogsList, getArenaSessionByProjectId, listArenaLogs, type AgentStoreRow, type CharacterAgentRow } from './db-service.js';
 import { getLLMConfig, updateLLMConfig, getVisionLLMConfig, updateVisionLLMConfig, hasVisionConfig, getExtraConfigs, setExtraConfigs, isNSFWEnabled, setNSFWEnabled, loadNSFWFromDB, type LLMConfig } from './llm-service.js';
 import { autoSelectBestImage } from './vision-validator.js';
 import {
@@ -1301,6 +1301,14 @@ app.get('/api/screenplay/:id/arena/candidates/:stage', (req, res) => {
   }
   const candidates = getArenaCandidates(req.params.id, stage);
   res.json({ candidates });
+});
+
+// GET /api/screenplay/:id/arena/logs - 竞技日志查询（持久化日志）
+app.get('/api/screenplay/:id/arena/logs', (req, res) => {
+  const session = getArenaSessionByProjectId(req.params.id);
+  if (!session) return res.status(404).json({ error: '未找到竞技会话' });
+  const logs = listArenaLogs(session.id);
+  res.json({ logs: logs.map(l => ({ message: l.message, timestamp: l.created_at })) });
 });
 
 // GET /api/screenplay/list - 列出所有剧本项目

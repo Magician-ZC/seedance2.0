@@ -6,7 +6,7 @@
  */
 
 import { SYSTEM_AGENTS, type SystemAgent } from './system-agents-data.js';
-import { chatCompletionJSON } from './llm-service.js';
+import { chatCompletionJSON, selectConfig, enhancePromptForNSFW, type LLMConfig } from './llm-service.js';
 import {
   getScreenplay,
   updateScreenplay,
@@ -811,9 +811,8 @@ ${JSON.stringify(candidate.data, null, 2)}
 输出JSON格式：{"score": 数字, "comment": "点评内容"}`;
 
   try {
-    const result = await chatCompletionJSON<{ score: number; comment: string }>(
-      reviewer.systemPrompt,
-      userPrompt,
+    const result = await arenaLLMJSON<{ score: number; comment: string }>(
+      projectId, reviewer.systemPrompt, userPrompt, { timeoutMs: 120_000 },
     );
     if (!result.success || !result.data) return null;
 
@@ -948,6 +947,9 @@ import {
   listArenaFunnelScoresByStage,
   updateArenaFunnelScoreSelected,
   listCharacterAgents,
+  insertArenaLog,
+  listArenaLogs,
+  logLLMCall,
   type CharacterAgentRow,
   type ArenaSessionRow,
   type ArenaWriterRow,
@@ -1019,10 +1021,13 @@ const activeSchedulers = new Map<string, QueueScheduler>();
 /** 活跃的竞技会话ID映射 (projectId -> sessionId) */
 const activeSessionIds = new Map<string, string>();
 
+/** taskId -> sessionId 映射（用于日志持久化） */
+const taskSessionMap = new Map<string, string>();
+
 // ============ WebSocket 进度推送 ============
 
 /**
- * 广播竞技进度（复用wsManager）
+ * 广播竞技进度（复用wsManager）+ 持久化日志到数据库
  * 构造一个兼容 TaskInfo 的对象进行推送
  */
 export function broadcastArenaProgress(taskId: string, progress: string): void {
@@ -1034,6 +1039,11 @@ export function broadcastArenaProgress(taskId: string, progress: string): void {
     result: null,
     error: null,
   });
+  // 持久化日志
+  const sessionId = taskSessionMap.get(taskId);
+  if (sessionId) {
+    try { insertArenaLog(sessionId, progress); } catch { /* ignore */ }
+  }
 }
 
 /** 广播竞技完成 */
@@ -1046,6 +1056,10 @@ function broadcastArenaDone(taskId: string, result: string): void {
     result: { created: Date.now(), data: [{ url: '', revised_prompt: result }] },
     error: null,
   });
+  const sessionId = taskSessionMap.get(taskId);
+  if (sessionId) {
+    try { insertArenaLog(sessionId, `✅ ${result}`); } catch { /* ignore */ }
+  }
 }
 
 /** 广播竞技错误 */
@@ -1058,6 +1072,68 @@ function broadcastArenaError(taskId: string, error: string): void {
     result: null,
     error,
   });
+  const sessionId = taskSessionMap.get(taskId);
+  if (sessionId) {
+    try { insertArenaLog(sessionId, `❌ ${error}`); } catch { /* ignore */ }
+  }
+}
+
+// ============ 竞技模式 LLM 调用封装 ============
+
+/**
+ * 竞技模式专用 LLM JSON 调用 — 自动读取项目 fixedModel / nsfw 配置
+ * 对标 screenplay-creator.ts 中的 llmJSON，但不依赖 stageModelMap
+ */
+async function arenaLLMJSON<T>(
+  projectId: string,
+  system: string,
+  user: string,
+  opts?: { timeoutMs?: number },
+): Promise<{ success: boolean; data?: T; error?: string; raw?: string }> {
+  const project = getScreenplay(projectId);
+  const fixedModel = project?.config?.fixedModel;
+  const nsfw = project?.config?.nsfw || false;
+  const config = selectConfig('generate', fixedModel, nsfw);
+  const finalSystem = enhancePromptForNSFW(system, nsfw);
+  const startTime = Date.now();
+  const result = await chatCompletionJSON<T>(finalSystem, user, {
+    config,
+    timeoutMs: opts?.timeoutMs ?? 600_000,
+  });
+  logLLMCall({
+    projectId,
+    step: 'arena',
+    provider: config.provider,
+    model: config.model,
+    durationMs: Date.now() - startTime,
+    success: result.success,
+    error: result.error,
+    promptText: finalSystem.slice(0, 500) + '\n---USER---\n' + user.slice(0, 500),
+    responseText: result.raw?.slice(0, 1000) || (result.error ? `[ERROR] ${result.error}` : ''),
+  });
+  return result;
+}
+
+/**
+ * 通用重试包装器 — 指数退避，失败时广播日志
+ */
+async function withRetry<T>(
+  fn: () => Promise<T | null>,
+  opts: { maxRetries?: number; taskId?: string; label?: string } = {},
+): Promise<T | null> {
+  const maxRetries = opts.maxRetries ?? 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const result = await fn();
+    if (result !== null) return result;
+    if (attempt < maxRetries) {
+      const delay = 2000 * Math.pow(2, attempt); // 2s, 4s
+      if (opts.taskId) {
+        broadcastArenaProgress(opts.taskId, `⚠️ ${opts.label || '任务'}失败, ${delay / 1000}s后重试 (${attempt + 1}/${maxRetries})`);
+      }
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  return null;
 }
 
 // ============ 闭环迭代辅助（竞技模式复用 creation-loop） ============
@@ -1218,17 +1294,20 @@ async function generateSingleCreativePlan(
   projectId: string,
   writer: WriterAgent,
   config: ScreenplayConfig,
+  taskId?: string,
 ): Promise<CreativePlan | null> {
   const systemPrompt = buildCreativePlanSystemPrompt(writer.systemPrompt, config);
   const userPrompt = buildCreativePlanUserPrompt(config);
 
-  try {
-    const result = await chatCompletionJSON<CreativePlan>(systemPrompt, userPrompt, { timeoutMs: 600_000 });
-    if (!result.success || !result.data) return null;
-    return unwrapLLMResult(result.data, false) ?? result.data;
-  } catch {
-    return null;
-  }
+  return withRetry(async () => {
+    try {
+      const result = await arenaLLMJSON<CreativePlan>(projectId, systemPrompt, userPrompt);
+      if (!result.success || !result.data) return null;
+      return unwrapLLMResult(result.data, false) ?? result.data;
+    } catch {
+      return null;
+    }
+  }, { maxRetries: 2, taskId, label: `创意方案(${writer.groupId})` });
 }
 
 /**
@@ -1318,8 +1397,8 @@ async function executePeerReview(
 ${JSON.stringify(target.data, null, 2)}`;
 
   try {
-    const result = await chatCompletionJSON<{ score: number; suggestion: string }>(
-      systemPrompt, userPrompt, { timeoutMs: 120_000 },
+    const result = await arenaLLMJSON<{ score: number; suggestion: string }>(
+      projectId, systemPrompt, userPrompt, { timeoutMs: 120_000 },
     );
     if (!result.success || !result.data) return null;
     const score = Math.max(0, Math.min(10, result.data.score));
@@ -1352,7 +1431,7 @@ ${JSON.stringify(candidate.data, null, 2)}
 请优化后输出完整的JSON格式方案。`;
 
     try {
-      const res = await chatCompletionJSON<CreativePlan>(systemPrompt, userPrompt, { timeoutMs: 600_000 });
+      const res = await arenaLLMJSON<CreativePlan>(projectId, systemPrompt, userPrompt);
       return res.success && res.data ? res.data : null;
     } catch {
       return null;
@@ -1406,7 +1485,7 @@ export async function runCreativePlanArena(
   const totalWriters = writers.length;
 
   const generationTasks = writers.map(writer => () =>
-    generateSingleCreativePlan(projectId, writer, config).then(plan => {
+    generateSingleCreativePlan(projectId, writer, config, taskId).then(plan => {
       completedCount++;
       const sysAgentName = getGroupSysName(writer.groupId);
       broadcastArenaProgress(taskId,
@@ -1740,6 +1819,7 @@ export async function generateCharacterDesign(
   plan: CreativePlan,
   characterPool: CharacterAgentRow[],
   writer: WriterAgent,
+  taskId?: string,
 ): Promise<{ data: CharacterDesign; characterPoolIds: string[] } | null> {
   const systemPrompt = characterPool.length > 0
     ? buildCharacterDesignPromptWithPool(plan, characterPool, writer)
@@ -1747,30 +1827,30 @@ export async function generateCharacterDesign(
 
   const userPrompt = buildCharacterDesignUserPrompt(plan, characterPool);
 
-  try {
-    const result = await chatCompletionJSON<CharacterDesign>(
-      systemPrompt, userPrompt, { timeoutMs: 600_000 },
-    );
-    if (!result.success || !result.data) return null;
+  return withRetry(async () => {
+    try {
+      const result = await arenaLLMJSON<CharacterDesign>(projectId, systemPrompt, userPrompt);
+      if (!result.success || !result.data) return null;
 
-    const charData = unwrapLLMResult(result.data, false) ?? result.data;
+      const charData = unwrapLLMResult(result.data, false) ?? result.data;
 
-    // 提取使用的群演角色ID
-    const characterPoolIds: string[] = [];
-    if (characterPool.length > 0 && charData.characters) {
-      const poolIdSet = new Set(characterPool.map(a => a.id));
-      for (const char of charData.characters) {
-        const agentId = (char as unknown as Record<string, unknown>).characterAgentId as string | undefined;
-        if (agentId && poolIdSet.has(agentId)) {
-          characterPoolIds.push(agentId);
+      // 提取使用的群演角色ID
+      const characterPoolIds: string[] = [];
+      if (characterPool.length > 0 && charData.characters) {
+        const poolIdSet = new Set(characterPool.map(a => a.id));
+        for (const char of charData.characters) {
+          const agentId = (char as unknown as Record<string, unknown>).characterAgentId as string | undefined;
+          if (agentId && poolIdSet.has(agentId)) {
+            characterPoolIds.push(agentId);
+          }
         }
       }
-    }
 
-    return { data: charData, characterPoolIds };
-  } catch {
-    return null;
-  }
+      return { data: charData, characterPoolIds };
+    } catch {
+      return null;
+    }
+  }, { maxRetries: 2, taskId, label: `角色设计(${writer.groupId})` });
 }
 
 /**
@@ -1810,8 +1890,8 @@ async function matchCharacterPool(
 ${candidateSummary}`;
 
   try {
-    const matchResult = await chatCompletionJSON<{ selectedIds: string[]; reason: string }>(
-      matchSystem, matchUser, { timeoutMs: 120_000 },
+    const matchResult = await arenaLLMJSON<{ selectedIds: string[]; reason: string }>(
+      projectId, matchSystem, matchUser, { timeoutMs: 120_000 },
     );
 
     if (matchResult.success && matchResult.data && matchResult.data.selectedIds && matchResult.data.selectedIds.length >= 5) {
@@ -1924,7 +2004,7 @@ export async function runCharacterArena(
 
     // 3个Agent并发设计角色体系
     const designTasks = assignedWriters.map(writer => () =>
-      generateCharacterDesign(projectId, plan, characterPool, writer).then(result => {
+      generateCharacterDesign(projectId, plan, characterPool, writer, taskId).then(result => {
         completedCount++;
         broadcastArenaProgress(taskId,
           `角色设计: ${sysAgentName}组 Agent${completedCount % agentsPerPlan || agentsPerPlan}/${agentsPerPlan} 完成`,
@@ -2192,41 +2272,39 @@ async function generateSingleDirectory(
   creativePlan: CreativePlan,
   characterDesign: CharacterDesign,
   writer: WriterAgent,
+  taskId?: string,
 ): Promise<EpisodeDirectoryItem[] | null> {
   const systemPrompt = buildDirectorySystemPrompt(writer.systemPrompt, config, creativePlan);
   const userPrompt = buildDirectoryUserPrompt(config, creativePlan, characterDesign);
 
-  try {
-    const result = await chatCompletionJSON<EpisodeDirectoryItem[]>(
-      systemPrompt, userPrompt, { timeoutMs: 600_000 },
-    );
-    if (!result.success || !result.data) return null;
+  return withRetry(async () => {
+    try {
+      const result = await arenaLLMJSON<EpisodeDirectoryItem[]>(projectId, systemPrompt, userPrompt);
+      if (!result.success || !result.data) return null;
 
-    // 统一解包：处理包裹对象、截断单对象等情况
-    let directory = unwrapLLMResult<EpisodeDirectoryItem[]>(
-      result.data, true, isDirectoryItem,
-    );
-    if (!directory) return null;
-
-    // 条目数严重不足时重试一次
-    if (directory.length < config.totalEpisodes * 0.5) {
-      const retry = await chatCompletionJSON<EpisodeDirectoryItem[]>(
-        systemPrompt, userPrompt, { timeoutMs: 600_000 },
+      let directory = unwrapLLMResult<EpisodeDirectoryItem[]>(
+        result.data, true, isDirectoryItem,
       );
-      if (retry.success && retry.data) {
-        const retryDir = unwrapLLMResult<EpisodeDirectoryItem[]>(
-          retry.data, true, isDirectoryItem,
-        );
-        if (retryDir && retryDir.length > directory.length) {
-          directory = retryDir;
+      if (!directory) return null;
+
+      // 条目数严重不足时内部重试一次
+      if (directory.length < config.totalEpisodes * 0.5) {
+        const retry = await arenaLLMJSON<EpisodeDirectoryItem[]>(projectId, systemPrompt, userPrompt);
+        if (retry.success && retry.data) {
+          const retryDir = unwrapLLMResult<EpisodeDirectoryItem[]>(
+            retry.data, true, isDirectoryItem,
+          );
+          if (retryDir && retryDir.length > directory.length) {
+            directory = retryDir;
+          }
         }
       }
-    }
 
-    return directory;
-  } catch {
-    return null;
-  }
+      return directory;
+    } catch {
+      return null;
+    }
+  }, { maxRetries: 2, taskId, label: `分集目录(${writer.groupId})` });
 }
 
 /** 阶段3：分集目录竞争（10×2→5） */
@@ -2287,7 +2365,7 @@ export async function runDirectoryArena(
 
     // 2个Agent并发生成分集目录
     const dirTasks = assignedWriters.map(writer => () =>
-      generateSingleDirectory(projectId, config, creativePlan, characterDesign, writer).then(result => {
+      generateSingleDirectory(projectId, config, creativePlan, characterDesign, writer, taskId).then(result => {
         completedCount++;
         broadcastArenaProgress(taskId,
           `分集目录: ${sysAgentName}组 ${completedCount % agentsPerPlan || agentsPerPlan}/${agentsPerPlan} 完成 (总进度 ${completedCount}/${totalTasks})`,
@@ -2553,7 +2631,7 @@ async function generateSingleEpisode(
   );
 
   try {
-    const result = await chatCompletionJSON<EpisodeScript>(systemPrompt, userPrompt);
+    const result = await arenaLLMJSON<EpisodeScript>(projectId, systemPrompt, userPrompt);
     if (!result.success || !result.data) return null;
 
     const episode = unwrapLLMResult(result.data, false) ?? result.data;
@@ -2575,6 +2653,7 @@ async function generateSingleEpisode(
  * 组长根据自身风格特色和评审意见进行修改
  */
 async function reviseEpisodeAfterReview(
+  projectId: string,
   writer: WriterAgent,
   episode: EpisodeScript,
   reviewComments: string[],
@@ -2604,7 +2683,7 @@ ${reviewComments.map((c, i) => `${i + 1}. ${c}`).join('\n')}
 请根据以上评审意见改写优化这集剧本，保持JSON格式输出。`;
 
   try {
-    const result = await chatCompletionJSON<EpisodeScript>(systemPrompt, userPrompt);
+    const result = await arenaLLMJSON<EpisodeScript>(projectId, systemPrompt, userPrompt);
     if (!result.success || !result.data) return null;
 
     // 确保关键字段不变
@@ -2671,7 +2750,7 @@ async function reviewAndReviseEpisode(
 
     // 打回修改
     const revised = await reviseEpisodeAfterReview(
-      writer, currentEpisode, comments, currentScore,
+      projectId, writer, currentEpisode, comments, currentScore,
     );
 
     if (revised) {
@@ -3013,6 +3092,7 @@ export async function startArenaCreation(
   });
 
   activeSessionIds.set(projectId, sessionId);
+  taskSessionMap.set(taskId, sessionId);
   broadcastArenaProgress(taskId, '竞技初始化: 组建8个骨架Agent创作组(骨架×风格双层融合) + 50个评审Agent');
 
   // 2. 获取项目题材信息，用于Agent题材匹配
@@ -3135,6 +3215,7 @@ export async function startArenaCreation(
   } finally {
     activeSchedulers.delete(projectId);
     activeSessionIds.delete(projectId);
+    taskSessionMap.delete(taskId);
   }
 }
 
@@ -3411,5 +3492,7 @@ export function getArenaCandidates(
       rank: scoreRow?.rank ?? null,
       selected: scoreRow?.selected === 1,
     };
-  }).sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999));
+  })
+  .filter(c => c.score > 0 || c.rank !== null) // 过滤未评分候选
+  .sort((a, b) => (a.rank ?? 999) - (b.rank ?? 999));
 }
