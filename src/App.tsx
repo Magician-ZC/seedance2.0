@@ -18,6 +18,8 @@ import CharacterAgentPanel from './components/CharacterAgentPanel';
 import ArenaPanel from './components/ArenaPanel';
 import SystemAgentPanel from './components/SystemAgentPanel';
 import ExperiencePanel from './components/ExperiencePanel';
+import ProductionHome from './components/production/ProductionHome';
+import ProductionWorkspace from './components/production/ProductionWorkspace';
 import BackgroundIndicator, { type BackgroundStatus } from './components/BackgroundIndicator';
 import './i18n';
 
@@ -49,6 +51,9 @@ export default function App() {
   const [screenplayProjectId, setScreenplayProjectId] = useState<string | null>(null);
   // 工厂：要恢复的项目 ID（从浮动指示器点击传入）
   const [factoryResumeId, setFactoryResumeId] = useState<string | null>(null);
+  // 制片工作台
+  const [productionProjectId, setProductionProjectId] = useState<string | null>(null);
+  const [productionRunningTasks, setProductionRunningTasks] = useState<Array<{ taskId: string; projectId: string; stage: string; progress: string }>>([]);
   // 工厂：后台运行中的项目列表（用于浮动指示器）
   const [factoryRunningProjects, setFactoryRunningProjects] = useState<RunningProject[]>([]);
   // 剧本：后台运行中的项目列表（用于浮动指示器）
@@ -109,14 +114,41 @@ export default function App() {
     return () => clearInterval(timer);
   }, [screenplayMinimized, showScreenplayCreator, fetchScreenplayRunning]);
 
+  // 轮询制片后台任务（不在 workspace 内时也能看到后台进度）
+  const fetchProductionRunning = useCallback(() => {
+    fetch('/api/production/tasks/running').then(r => r.json()).then(data => {
+      if (data?.tasks) {
+        setProductionRunningTasks(data.tasks.map((t: { taskId: string; projectId: string; stage: string; progress: string }) => ({
+          taskId: t.taskId, projectId: t.projectId, stage: t.stage, progress: t.progress,
+        })));
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (productionProjectId) return;
+    fetchProductionRunning();
+    const timer = setInterval(fetchProductionRunning, 6000);
+    return () => clearInterval(timer);
+  }, [productionProjectId, fetchProductionRunning]);
+
   const handleHistorySelect = (_record: HistoryRecord) => {
     setShowVideoGen(true);
   };
 
   return (
     <>
+      {/* 全屏制片工作台 */}
+      {productionProjectId && (
+        <ProductionWorkspace
+          projectId={productionProjectId}
+          sessionId={sessionId}
+          onBack={() => setProductionProjectId(null)}
+        />
+      )}
+
       {/* 全屏项目工作台 */}
-      {activeProjectId && (
+      {activeProjectId && !productionProjectId && (
         <ProjectWorkspace
           projectId={activeProjectId}
           sessionId={sessionId}
@@ -125,7 +157,7 @@ export default function App() {
       )}
 
       {/* 主页布局 */}
-      {!activeProjectId && (
+      {!activeProjectId && !productionProjectId && (
         <div className="h-screen flex overflow-hidden bg-[#0a0a0a] text-white selection:bg-green-500/30 selection:text-green-200">
           <Sidebar activeTab={activeTab} onTabChange={setActiveTab} />
 
@@ -147,6 +179,9 @@ export default function App() {
                 onOpenProject={(projectId: string) => setActiveProjectId(projectId)}
                 onOpenScreenplayProject={(id: string) => { setScreenplayProjectId(id); setShowScreenplayCreator(true); setScreenplayMinimized(false); }}
               />
+            )}
+            {activeTab === 'production' && (
+              <ProductionHome onOpenProject={(id) => setProductionProjectId(id)} />
             )}
             {activeTab === 'materials' && (
               <GlobalMaterialsPanel />
@@ -242,6 +277,16 @@ export default function App() {
                 onClick={() => { setShowAgentFactory(true); setFactoryMinimized(false); }}
               />
             )}
+            {/* 制片：后台运行中的任务浮动指示器 */}
+            {!productionProjectId && productionRunningTasks.map(t => (
+              <BackgroundIndicator
+                key={t.taskId}
+                status={{ step: t.stage, stepLabel: t.progress, loading: true, projectTitle: t.projectId.slice(0, 8) }}
+                icon="🎬"
+                defaultTitle="短剧制片"
+                onClick={() => setProductionProjectId(t.projectId)}
+              />
+            ))}
           </div>
         </div>
       )}

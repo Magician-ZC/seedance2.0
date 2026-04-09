@@ -98,6 +98,26 @@ class WsManager {
       }, 10000);
     }
   }
+
+  broadcastJSON(channel: string, data: unknown): void {
+    const payload = JSON.stringify({ type: 'channel_message', channel, data });
+
+    if (!this.messageBuffer.has(channel)) {
+      this.messageBuffer.set(channel, []);
+    }
+    const buffer = this.messageBuffer.get(channel)!;
+    buffer.push(payload);
+    if (buffer.length > WsManager.MAX_BUFFER_SIZE) {
+      buffer.splice(0, buffer.length - WsManager.MAX_BUFFER_SIZE);
+    }
+
+    const subs = this.subscribers.get(channel);
+    if (subs && subs.size > 0) {
+      for (const ws of subs) {
+        if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      }
+    }
+  }
 }
 
 export const wsManager = new WsManager();

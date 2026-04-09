@@ -44,6 +44,10 @@ import {
 } from './agent-factory.js';
 import arenaRoutes from './arena-routes.js';
 import experienceRoutes from './experience-routes.js';
+import productionRoutes from './production/production-routes.js';
+import { initProductionTables, loadTTSConfig as dbLoadTTSConfig, loadMusicConfig as dbLoadMusicConfig } from './production/db-production.js';
+import { setDoubaoConfig } from './production/tts-service.js';
+import { setSunoConfig } from './production/music-service.js';
 import {
   startArenaCreation, selectCandidate, getArenaStatus, getArenaCandidates,
   resumeArenaEpisodeStage,
@@ -66,6 +70,9 @@ app.use('/api/arena', arenaRoutes);
 
 // 经验管理 API 路由
 app.use('/api/experiences', experienceRoutes);
+
+// 短剧制片 API 路由
+app.use('/api/production', productionRoutes);
 
 // 启动时加载敏感词库
 loadWords();
@@ -2115,6 +2122,23 @@ initDB().then(() => {
   // 从 DB 恢复 NSFW 全局开关
   loadNSFWFromDB();
   if (isNSFWEnabled()) console.log('[llm] NSFW 模式已从数据库恢复: 开启');
+
+  // 初始化制片模块数据表
+  initProductionTables();
+
+  // 从 DB 恢复豆包 TTS 配置
+  const savedTTS = dbLoadTTSConfig('doubao');
+  if (savedTTS) {
+    setDoubaoConfig({ appId: savedTTS.appId, accessToken: savedTTS.accessToken, clusterId: savedTTS.clusterId });
+    console.log('[production] 豆包TTS配置已从DB恢复');
+  }
+
+  // 从 DB 恢复 Suno 音乐配置
+  const savedMusic = dbLoadMusicConfig('suno');
+  if (savedMusic) {
+    setSunoConfig({ apiKey: savedMusic.apiKey, baseUrl: savedMusic.baseUrl || 'https://api.suno.ai/v1' });
+    console.log('[production] Suno音乐配置已从DB恢复');
+  }
 
   // 从 DB 恢复创作工厂项目
   restoreFactories();

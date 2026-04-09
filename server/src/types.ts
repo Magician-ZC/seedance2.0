@@ -32,6 +32,7 @@ export interface GenerateVideoParams {
   files: Express.Multer.File[];
   sessionId: string;
   model: string;
+  preUploadedUris?: string[];
 }
 
 export interface UploadedImage {

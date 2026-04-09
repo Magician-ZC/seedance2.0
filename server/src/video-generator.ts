@@ -56,16 +56,23 @@ export async function generateSeedanceVideo(
 
   console.log(`[${taskId}] ${modelKey}: ${width}x${height} (${params.ratio}) ${actualDuration}秒`);
 
-  // 第1步: 上传图片
+  // 第1步: 上传图片（支持预上传的 URI）
   task.progress = '正在上传参考图片...';
   const uploadedImages: UploadedImage[] = [];
-  for (let i = 0; i < params.files.length; i++) {
-    task.progress = `正在上传第 ${i + 1}/${params.files.length} 张图片...`;
-    console.log(`[${taskId}] 上传图片 ${i + 1}/${params.files.length}: ${params.files[i].originalname} (${(params.files[i].size / 1024).toFixed(1)}KB)`);
-    const imageUri = await uploadImageBuffer(params.files[i].buffer, params.sessionId);
-    uploadedImages.push({ uri: imageUri, width, height });
+  if (params.preUploadedUris?.length) {
+    for (const uri of params.preUploadedUris) {
+      uploadedImages.push({ uri, width, height });
+    }
+    console.log(`[${taskId}] 使用 ${uploadedImages.length} 张预上传参考图`);
+  } else {
+    for (let i = 0; i < params.files.length; i++) {
+      task.progress = `正在上传第 ${i + 1}/${params.files.length} 张图片...`;
+      console.log(`[${taskId}] 上传图片 ${i + 1}/${params.files.length}: ${params.files[i].originalname} (${(params.files[i].size / 1024).toFixed(1)}KB)`);
+      const imageUri = await uploadImageBuffer(params.files[i].buffer, params.sessionId);
+      uploadedImages.push({ uri: imageUri, width, height });
+    }
   }
-  console.log(`[${taskId}] 全部 ${uploadedImages.length} 张图片上传完成`);
+  console.log(`[${taskId}] 全部 ${uploadedImages.length} 张图片就绪`);
 
   // 第2步: 构建 material_list 和 meta_list
   const materialList = uploadedImages.map((img) => ({

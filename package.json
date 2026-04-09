@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -n client,server -c cyan,yellow \"npm run dev:client\" \"npm run dev:server\"",
     "dev:client": "vite",
-    "dev:server": "tsx server/src/index.ts",
+    "dev:server": "tsx watch server/src/index.ts",
     "build": "tsc -p tsconfig.json && vite build",
     "build:server": "tsc -p server/tsconfig.json",
     "preview": "vite preview",

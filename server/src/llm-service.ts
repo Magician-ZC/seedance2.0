@@ -255,6 +255,7 @@ function buildBody(config: LLMConfig, systemPrompt: string, userContent: string,
   // OpenAI / DeepSeek / Ollama / Custom 兼容格式
   return {
     model, temperature, max_tokens: safeMaxTokens,
+    stream: false,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userContent },
@@ -448,7 +449,37 @@ export async function chatCompletion(
       return { success: false, content: '', error: `LLM API 错误 (${response.status}): ${errText}`, duration };
     }
 
-    const data = await response.json() as Record<string, unknown>;
+    const contentType = response.headers.get('content-type') || '';
+    let data: Record<string, unknown>;
+
+    if (contentType.includes('text/event-stream') || contentType.includes('stream')) {
+      const rawText = await response.text();
+      const lines = rawText.split('\n').filter(l => l.startsWith('data: ') && l.trim() !== 'data: [DONE]');
+      const lastDataLine = lines[lines.length - 1];
+      if (!lastDataLine) {
+        const dur = (Date.now() - startTime) / 1000;
+        return { success: false, content: '', error: 'SSE 流式响应为空', duration: dur };
+      }
+      const chunks = lines.map(l => {
+        try { return JSON.parse(l.slice(6)); } catch { return null; }
+      }).filter(Boolean);
+      let assembled = '';
+      for (const chunk of chunks) {
+        const delta = (chunk as Record<string, unknown>)?.choices as Array<{ delta?: { content?: string } }>;
+        if (delta?.[0]?.delta?.content) assembled += delta[0].delta.content;
+      }
+      if (assembled) {
+        data = { choices: [{ message: { content: assembled } }] };
+      } else if (chunks.length > 0) {
+        data = chunks[chunks.length - 1] as Record<string, unknown>;
+      } else {
+        const dur = (Date.now() - startTime) / 1000;
+        return { success: false, content: '', error: 'SSE 流无法解析', duration: dur };
+      }
+    } else {
+      data = await response.json() as Record<string, unknown>;
+    }
+
     const content = parseResponse(config, data);
     const duration = (Date.now() - startTime) / 1000;
     console.log(`[llm] ${config.provider}/${config.model} 调用成功 (${duration.toFixed(1)}s, ${content.length} chars)`);
